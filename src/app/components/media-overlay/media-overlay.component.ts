@@ -2,8 +2,9 @@ import { Component, Input, Output, EventEmitter, OnDestroy, ViewChild, ElementRe
 import { CommonModule } from '@angular/common';
 
 export interface MediaItem {
-  type: 'image' | 'video';
-  url: string;
+  type: 'image' | 'video' | 'stream';
+  url?: string;
+  stream?: MediaStream;
 }
 
 export interface MediaOverlay {
@@ -53,6 +54,17 @@ export interface MediaOverlay {
           [muted]="true"
           (ended)="onVideoEnded()"
           (click)="toggleVideoPlay()"
+        ></video>
+
+        <!-- Live Stream -->
+        <video
+          *ngIf="currentItem?.type === 'stream'"
+          [srcObject]="currentItem?.stream"
+          autoplay
+          muted
+          playsinline
+          class="media-content"
+          [style.pointer-events]="'none'"
         ></video>
       </div>
       

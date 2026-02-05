@@ -37,12 +37,20 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
     @Input() avatarUrl: string = 'https://models.readyplayer.me/6984a7a905b43df7aaeb9df1.glb';
     @Input() backgroundImage: string | null = null;
     @Input() avatarSize: 'small' | 'medium' | 'large' = 'medium';
+    @Input() avatarPosition: 'left' | 'center' | 'right' = 'center';
 
     // Size to scale mapping (uniform scale for the model)
     private sizeScaleMap = {
         small: 0.8,   // Smaller avatar
         medium: 1.0,  // Default size
         large: 1.4    // Larger avatar (fills more of the screen)
+    };
+
+    // Position mapping (X axis offset)
+    private positionXMap = {
+        left: -0.8,
+        center: 0,
+        right: 0.8
     };
 
     private trackService = inject(FaceTrackingService);
@@ -73,29 +81,36 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
         });
     }
 
-    ngOnChanges(changes: SimpleChanges) {
-        if (changes['avatarUrl'] && !changes['avatarUrl'].firstChange && this.isInitialized) {
-            console.log('Avatar URL changed to:', this.avatarUrl);
+    ngOnChanges(changes: SimpleChanges): void {
+        // Handle URL change
+        if (changes['avatarUrl'] && !changes['avatarUrl'].firstChange) {
             this.loadAvatar(this.avatarUrl);
         }
 
-        // Handle size changes
-        if (changes['avatarSize'] && !changes['avatarSize'].firstChange && this.currentModel) {
-            this.updateModelScale();
+        // Handle size or position changes
+        if ((changes['avatarSize'] && !changes['avatarSize'].firstChange) ||
+            (changes['avatarPosition'] && !changes['avatarPosition'].firstChange)) {
+            if (this.currentModel) {
+                this.updateModelTransform();
+            }
         }
     }
 
-    private updateModelScale() {
+    private updateModelTransform() {
         if (this.currentModel) {
+            // Apply scale
             const scale = this.sizeScaleMap[this.avatarSize];
             this.currentModel.scale.set(scale, scale, scale);
 
-            // Adjust Y position based on size to keep avatar in frame
-            // Large size needs lower position to show from chest up
+            // Calculate Y position (Height)
             const baseY = -1.75;
             const yOffset = this.avatarSize === 'large' ? -0.5 :
                 this.avatarSize === 'small' ? 0.2 : 0;
-            this.currentModel.position.setY(baseY + yOffset);
+
+            // Calculate X position (Horizontal)
+            const xOffset = this.positionXMap[this.avatarPosition];
+
+            this.currentModel.position.set(xOffset, baseY + yOffset, 0);
         }
     }
 
