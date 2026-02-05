@@ -22,6 +22,20 @@ interface ImageCollection {
 
 type AvatarSize = 'small' | 'medium' | 'large';
 
+interface SceneConfig {
+  avatarId?: string;
+  avatarSize: AvatarSize;
+  avatarPosition: 'left' | 'center' | 'right';
+  backgroundCollectionId?: string;
+  overlays: MediaOverlay[];
+}
+
+interface Scene {
+  id: string;
+  name: string;
+  config: SceneConfig;
+}
+
 @Component({
   selector: 'app-live',
   standalone: true,
@@ -35,6 +49,7 @@ type AvatarSize = 'small' | 'medium' | 'large';
           [avatarUrl]="currentAvatarUrl" 
           [backgroundImage]="currentBackground"
           [avatarSize]="avatarSize"
+          [avatarPosition]="avatarPosition"
         ></app-avatar-viewer>
         
         <!-- Media Overlays Container -->
@@ -69,6 +84,22 @@ type AvatarSize = 'small' | 'medium' | 'large';
               <app-video-preview></app-video-preview>
             </div>
           </div>
+
+          <!-- Scenes Management -->
+          <div class="section">
+             <div class="section-header">
+               <h4>🎬 Scenes</h4>
+               <button class="add-overlay-btn" (click)="saveCurrentScene()">+ Save</button>
+             </div>
+             
+             <div class="scenes-list" *ngIf="scenes.length > 0">
+               <div class="scene-chip" *ngFor="let scene of scenes" (click)="loadScene(scene)">
+                 <span class="scene-name">{{ scene.name }}</span>
+                 <button class="scene-delete" (click)="deleteScene(scene.id, $event)">×</button>
+               </div>
+             </div>
+             <p class="no-data-msg" *ngIf="scenes.length === 0">Save current layout as a scene.</p>
+          </div>
           
           <!-- Avatar Selection -->
           <div class="section">
@@ -99,6 +130,22 @@ type AvatarSize = 'small' | 'medium' | 'large';
                   (click)="setAvatarSize(size.value)"
                 >
                   {{ size.label }}
+                </button>
+              </div>
+            </div>
+            
+            <!-- Avatar Position Control -->
+            <div class="size-control">
+              <span class="size-label">Pos:</span>
+              <div class="size-buttons">
+                <button 
+                  *ngFor="let pos of positionOptions" 
+                  class="size-btn" 
+                  [class.active]="avatarPosition === pos.value"
+                  (click)="setAvatarPosition(pos.value)"
+                  [title]="pos.value"
+                >
+                  {{ pos.label }}
                 </button>
               </div>
             </div>
@@ -150,14 +197,19 @@ type AvatarSize = 'small' | 'medium' | 'large';
                   <button class="item-remove" (click)="removeOverlay(overlay.id)">🗑️</button>
                 </div>
                 
-                <!-- Assign Collection to Screen -->
-                <div class="item-controls" *ngIf="collections.length > 0">
+                <!-- Assign Collection or Screen -->
+                <div class="item-controls">
+                  <button class="share-screen-btn" (click)="captureScreen(overlay)">
+                    🖥️ Share Window/Screen
+                  </button>
+                  
                   <select 
                     [ngModel]="''" 
                     (ngModelChange)="assignCollectionToOverlay(overlay, $event)"
                     class="collection-select"
+                    *ngIf="collections.length > 0"
                   >
-                    <option value="" disabled selected>Select content...</option>
+                    <option value="" disabled selected>Or select collection...</option>
                     <option *ngFor="let col of collections" [value]="col.id">{{ col.name }}</option>
                   </select>
                 </div>
@@ -514,6 +566,54 @@ type AvatarSize = 'small' | 'medium' | 'large';
       font-weight: bold;
     }
     
+    /* Scenes */
+    .scenes-list {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+      margin-bottom: 0.5rem;
+    }
+    
+    .scene-chip {
+      background: rgba(255, 255, 255, 0.1);
+      border: 1px solid rgba(255, 255, 255, 0.2);
+      border-radius: 4px;
+      padding: 6px 10px;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+    .scene-chip:hover {
+      background: rgba(0, 217, 255, 0.15);
+      border-color: rgba(0, 217, 255, 0.4);
+    }
+    
+    .scene-name {
+      font-size: 0.85rem;
+      color: rgba(255, 255, 255, 0.9);
+    }
+    
+    .scene-delete {
+      background: transparent;
+      border: none;
+      color: rgba(255, 255, 255, 0.4);
+      cursor: pointer;
+      font-size: 1rem;
+      padding: 0 2px;
+      line-height: 1;
+    }
+    .scene-delete:hover {
+      color: #ff4444;
+    }
+    
+    .no-data-msg {
+      font-size: 0.8rem;
+      color: rgba(255, 255, 255, 0.4);
+      font-style: italic;
+    }
+
     /* Assign Collection */
     .assign-collection {
       margin-top: 0.75rem;
@@ -690,6 +790,31 @@ type AvatarSize = 'small' | 'medium' | 'large';
     }
     .item-remove:hover {
       opacity: 1;
+    }
+    .item-controls {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+    }
+    
+    .share-screen-btn {
+      width: 100%;
+      padding: 8px;
+      border-radius: 4px;
+      background: rgba(0, 217, 255, 0.2);
+      border: 1px solid rgba(0, 217, 255, 0.4);
+      color: white;
+      font-size: 0.8rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      transition: all 0.2s;
+    }
+    .share-screen-btn:hover {
+      background: rgba(0, 217, 255, 0.3);
+      transform: translateY(-1px);
     }
     
     .collection-select {
@@ -991,6 +1116,14 @@ export class LiveComponent implements OnInit, OnDestroy {
     { label: 'L', value: 'large' as AvatarSize }
   ];
 
+  positionOptions = [
+    { label: '⬅️', value: 'left' as const },
+    { label: '⏺️', value: 'center' as const },
+    { label: '➡️', value: 'right' as const }
+  ];
+
+  avatarPosition: 'left' | 'center' | 'right' = 'center';
+
   currentAvatar: AvatarOption | null = null;
   currentAvatarUrl = '';
   customUrl = '';
@@ -1037,9 +1170,15 @@ export class LiveComponent implements OnInit, OnDestroy {
   autoIntervalSeconds = 5;
   private autoChangeInterval: ReturnType<typeof setInterval> | null = null;
 
+  // Scenes
+  scenes: Scene[] = [];
+
   ngOnInit() {
     // Load collections first
     this.loadCollectionsFromStorage();
+    // Load scenes
+    this.loadScenesFromStorage();
+
     console.log('Loaded collections:', this.collections.map(c => ({ id: c.id, name: c.name })));
 
     // Then load avatar settings (which reference collections)
@@ -1093,6 +1232,34 @@ export class LiveComponent implements OnInit, OnDestroy {
     }
   }
 
+  async captureScreen(overlay: MediaOverlay) {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({
+        video: true,
+        audio: true
+      });
+
+      const streamItem: MediaItem = {
+        type: 'stream',
+        stream: stream
+      };
+
+      overlay.items = [streamItem];
+      overlay.name = 'Live Capture';
+      overlay.currentIndex = 0;
+      overlay.isPlaying = true;
+
+      this.updateOverlay(overlay);
+
+      stream.getVideoTracks()[0].onended = () => {
+        console.log('Stream ended by user');
+      };
+
+    } catch (err) {
+      console.error('Error starting screen share:', err);
+    }
+  }
+
   togglePanel() {
     this.isPanelOpen = !this.isPanelOpen;
     // Force avatar viewer to resize after panel animation completes
@@ -1128,6 +1295,10 @@ export class LiveComponent implements OnInit, OnDestroy {
 
   setAvatarSize(size: AvatarSize) {
     this.avatarSize = size;
+  }
+
+  setAvatarPosition(pos: 'left' | 'center' | 'right') {
+    this.avatarPosition = pos;
   }
 
   getCollectionName(collectionId: string | undefined): string {
@@ -1335,6 +1506,89 @@ export class LiveComponent implements OnInit, OnDestroy {
       }
     } catch (e) {
       console.warn('Could not load avatar settings:', e);
+    }
+  }
+
+
+  // Scene Management Methods
+  saveCurrentScene() {
+    const sceneName = prompt('Name this scene:', `Scene ${this.scenes.length + 1}`);
+    if (!sceneName) return;
+
+    // Filter out circular references or non-serializable data from overlays
+    const overlaysClone = this.mediaOverlays.map(o => ({
+      ...o,
+      items: o.items.filter(i => i.type !== 'stream'), // Don't save live streams
+      // Ensure position is saved
+      position: o.position
+    }));
+
+    const newScene: Scene = {
+      id: Date.now().toString(),
+      name: sceneName,
+      config: {
+        avatarId: this.currentAvatar?.id,
+        avatarSize: this.avatarSize,
+        avatarPosition: this.avatarPosition,
+        backgroundCollectionId: this.activeCollection?.id,
+        overlays: JSON.parse(JSON.stringify(overlaysClone))
+      }
+    };
+
+    this.scenes.push(newScene);
+    this.saveScenesToStorage();
+  }
+
+  loadScene(scene: Scene) {
+    // 1. Set Avatar
+    if (scene.config.avatarId) {
+      const avatar = this.avatars.find(a => a.id === scene.config.avatarId);
+      if (avatar && avatar !== this.currentAvatar) {
+        this.selectAvatar(avatar);
+      }
+    }
+
+    // 2. Set Size & Position
+    this.setAvatarSize(scene.config.avatarSize);
+    this.setAvatarPosition(scene.config.avatarPosition);
+
+    // 3. Set Background
+    if (scene.config.backgroundCollectionId) {
+      const collection = this.collections.find(c => c.id === scene.config.backgroundCollectionId);
+      if (collection) {
+        this.selectCollection(collection);
+      }
+    } else {
+      this.clearActiveCollection();
+    }
+
+    // 4. Set Overlays
+    this.mediaOverlays = JSON.parse(JSON.stringify(scene.config.overlays));
+
+    // Restore positions logic in free move if needed??? 
+    // Usually position is part of the overlay object so it should be fine.
+  }
+
+  deleteScene(sceneId: string, event: Event) {
+    event.stopPropagation();
+    if (confirm('Delete this scene?')) {
+      this.scenes = this.scenes.filter(s => s.id !== sceneId);
+      this.saveScenesToStorage();
+    }
+  }
+
+  private saveScenesToStorage() {
+    try {
+      localStorage.setItem('scenes', JSON.stringify(this.scenes));
+    } catch (e) { console.error('Error saving scenes', e); }
+  }
+
+  private loadScenesFromStorage() {
+    const saved = localStorage.getItem('scenes');
+    if (saved) {
+      try {
+        this.scenes = JSON.parse(saved);
+      } catch (e) { console.error('Error loading scenes', e); }
     }
   }
 }
