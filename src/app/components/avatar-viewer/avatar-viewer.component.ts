@@ -69,6 +69,9 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
     private nodes: Record<string, THREE.Object3D> = {};
     private currentModel: THREE.Object3D | null = null;
 
+    // Breathing animation
+    private breathingTime: number = 0;
+
 
     ngAfterViewInit() {
         this.initThree();
@@ -224,6 +227,17 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
             });
 
             console.log('Model loaded', this.nodes);
+
+            // DEBUG: Log arm-related bones to find correct names
+            console.log('🦴 Looking for arm bones...');
+            Object.keys(this.nodes).forEach(name => {
+                const lowerName = name.toLowerCase();
+                if (lowerName.includes('arm') || lowerName.includes('shoulder') ||
+                    lowerName.includes('hand') || lowerName.includes('elbow')) {
+                    console.log('  Found bone:', name);
+                }
+            });
+
             this.isLoading = false;
         },
             (xhr: ProgressEvent) => {
@@ -250,14 +264,18 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
     private animate() {
         this.requestID = requestAnimationFrame(this.animate.bind(this));
 
+        // Update breathing time
+        this.breathingTime += 0.02;
+
         // --- Update Avatar Pose ---
         const blendshapes = this.trackService.blendshapes();
         const rotation = this.trackService.rotation();
 
+        // Apply Face Blendshapes
         if (blendshapes.length > 0 && this.headMesh.length > 0) {
             blendshapes.forEach(element => {
                 this.headMesh.forEach(mesh => {
-                    const m = mesh as any; // Cast to access morphTargetDictionary
+                    const m = mesh as any;
                     if (m.morphTargetDictionary && m.morphTargetInfluences) {
                         const index = m.morphTargetDictionary[element.categoryName];
                         if (index !== undefined && index >= 0) {
@@ -268,18 +286,36 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
             });
         }
 
+        // --- Breathing Animation ---
+        const breathCycle = Math.sin(this.breathingTime * 0.5);
+        const breathIntensity = 0.05;
+        const parts = this.nodes;
+
+        // Spine (Breathing)
+        if (parts['Spine']) parts['Spine'].rotation.x = breathCycle * breathIntensity * 0.2;
+        if (parts['Spine1']) parts['Spine1'].rotation.x = breathCycle * breathIntensity * 0.2;
+
+        // Spine2 (Breathing + Face Tracking Lean)
+        if (parts['Spine2']) {
+            const baseRotX = rotation ? rotation.x / 10 : 0;
+            const baseRotY = rotation ? rotation.y / 10 : 0;
+            const baseRotZ = rotation ? rotation.z / 10 : 0;
+            parts['Spine2'].rotation.set(
+                baseRotX + breathCycle * breathIntensity,
+                baseRotY,
+                baseRotZ
+            );
+        }
+
+        // --- Face Tracking Rotations ---
         if (rotation) {
-            const parts = this.nodes;
-            // Rotation factors borrowed from React code
             if (parts['Head']) parts['Head'].rotation.set(rotation.x, rotation.y, rotation.z);
             if (parts['Neck']) parts['Neck'].rotation.set(rotation.x / 5 + 0.3, rotation.y / 5, rotation.z / 5);
-            if (parts['Spine2']) parts['Spine2'].rotation.set(rotation.x / 10, rotation.y / 10, rotation.z / 10);
 
-            // Shoulders, Arms, etc. (Simplifying for now, can add all)
+            // Shoulders (Face tracking influence)
             if (parts['Wolf3D_Shoulder_L']) parts['Wolf3D_Shoulder_L'].rotation.set(rotation.x / 15, rotation.y / 15, rotation.z / 15);
             if (parts['Wolf3D_Shoulder_R']) parts['Wolf3D_Shoulder_R'].rotation.set(rotation.x / 15, rotation.y / 15, rotation.z / 15);
         }
-
         this.renderer.render(this.scene, this.camera);
     }
 }
