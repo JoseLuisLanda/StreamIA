@@ -701,12 +701,7 @@ type AvatarSize = 'small' | 'medium' | 'large';
       color: white;
       font-size: 0.8rem;
     }
-      color: black;
-      font-weight: bold;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: all 0.2s;
-    }
+
     .upload-btn.disabled {
       background: rgba(255, 255, 255, 0.1);
       color: rgba(255, 255, 255, 0.4);
@@ -833,6 +828,8 @@ type AvatarSize = 'small' | 'medium' | 'large';
     .nav-indicator {
       color: white;
       font-size: 0.9rem;
+      min-width: 50px;
+      text-align: center;
     }
     
     .icon-btn {
@@ -860,9 +857,6 @@ type AvatarSize = 'small' | 'medium' | 'large';
     .header-controls {
       display: flex;
       gap: 0.5rem;
-    }
-      min-width: 50px;
-      text-align: center;
     }
     
     /* Carousel Settings */
