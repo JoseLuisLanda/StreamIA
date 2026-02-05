@@ -2,7 +2,7 @@ import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, OnChanges, 
 import { CommonModule } from '@angular/common';
 import * as THREE from 'three';
 // @ts-ignore
-import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FaceTrackingService } from '../../services/face-tracking.service';
 
 @Component({
