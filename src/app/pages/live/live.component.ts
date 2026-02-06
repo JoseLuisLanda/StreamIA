@@ -1,1100 +1,49 @@
-import { Component, OnDestroy, OnInit, ViewChild } from '@angular/core';
+import { Component, OnDestroy, OnInit, ViewChild, inject, ChangeDetectorRef, NgZone } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
+
+// Core Components
 import { AvatarViewerComponent } from '../../components/avatar-viewer/avatar-viewer.component';
 import { VideoPreviewComponent } from '../../components/video-preview/video-preview.component';
 import { MediaOverlayComponent, MediaOverlay, MediaItem } from '../../components/media-overlay/media-overlay.component';
 
-interface AvatarOption {
-  id: string;
-  name: string;
-  url: string;
-  thumbnail: string;
-  defaultCollectionId?: string;
-}
+// Subcomponents
+import { SceneManagerComponent } from './components/scene-manager.component';
+import { AvatarSelectorComponent } from './components/avatar-selector.component';
+import { MediaOverlayManagerComponent } from './components/media-overlay-manager.component';
+import { BackgroundManagerComponent } from './components/background-manager.component';
 
-interface ImageCollection {
-  id: string;
-  name: string;
-  images: string[];
-}
-
-type AvatarSize = 'small' | 'medium' | 'large';
-
-interface SceneConfig {
-  avatarId?: string;
-  avatarSize: AvatarSize;
-  avatarPosition: 'left' | 'center' | 'right';
-  backgroundCollectionId?: string;
-  overlays: MediaOverlay[];
-}
-
-interface Scene {
-  id: string;
-  name: string;
-  config: SceneConfig;
-}
+// Models & Services
+import { AvatarOption, ImageCollection, AvatarSize, Scene } from './live.models';
+import { LiveStorageService } from './live-storage.service';
 
 @Component({
   selector: 'app-live',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterLink, AvatarViewerComponent, VideoPreviewComponent, MediaOverlayComponent],
-  template: `
-    <div class="app-container">
-      <!-- Avatar Container - adjusts based on panel state -->
-      <div class="avatar-wrapper" [class.panel-open]="isPanelOpen">
-        <app-avatar-viewer 
-          #avatarViewer
-          [avatarUrl]="currentAvatarUrl" 
-          [backgroundImage]="currentBackground"
-          [avatarSize]="avatarSize"
-          [avatarPosition]="avatarPosition"
-        ></app-avatar-viewer>
-        
-        <!-- Media Overlays Container -->
-        <div class="overlays-container" [class.free-move]="isFreeMoveMode" *ngIf="mediaOverlays.length > 0">
-          <app-media-overlay
-            *ngFor="let overlay of mediaOverlays"
-            [overlay]="overlay"
-            [width]="overlayWidth"
-            [height]="overlayHeight"
-            [draggable]="isFreeMoveMode"
-            (onRemove)="removeOverlay($event)"
-            (onUpdate)="updateOverlay($event)"
-            (onPositionChange)="updateOverlay($event)"
-          ></app-media-overlay>
-        </div>
-      </div>
-      
-      <!-- Slide Panel Toggle Button -->
-      <button class="panel-toggle" (click)="togglePanel()" [class.panel-open]="isPanelOpen">
-        <span class="toggle-icon">{{ isPanelOpen ? '◀' : '▶' }}</span>
-      </button>
-      
-      <!-- Sliding Side Panel -->
-      <div class="side-panel" [class.open]="isPanelOpen">
-        <div class="panel-content">
-          <h3>Controls</h3>
-          
-          <!-- Camera Preview -->
-          <div class="section">
-            <h4>📹 Camera</h4>
-            <div class="camera-container">
-              <app-video-preview></app-video-preview>
-            </div>
-          </div>
-
-          <!-- Scenes Management -->
-          <div class="section">
-             <div class="section-header">
-               <h4>🎬 Scenes</h4>
-               <button class="add-overlay-btn" (click)="saveCurrentScene()">+ Save</button>
-             </div>
-             
-             <div class="scenes-list" *ngIf="scenes.length > 0">
-               <div class="scene-chip" *ngFor="let scene of scenes" (click)="loadScene(scene)">
-                 <span class="scene-name">{{ scene.name }}</span>
-                 <button class="scene-delete" (click)="deleteScene(scene.id, $event)">×</button>
-               </div>
-             </div>
-             <p class="no-data-msg" *ngIf="scenes.length === 0">Save current layout as a scene.</p>
-          </div>
-          
-          <!-- Avatar Selection -->
-          <div class="section">
-            <h4>🎭 Select Avatar</h4>
-            <div class="avatar-grid">
-              <div 
-                *ngFor="let avatar of avatars" 
-                class="avatar-card" 
-                [class.selected]="currentAvatar?.id === avatar.id"
-                (click)="selectAvatar(avatar)"
-              >
-                <img [src]="avatar.thumbnail" [alt]="avatar.name" class="avatar-thumb" />
-                <span class="avatar-name">{{ avatar.name }}</span>
-                <span class="avatar-collection-badge" *ngIf="getCollectionName(avatar.defaultCollectionId)">
-                  📁 {{ getCollectionName(avatar.defaultCollectionId) }}
-                </span>
-              </div>
-            </div>
-            
-            <!-- Avatar Size Control -->
-            <div class="size-control">
-              <span class="size-label">Size:</span>
-              <div class="size-buttons">
-                <button 
-                  *ngFor="let size of sizeOptions" 
-                  class="size-btn" 
-                  [class.active]="avatarSize === size.value"
-                  (click)="setAvatarSize(size.value)"
-                >
-                  {{ size.label }}
-                </button>
-              </div>
-            </div>
-            
-            <!-- Avatar Position Control -->
-            <div class="size-control">
-              <span class="size-label">Pos:</span>
-              <div class="size-buttons">
-                <button 
-                  *ngFor="let pos of positionOptions" 
-                  class="size-btn" 
-                  [class.active]="avatarPosition === pos.value"
-                  (click)="setAvatarPosition(pos.value)"
-                  [title]="pos.value"
-                >
-                  {{ pos.label }}
-                </button>
-              </div>
-            </div>
-            
-            <!-- Assign Collection to Current Avatar -->
-            <div class="assign-collection" *ngIf="currentAvatar && collections.length > 0">
-              <label>Default Collection:</label>
-              <select [(ngModel)]="currentAvatar.defaultCollectionId" (ngModelChange)="onAvatarCollectionChange()">
-                <option [ngValue]="undefined">None</option>
-                <option *ngFor="let col of collections" [value]="col.id">{{ col.name }}</option>
-              </select>
-            </div>
-          </div>
-
-          <!-- Media Overlays Management -->
-          <div class="section">
-            <div class="section-header">
-              <h4>📺 Media Screens</h4>
-              <div class="header-controls">
-                <button 
-                  class="icon-btn" 
-                  [class.active]="isFreeMoveMode" 
-                  (click)="toggleFreeMoveMode()"
-                  title="Toggle Free Move Mode"
-                >
-                  ✋
-                </button>
-                <button class="add-overlay-btn" (click)="addOverlay()">+ Add</button>
-              </div>
-            </div>
-            
-            <!-- Global Overlay Settings -->
-            <div class="overlay-settings" *ngIf="mediaOverlays.length > 0">
-              <div class="setting-row">
-                <label>Width:</label>
-                <input type="range" [(ngModel)]="overlayWidth" min="150" max="800" step="10">
-              </div>
-               <div class="setting-row">
-                <label>Height:</label>
-                <input type="range" [(ngModel)]="overlayHeight" min="100" max="600" step="10">
-              </div>
-            </div>
-
-            <!-- List of Overlays -->
-            <div class="overlays-list" *ngIf="mediaOverlays.length > 0">
-              <div class="item-card" *ngFor="let overlay of mediaOverlays">
-                <div class="item-header">
-                  <span class="item-name">{{ overlay.name }}</span>
-                  <button class="item-remove" (click)="removeOverlay(overlay.id)">🗑️</button>
-                </div>
-                
-                <!-- Assign Collection or Screen -->
-                <div class="item-controls">
-                  <button class="share-screen-btn" (click)="captureScreen(overlay)">
-                    🖥️ Share Window/Screen
-                  </button>
-                  
-                  <select 
-                    [ngModel]="''" 
-                    (ngModelChange)="assignCollectionToOverlay(overlay, $event)"
-                    class="collection-select"
-                    *ngIf="collections.length > 0"
-                  >
-                    <option value="" disabled selected>Or select collection...</option>
-                    <option *ngFor="let col of collections" [value]="col.id">{{ col.name }}</option>
-                  </select>
-                </div>
-              </div>
-            </div>
-          </div>
-          
-          <!-- Custom Avatar URL Section -->
-          <div class="section">
-            <h4>🔗 Custom Avatar</h4>
-            <div class="url-input-group">
-              <input 
-                type="text" 
-                [(ngModel)]="customUrl" 
-                placeholder="Paste Ready Player Me URL"
-                class="url-input"
-              />
-              <button (click)="loadCustomAvatar()" class="load-btn">Load</button>
-            </div>
-          </div>
-          
-          <!-- Background Collections Section -->
-          <div class="section">
-            <h4>🖼️ Background Collections</h4>
-            
-            <!-- Create New Collection -->
-            <div class="new-collection">
-              <input 
-                type="text" 
-                [(ngModel)]="newCollectionName" 
-                placeholder="Collection name *"
-                class="collection-name-input"
-                [class.required]="!newCollectionName.trim()"
-              />
-              <input 
-                type="file" 
-                #fileInput 
-                (change)="onFilesSelected($event)" 
-                accept="image/*" 
-                multiple 
-                style="display: none"
-              />
-              <button 
-                class="upload-btn" 
-                [class.disabled]="!newCollectionName.trim()"
-                [disabled]="!newCollectionName.trim()"
-                (click)="fileInput.click()"
-              >
-                + Add
-              </button>
-            </div>
-            
-            <!-- Collections List -->
-            <div class="collections-list" *ngIf="collections.length > 0">
-              <div 
-                *ngFor="let collection of collections" 
-                class="collection-item"
-                [class.active]="activeCollection?.id === collection.id"
-              >
-                <div class="collection-header" (click)="selectCollection(collection)">
-                  <div class="collection-preview">
-                    <img *ngIf="collection.images[0]" [src]="collection.images[0]" alt="Preview" />
-                  </div>
-                  <div class="collection-info">
-                    <span class="collection-name">{{ collection.name }}</span>
-                    <span class="collection-count">{{ collection.images.length }} images</span>
-                  </div>
-                  <button class="delete-collection" (click)="deleteCollection(collection, $event)">🗑️</button>
-                </div>
-              </div>
-            </div>
-            
-            <!-- No Collections Message -->
-            <div class="no-collections" *ngIf="collections.length === 0">
-              <p>No collections yet. Create one above!</p>
-            </div>
-            
-            <!-- Carousel Controls (moved here) -->
-            <div class="carousel-controls-panel" *ngIf="activeCollection && activeCollection.images.length > 1">
-              <div class="carousel-nav">
-                <button class="nav-btn" (click)="prevBackground()">◀</button>
-                <span class="nav-indicator">{{ currentBackgroundIndex + 1 }} / {{ activeCollection.images.length }}</span>
-                <button class="nav-btn" (click)="nextBackground()">▶</button>
-              </div>
-            </div>
-            
-            <!-- Carousel Settings -->
-            <div class="carousel-settings" *ngIf="activeCollection && activeCollection.images.length > 1">
-              <div class="settings-header">
-                <span>🎠 Carousel Settings</span>
-              </div>
-              <div class="mode-toggle">
-                <label class="radio-label">
-                  <input type="radio" name="carouselMode" value="manual" [(ngModel)]="carouselMode" (ngModelChange)="onModeChange()" />
-                  <span>Manual</span>
-                </label>
-                <label class="radio-label">
-                  <input type="radio" name="carouselMode" value="auto" [(ngModel)]="carouselMode" (ngModelChange)="onModeChange()" />
-                  <span>Auto Loop</span>
-                </label>
-              </div>
-              
-              <!-- Auto Settings -->
-              <div class="auto-settings" *ngIf="carouselMode === 'auto'">
-                <label>Interval:</label>
-                <input 
-                  type="number" 
-                  [(ngModel)]="autoIntervalSeconds" 
-                  min="1" 
-                  max="60"
-                  class="interval-input"
-                  (ngModelChange)="onIntervalChange()"
-                />
-                <span>sec</span>
-                <span class="auto-status">
-                  <span class="pulse"></span> Running
-                </span>
-              </div>
-            </div>
-            
-            <!-- Clear Active -->
-            <button class="clear-btn" *ngIf="activeCollection" (click)="clearActiveCollection()">
-              Deselect Collection
-            </button>
-          </div>
-          
-          <!-- Back Button -->
-          <a routerLink="/" class="back-btn">← Back to Home</a>
-        </div>
-      </div>
-    </div>
-  `,
-  styles: [`
-    .app-container {
-      position: fixed;
-      top: 0;
-      left: 0;
-      width: 100vw;
-      height: 100vh;
-      overflow: hidden;
-      background: #111;
-    }
-    
-    /* Avatar Wrapper - adjusts when panel opens */
-    .avatar-wrapper {
-      position: absolute;
-      top: 0;
-      left: 0;
-      width: 100%;
-      height: 100%;
-      overflow: hidden;
-      transition: left 0.3s ease, width 0.3s ease;
-    }
-    .avatar-wrapper.panel-open {
-      left: 320px;
-      width: calc(100% - 320px);
-    }
-    
-    .overlays-container {
-      position: absolute;
-      top: 20px;
-      left: 0;
-      right: 0;
-      display: flex;
-      justify-content: center;
-      gap: 20px;
-      z-index: 100;
-      pointer-events: none; /* Allow clicking through empty spaces */
-    }
-    .overlays-container > * {
-      pointer-events: auto; /* Re-enable pointer events for overlays */
-    }
-    
-    /* Panel Toggle Button */
-    .panel-toggle {
-      position: fixed;
-      left: 0;
-      top: 50%;
-      transform: translateY(-50%);
-      z-index: 2000;
-      width: 30px;
-      height: 60px;
-      background: rgba(0, 0, 0, 0.7);
-      border: none;
-      border-radius: 0 8px 8px 0;
-      color: white;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all 0.3s ease;
-      backdrop-filter: blur(10px);
-    }
-    .panel-toggle:hover {
-      background: rgba(0, 0, 0, 0.9);
-      width: 35px;
-    }
-    .panel-toggle.panel-open {
-      left: 320px;
-    }
-    .toggle-icon {
-      font-size: 14px;
-    }
-    
-    /* Side Panel */
-    .side-panel {
-      position: fixed;
-      left: -320px;
-      top: 0;
-      width: 320px;
-      height: 100vh;
-      background: linear-gradient(180deg, rgba(20, 20, 30, 0.98) 0%, rgba(10, 10, 20, 1) 100%);
-      backdrop-filter: blur(20px);
-      z-index: 1500;
-      transition: left 0.3s ease;
-      overflow-y: auto;
-      overflow-x: hidden;
-      border-right: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    .side-panel.open {
-      left: 0;
-    }
-    
-    .panel-content {
-      padding: 1.5rem;
-      display: flex;
-      flex-direction: column;
-      gap: 1.5rem;
-    }
-    
-    .panel-content h3 {
-      margin: 0;
-      color: white;
-      font-family: 'Segoe UI', sans-serif;
-      font-size: 1.5rem;
-      font-weight: 600;
-      padding-bottom: 0.5rem;
-      border-bottom: 2px solid rgba(0, 217, 255, 0.5);
-    }
-    
-    .section {
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 12px;
-      padding: 1rem;
-    }
-    
-    .section h4 {
-      margin: 0 0 0.75rem 0;
-      color: rgba(255, 255, 255, 0.9);
-      font-family: 'Segoe UI', sans-serif;
-      font-size: 0.95rem;
-      font-weight: 500;
-    }
-    
-    /* Camera Section */
-    .camera-container {
-      position: relative;
-      width: 100%;
-      height: 160px;
-      border-radius: 8px;
-      overflow: hidden;
-      background: #000;
-    }
-    
-    /* Avatar Grid */
-    .avatar-grid {
-      display: grid;
-      grid-template-columns: repeat(2, 1fr);
-      gap: 0.75rem;
-    }
-    
-    .avatar-card {
-      display: flex;
-      flex-direction: column;
-      align-items: center;
-      padding: 0.75rem;
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 10px;
-      cursor: pointer;
-      transition: all 0.2s;
-      border: 2px solid transparent;
-    }
-    .avatar-card:hover {
-      background: rgba(255, 255, 255, 0.1);
-      transform: scale(1.02);
-    }
-    .avatar-card.selected {
-      border-color: #00d9ff;
-      background: rgba(0, 217, 255, 0.1);
-    }
-    
-    .avatar-thumb {
-      width: 80px;
-      height: 80px;
-      border-radius: 50%;
-      object-fit: cover;
-      background: rgba(0, 0, 0, 0.3);
-    }
-    
-    .avatar-name {
-      margin-top: 0.5rem;
-      color: white;
-      font-size: 0.85rem;
-      font-family: 'Segoe UI', sans-serif;
-      text-align: center;
-    }
-    
-    .avatar-collection-badge {
-      margin-top: 0.25rem;
-      font-size: 0.7rem;
-      color: rgba(0, 255, 136, 0.8);
-      background: rgba(0, 255, 136, 0.1);
-      padding: 2px 6px;
-      border-radius: 4px;
-    }
-    
-    /* Size Control */
-    .size-control {
-      margin-top: 0.75rem;
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-    }
-    
-    .size-label {
-      color: rgba(255, 255, 255, 0.7);
-      font-size: 0.85rem;
-    }
-    
-    .size-buttons {
-      display: flex;
-      gap: 0.25rem;
-      flex: 1;
-    }
-    
-    .size-btn {
-      flex: 1;
-      padding: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      background: rgba(0, 0, 0, 0.3);
-      color: white;
-      border-radius: 6px;
-      cursor: pointer;
-      font-size: 0.75rem;
-      transition: all 0.2s;
-    }
-    .size-btn:hover {
-      background: rgba(255, 255, 255, 0.1);
-    }
-    .size-btn.active {
-      background: linear-gradient(135deg, #00d9ff, #00ff88);
-      color: black;
-      border-color: transparent;
-      font-weight: bold;
-    }
-    
-    /* Scenes */
-    .scenes-list {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-      margin-bottom: 0.5rem;
-    }
-    
-    .scene-chip {
-      background: rgba(255, 255, 255, 0.1);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      border-radius: 4px;
-      padding: 6px 10px;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .scene-chip:hover {
-      background: rgba(0, 217, 255, 0.15);
-      border-color: rgba(0, 217, 255, 0.4);
-    }
-    
-    .scene-name {
-      font-size: 0.85rem;
-      color: rgba(255, 255, 255, 0.9);
-    }
-    
-    .scene-delete {
-      background: transparent;
-      border: none;
-      color: rgba(255, 255, 255, 0.4);
-      cursor: pointer;
-      font-size: 1rem;
-      padding: 0 2px;
-      line-height: 1;
-    }
-    .scene-delete:hover {
-      color: #ff4444;
-    }
-    
-    .no-data-msg {
-      font-size: 0.8rem;
-      color: rgba(255, 255, 255, 0.4);
-      font-style: italic;
-    }
-
-    /* Assign Collection */
-    .assign-collection {
-      margin-top: 0.75rem;
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-    
-    .assign-collection label {
-      color: rgba(255, 255, 255, 0.7);
-      font-size: 0.8rem;
-      white-space: nowrap;
-    }
-    
-    .assign-collection select {
-      flex: 1;
-      padding: 8px;
-      border-radius: 6px;
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      background: rgba(0, 0, 0, 0.4);
-      color: white;
-      font-size: 0.85rem;
-      cursor: pointer;
-    }
-    .assign-collection select option {
-      background: #1a1a2e;
-    }
-    
-    /* URL Input */
-    .url-input-group {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-    }
-    
-    .url-input {
-      width: 100%;
-      padding: 12px;
-      border-radius: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      background: rgba(0, 0, 0, 0.4);
-      color: white;
-      font-size: 12px;
-      outline: none;
-      box-sizing: border-box;
-    }
-    .url-input::placeholder {
-      color: rgba(255, 255, 255, 0.4);
-    }
-    .url-input:focus {
-      border-color: #00d9ff;
-      box-shadow: 0 0 10px rgba(0, 217, 255, 0.2);
-    }
-    
-    .load-btn {
-      width: 100%;
-      padding: 12px;
-      border-radius: 8px;
-      border: none;
-      background: linear-gradient(135deg, #00d9ff, #00ff88);
-      color: black;
-      font-weight: bold;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .load-btn:hover {
-      transform: scale(1.02);
-      box-shadow: 0 4px 15px rgba(0, 217, 255, 0.3);
-    }
-    
-    /* New Collection */
-    .new-collection {
-      display: flex;
-      gap: 0.5rem;
-      margin-bottom: 0.75rem;
-    }
-    
-    .collection-name-input {
-      flex: 1;
-      padding: 10px;
-      border-radius: 8px;
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      background: rgba(0, 0, 0, 0.4);
-      color: white;
-      font-size: 12px;
-      outline: none;
-    }
-    .collection-name-input::placeholder {
-      color: rgba(255, 255, 255, 0.4);
-    }
-    
-    .upload-btn {
-      padding: 10px 16px;
-      border-radius: 8px;
-      border: none;
-      background: linear-gradient(135deg, #00d9ff, #00ff88);
-    }
-
-    /* Media Overlays Controls */
-    .section-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 0.75rem;
-    }
-    
-    .add-overlay-btn {
-      padding: 4px 8px;
-      border-radius: 4px;
-      border: 1px solid rgba(0, 217, 255, 0.5);
-      background: rgba(0, 217, 255, 0.1);
-      color: #00d9ff;
-      font-size: 0.75rem;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .add-overlay-btn:hover {
-      background: rgba(0, 217, 255, 0.2);
-    }
-    
-    .overlay-settings {
-      margin-bottom: 1rem;
-      padding: 0.75rem;
-      background: rgba(0, 0, 0, 0.3);
-      border-radius: 8px;
-    }
-    
-    .setting-row {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      margin-bottom: 0.5rem;
-    }
-    .setting-row:last-child {
-      margin-bottom: 0;
-    }
-    
-    .setting-row label {
-      width: 50px;
-      color: rgba(255, 255, 255, 0.7);
-      font-size: 0.8rem;
-    }
-    
-    .setting-row input[type="range"] {
-      flex: 1;
-      accent-color: #00d9ff;
-    }
-    
-    .item-card {
-      background: rgba(255, 255, 255, 0.05);
-      border-radius: 6px;
-      padding: 0.5rem;
-      margin-bottom: 0.5rem;
-    }
-    
-    .item-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 0.5rem;
-    }
-    
-    .item-name {
-      color: white;
-      font-size: 0.85rem;
-      font-weight: 500;
-    }
-    
-    .item-remove {
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      opacity: 0.6;
-    }
-    .item-remove:hover {
-      opacity: 1;
-    }
-    .item-controls {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-    }
-    
-    .share-screen-btn {
-      width: 100%;
-      padding: 8px;
-      border-radius: 4px;
-      background: rgba(0, 217, 255, 0.2);
-      border: 1px solid rgba(0, 217, 255, 0.4);
-      color: white;
-      font-size: 0.8rem;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 6px;
-      transition: all 0.2s;
-    }
-    .share-screen-btn:hover {
-      background: rgba(0, 217, 255, 0.3);
-      transform: translateY(-1px);
-    }
-    
-    .collection-select {
-      width: 100%;
-      padding: 6px;
-      border-radius: 4px;
-      background: rgba(0, 0, 0, 0.3);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      color: white;
-      font-size: 0.8rem;
-    }
-
-    .upload-btn.disabled {
-      background: rgba(255, 255, 255, 0.1);
-      color: rgba(255, 255, 255, 0.4);
-      cursor: not-allowed;
-    }
-    
-    .collection-name-input.required {
-      border-color: rgba(255, 100, 100, 0.5);
-    }
-    .collection-name-input:focus {
-      border-color: #00d9ff;
-    }
-    
-    /* Collections List */
-    .collections-list {
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-      max-height: 180px;
-      overflow-y: auto;
-    }
-    
-    .collection-item {
-      background: rgba(0, 0, 0, 0.3);
-      border-radius: 8px;
-      border: 2px solid transparent;
-      transition: all 0.2s;
-    }
-    .collection-item.active {
-      border-color: #00ff88;
-      background: rgba(0, 255, 136, 0.1);
-    }
-    
-    .collection-header {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding: 0.75rem;
-      cursor: pointer;
-    }
-    .collection-header:hover {
-      background: rgba(255, 255, 255, 0.05);
-    }
-    
-    .collection-preview {
-      width: 50px;
-      height: 35px;
-      border-radius: 4px;
-      overflow: hidden;
-      background: rgba(0, 0, 0, 0.5);
-    }
-    .collection-preview img {
-      width: 100%;
-      height: 100%;
-      object-fit: cover;
-    }
-    
-    .collection-info {
-      flex: 1;
-      display: flex;
-      flex-direction: column;
-    }
-    .collection-name {
-      color: white;
-      font-size: 0.9rem;
-      font-weight: 500;
-    }
-    .collection-count {
-      color: rgba(255, 255, 255, 0.5);
-      font-size: 0.75rem;
-    }
-    
-    .delete-collection {
-      padding: 4px 8px;
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      opacity: 0.5;
-      transition: opacity 0.2s;
-    }
-    .delete-collection:hover {
-      opacity: 1;
-    }
-    
-    .no-collections {
-      text-align: center;
-      padding: 1rem;
-      color: rgba(255, 255, 255, 0.4);
-      font-size: 0.85rem;
-    }
-    
-    /* Carousel Controls in Panel */
-    .carousel-controls-panel {
-      margin-top: 0.75rem;
-      padding: 0.75rem;
-      background: rgba(0, 217, 255, 0.1);
-      border-radius: 8px;
-      border: 1px solid rgba(0, 217, 255, 0.3);
-    }
-    
-    .carousel-nav {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 1rem;
-    }
-    
-    .nav-btn {
-      width: 36px;
-      height: 36px;
-      border-radius: 50%;
-      border: none;
-      background: rgba(0, 217, 255, 0.3);
-      color: white;
-      cursor: pointer;
-      font-size: 14px;
-      transition: all 0.2s;
-    }
-    .nav-btn:hover {
-      background: rgba(0, 217, 255, 0.5);
-      transform: scale(1.1);
-    }
-    
-    .nav-indicator {
-      color: white;
-      font-size: 0.9rem;
-      min-width: 50px;
-      text-align: center;
-    }
-    
-    .icon-btn {
-      width: 28px;
-      height: 28px;
-      border-radius: 4px;
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      background: rgba(255, 255, 255, 0.1);
-      color: white;
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all 0.2s;
-    }
-    .icon-btn.active {
-      background: rgba(0, 217, 255, 0.3);
-      border-color: #00d9ff;
-      color: #00d9ff;
-    }
-    .icon-btn:hover {
-      background: rgba(255, 255, 255, 0.2);
-    }
-    
-    .header-controls {
-      display: flex;
-      gap: 0.5rem;
-    }
-    
-    /* Carousel Settings */
-    .carousel-settings {
-      margin-top: 0.5rem;
-      padding: 0.75rem;
-      background: rgba(0, 0, 0, 0.2);
-      border-radius: 8px;
-    }
-    
-    .settings-header {
-      color: rgba(255, 255, 255, 0.7);
-      font-size: 0.85rem;
-      margin-bottom: 0.5rem;
-    }
-    
-    .mode-toggle {
-      display: flex;
-      gap: 1rem;
-      margin-bottom: 0.5rem;
-    }
-    
-    .radio-label {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: white;
-      font-size: 0.85rem;
-      cursor: pointer;
-    }
-    .radio-label input[type="radio"] {
-      accent-color: #00d9ff;
-    }
-    
-    .auto-settings {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      flex-wrap: wrap;
-    }
-    .auto-settings label, .auto-settings span {
-      color: rgba(255, 255, 255, 0.7);
-      font-size: 0.8rem;
-    }
-    
-    .auto-status {
-      display: flex;
-      align-items: center;
-      gap: 0.25rem;
-      color: #00ff88 !important;
-      margin-left: auto;
-    }
-    
-    .pulse {
-      width: 8px;
-      height: 8px;
-      background: #00ff88;
-      border-radius: 50%;
-      animation: pulse 1s ease-in-out infinite;
-    }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; transform: scale(1); }
-      50% { opacity: 0.5; transform: scale(1.2); }
-    }
-    
-    .interval-input {
-      width: 50px;
-      padding: 6px;
-      border-radius: 6px;
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      background: rgba(0, 0, 0, 0.4);
-      color: white;
-      font-size: 0.85rem;
-      text-align: center;
-    }
-    
-    .clear-btn {
-      width: 100%;
-      padding: 8px;
-      border-radius: 6px;
-      border: none;
-      background: rgba(255, 255, 255, 0.1);
-      color: rgba(255, 255, 255, 0.7);
-      font-size: 0.85rem;
-      cursor: pointer;
-      transition: all 0.2s;
-      margin-top: 0.75rem;
-    }
-    .clear-btn:hover {
-      background: rgba(255, 255, 255, 0.2);
-    }
-    
-    /* Back Button */
-    .back-btn {
-      display: block;
-      text-align: center;
-      padding: 12px;
-      border-radius: 8px;
-      background: rgba(255, 255, 255, 0.1);
-      color: white;
-      text-decoration: none;
-      font-family: 'Segoe UI', sans-serif;
-      font-weight: 500;
-      transition: all 0.2s;
-    }
-    .back-btn:hover {
-      background: rgba(255, 255, 255, 0.2);
-    }
-  `]
+  imports: [
+    CommonModule,
+    FormsModule,
+    RouterLink,
+    AvatarViewerComponent,
+    VideoPreviewComponent,
+    MediaOverlayComponent,
+    SceneManagerComponent,
+    AvatarSelectorComponent,
+    MediaOverlayManagerComponent,
+    BackgroundManagerComponent
+  ],
+  templateUrl: './live.component.html',
+  styleUrls: ['./live.component.css']
 })
 export class LiveComponent implements OnInit, OnDestroy {
   @ViewChild('avatarViewer') avatarViewer!: AvatarViewerComponent;
 
+  private storageService = inject(LiveStorageService);
+  private cdr = inject(ChangeDetectorRef);
+  private ngZone = inject(NgZone);
+
+  // Constants / Config
   avatars: AvatarOption[] = [
     {
       id: 'avatar1',
@@ -1122,70 +71,51 @@ export class LiveComponent implements OnInit, OnDestroy {
     { label: '➡️', value: 'right' as const }
   ];
 
+  // State
   avatarPosition: 'left' | 'center' | 'right' = 'center';
-
   currentAvatar: AvatarOption | null = null;
-  currentAvatarUrl = '';
-  customUrl = '';
+  currentAvatarUrl = this.avatars[0]?.url || '';
   isPanelOpen = false;
   avatarSize: AvatarSize = 'medium';
 
-  // Collections
   collections: ImageCollection[] = [];
   activeCollection: ImageCollection | null = null;
-  newCollectionName = '';
 
-  // Media Overlays
   mediaOverlays: MediaOverlay[] = [];
-  overlayWidth = 320;
-  overlayHeight = 180;
+  selectedOverlayId: string | null = null; // Track selected overlay for individual sizing
   isFreeMoveMode = false;
 
-  toggleFreeMoveMode() {
-    this.isFreeMoveMode = !this.isFreeMoveMode;
-
-    if (this.isFreeMoveMode) {
-      // Logic to initialize positions if needed when switching to free move
-      // e.g. distribute them so they don't stack on top of each other
-      if (this.mediaOverlays.length > 0) {
-        this.mediaOverlays.forEach((overlay, index) => {
-          if (!overlay.position) {
-            // Distribute horizontally with some padding
-            // Center roughly in the screen
-            const startX = (window.innerWidth - (this.mediaOverlays.length * (this.overlayWidth + 20))) / 2;
-            overlay.position = {
-              x: startX + (index * (this.overlayWidth + 20)),
-              y: 50
-            };
-          }
-        });
-      }
-    }
-  }
-
-  // Background settings
   currentBackgroundIndex = 0;
   currentBackground: string | null = null;
   carouselMode: 'manual' | 'auto' = 'auto';
   autoIntervalSeconds = 5;
-  private autoChangeInterval: ReturnType<typeof setInterval> | null = null;
+  private autoChangeInterval: any = null;
 
-  // Scenes
   scenes: Scene[] = [];
+  currentSceneId: string | null = null;
+  isSceneLoading = false;
 
-  ngOnInit() {
-    // Load collections first
-    this.loadCollectionsFromStorage();
-    // Load scenes
-    this.loadScenesFromStorage();
+  // Accordion State
+  activeSections: Set<string> = new Set(['scenes']);
 
-    console.log('Loaded collections:', this.collections.map(c => ({ id: c.id, name: c.name })));
+  toggleSection(section: string) {
+    if (this.activeSections.has(section)) {
+      this.activeSections.delete(section);
+    } else {
+      this.activeSections.add(section);
+    }
+  }
 
-    // Then load avatar settings (which reference collections)
-    this.loadAvatarsFromStorage();
-    console.log('Loaded avatar settings:', this.avatars.map(a => ({ id: a.id, name: a.name, defaultCollectionId: a.defaultCollectionId })));
+  async ngOnInit() {
+    // Load data from IndexedDB
+    this.collections = await this.storageService.loadCollections();
+    this.scenes = await this.storageService.loadScenes();
+    this.storageService.loadAvatarSettings(this.avatars);
 
-    // Select first avatar by default (this will trigger collection switch if assigned)
+    // Force change detection after loading
+    this.cdr.detectChanges();
+
+    // Now select the avatar after everything is loaded
     if (this.avatars.length > 0) {
       this.selectAvatar(this.avatars[0]);
     }
@@ -1195,7 +125,65 @@ export class LiveComponent implements OnInit, OnDestroy {
     this.stopAutoChange();
   }
 
-  // Media Overlay Methods
+  // --- UI Layout ---
+  togglePanel() {
+    this.isPanelOpen = !this.isPanelOpen;
+    setTimeout(() => {
+      if (this.avatarViewer) {
+        this.avatarViewer.forceResize();
+      }
+    }, 350);
+  }
+
+  // --- Avatar Logic ---
+  selectAvatar(avatar: AvatarOption) {
+    this.currentAvatar = avatar;
+    this.currentAvatarUrl = avatar.url;
+
+    if (avatar.defaultCollectionId) {
+      const collection = this.collections.find(c => c.id === avatar.defaultCollectionId);
+      if (collection) {
+        this.selectCollection(collection);
+      } else {
+        avatar.defaultCollectionId = undefined;
+        this.storageService.saveAvatarSettings(this.avatars);
+        this.clearActiveCollection();
+      }
+    } else {
+      this.clearActiveCollection();
+    }
+  }
+
+  setAvatarSize(size: AvatarSize) {
+    this.avatarSize = size;
+  }
+
+  setAvatarPosition(pos: 'left' | 'center' | 'right') {
+    this.avatarPosition = pos;
+  }
+
+  onAvatarCollectionChange() {
+    this.storageService.saveAvatarSettings(this.avatars);
+    if (this.currentAvatar?.defaultCollectionId) {
+      const collection = this.collections.find(c => c.id === this.currentAvatar!.defaultCollectionId);
+      if (collection) {
+        this.selectCollection(collection);
+      }
+    }
+  }
+
+  loadCustomAvatar(url: string) {
+    if (url && url.trim()) {
+      let finalUrl = url.trim();
+      if (!finalUrl.endsWith('.glb')) {
+        finalUrl += '.glb';
+      }
+      this.currentAvatarUrl = finalUrl;
+      this.currentAvatar = null;
+    }
+  }
+
+  // --- Media Overlays Logic ---
   addOverlay() {
     const newOverlay: MediaOverlay = {
       id: Date.now().toString(),
@@ -1204,9 +192,13 @@ export class LiveComponent implements OnInit, OnDestroy {
       currentIndex: 0,
       isPlaying: false,
       autoLoop: true,
-      intervalSeconds: 3
+      intervalSeconds: 3,
+      width: 320,
+      height: 240, // 4:3 aspect ratio for horizontal
+      layout: 'horizontal'
     };
     this.mediaOverlays.push(newOverlay);
+    this.selectedOverlayId = newOverlay.id; // Auto-select the new overlay
   }
 
   removeOverlay(id: string) {
@@ -1220,13 +212,50 @@ export class LiveComponent implements OnInit, OnDestroy {
     }
   }
 
+  selectOverlay(id: string) {
+    this.selectedOverlayId = id;
+  }
+
+  resizeOverlay(event: { overlayId: string, size: number }) {
+    const overlay = this.mediaOverlays.find(o => o.id === event.overlayId);
+    if (overlay) {
+      overlay.width = event.size;
+      // Calculate height based on layout aspect ratio
+      if (overlay.layout === 'horizontal') {
+        overlay.height = Math.round(event.size * 3 / 4); // 4:3 ratio
+      } else if (overlay.layout === 'square') {
+        overlay.height = event.size; // 1:1 ratio
+      } else {
+        overlay.height = Math.round(event.size * 4 / 3); // 3:4 ratio
+      }
+    }
+  }
+
+  changeOverlayLayout(event: { overlayId: string, layout: 'horizontal' | 'vertical' | 'square' }) {
+    const overlay = this.mediaOverlays.find(o => o.id === event.overlayId);
+    if (overlay) {
+      overlay.layout = event.layout;
+      // Recalculate height based on new layout
+      if (overlay.layout === 'horizontal') {
+        overlay.height = Math.round(overlay.width * 3 / 4); // 4:3 ratio
+      } else if (overlay.layout === 'square') {
+        overlay.height = overlay.width; // 1:1 ratio
+      } else {
+        overlay.height = Math.round(overlay.width * 4 / 3); // 3:4 ratio
+      }
+    }
+  }
+
   assignCollectionToOverlay(overlay: MediaOverlay, collectionId: string) {
     const collection = this.collections.find(c => c.id === collectionId);
     if (collection) {
-      overlay.items = collection.images.map(url => ({
-        type: 'image',
-        url: url
-      }));
+      overlay.items = collection.images.map(url => {
+        const isVideo = url.startsWith('data:video') || url.endsWith('.mp4') || url.endsWith('.webm');
+        return {
+          type: isVideo ? 'video' : 'image',
+          url: url
+        };
+      });
       overlay.name = collection.name;
       overlay.currentIndex = 0;
     }
@@ -1234,109 +263,44 @@ export class LiveComponent implements OnInit, OnDestroy {
 
   async captureScreen(overlay: MediaOverlay) {
     try {
-      const stream = await navigator.mediaDevices.getDisplayMedia({
-        video: true,
-        audio: true
-      });
-
-      const streamItem: MediaItem = {
-        type: 'stream',
-        stream: stream
-      };
-
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: true });
+      const streamItem: MediaItem = { type: 'stream', stream };
       overlay.items = [streamItem];
       overlay.name = 'Live Capture';
       overlay.currentIndex = 0;
       overlay.isPlaying = true;
-
       this.updateOverlay(overlay);
-
-      stream.getVideoTracks()[0].onended = () => {
-        console.log('Stream ended by user');
-      };
-
     } catch (err) {
       console.error('Error starting screen share:', err);
     }
   }
 
-  togglePanel() {
-    this.isPanelOpen = !this.isPanelOpen;
-    // Force avatar viewer to resize after panel animation completes
-    setTimeout(() => {
-      if (this.avatarViewer) {
-        this.avatarViewer.forceResize();
-      }
-    }, 350);
-  }
+  toggleFreeMoveMode() {
+    this.isFreeMoveMode = !this.isFreeMoveMode;
 
-  selectAvatar(avatar: AvatarOption) {
-    this.currentAvatar = avatar;
-    this.currentAvatarUrl = avatar.url;
-    console.log('Selected avatar:', avatar.name, 'defaultCollectionId:', avatar.defaultCollectionId);
-
-    // If avatar has a default collection, switch to it
-    if (avatar.defaultCollectionId) {
-      const collection = this.collections.find(c => c.id === avatar.defaultCollectionId);
-      console.log('Found collection:', collection?.name);
-      if (collection) {
-        this.selectCollection(collection);
-      } else {
-        // Collection was deleted, clear the reference
-        avatar.defaultCollectionId = undefined;
-        this.saveAvatarsToStorage();
-        this.clearActiveCollection();
-      }
-    } else {
-      // Avatar has no default collection, clear active
-      this.clearActiveCollection();
+    if (this.isFreeMoveMode && this.mediaOverlays.length > 0) {
+      this.mediaOverlays.forEach((overlay, index) => {
+        if (!overlay.position) {
+          const totalWidth = this.mediaOverlays.reduce((sum, o) => sum + o.width + 20, -20);
+          const startX = (window.innerWidth - totalWidth) / 2;
+          let currentX = startX;
+          this.mediaOverlays.forEach((o, i) => {
+            if (i < index) {
+              currentX += o.width + 20;
+            }
+          });
+          overlay.position = { x: currentX, y: 50 };
+        }
+      });
     }
   }
 
-  setAvatarSize(size: AvatarSize) {
-    this.avatarSize = size;
-  }
-
-  setAvatarPosition(pos: 'left' | 'center' | 'right') {
-    this.avatarPosition = pos;
-  }
-
-  getCollectionName(collectionId: string | undefined): string {
-    if (!collectionId) return '';
-    const collection = this.collections.find(c => c.id === collectionId);
-    return collection?.name || '';
-  }
-
-  onAvatarCollectionChange() {
-    this.saveAvatarsToStorage();
-
-    // If current avatar's collection changed, switch to it
-    if (this.currentAvatar?.defaultCollectionId) {
-      const collection = this.collections.find(c => c.id === this.currentAvatar!.defaultCollectionId);
-      if (collection) {
-        this.selectCollection(collection);
-      }
-    }
-  }
-
-  loadCustomAvatar() {
-    if (this.customUrl && this.customUrl.trim()) {
-      let url = this.customUrl.trim();
-      if (!url.endsWith('.glb')) {
-        url += '.glb';
-      }
-      this.currentAvatarUrl = url;
-      this.currentAvatar = null; // Deselect any avatar card
-      console.log('Loading custom avatar:', url);
-    }
-  }
-
-  // Collection methods
-  onFilesSelected(event: Event) {
-    const input = event.target as HTMLInputElement;
+  // --- Background Logic ---
+  onFilesSelected(data: { event: Event, name: string }) {
+    const input = data.event.target as HTMLInputElement;
     if (!input.files || input.files.length === 0) return;
 
-    const collectionName = this.newCollectionName.trim() || `Collection ${this.collections.length + 1}`;
+    const collectionName = data.name.trim() || `Collection ${this.collections.length + 1}`;
     const newCollection: ImageCollection = {
       id: Date.now().toString(),
       name: collectionName,
@@ -1348,48 +312,53 @@ export class LiveComponent implements OnInit, OnDestroy {
 
     filesArray.forEach(file => {
       const reader = new FileReader();
-      reader.onload = (e) => {
+      reader.onload = async (e) => {
         const dataUrl = e.target?.result as string;
         newCollection.images.push(dataUrl);
         loadedCount++;
 
         if (loadedCount === filesArray.length) {
-          this.collections.push(newCollection);
-          this.saveCollectionsToStorage();
-          this.newCollectionName = '';
+          // Create a new array reference to trigger change detection
+          this.collections = [...this.collections, newCollection];
+          await this.storageService.saveCollections(this.collections);
+
+          // Force change detection
+          this.cdr.detectChanges();
+
           this.selectCollection(newCollection);
         }
       };
       reader.readAsDataURL(file);
     });
-
     input.value = '';
   }
 
   selectCollection(collection: ImageCollection) {
+    this.stopAutoChange(); // Stop any existing interval first
     this.activeCollection = collection;
     this.currentBackgroundIndex = 0;
     this.updateCurrentBackground();
 
+    // Start auto-change if in auto mode and has multiple images
     if (this.carouselMode === 'auto' && collection.images.length > 1) {
       this.startAutoChange();
     }
   }
 
-  deleteCollection(collection: ImageCollection, event: Event) {
-    event.stopPropagation();
+  async deleteCollection(collection: ImageCollection) {
     const index = this.collections.findIndex(c => c.id === collection.id);
     if (index !== -1) {
-      this.collections.splice(index, 1);
-      this.saveCollectionsToStorage();
+      // Create a new array reference to trigger change detection
+      this.collections = this.collections.filter(c => c.id !== collection.id);
+      await this.storageService.saveCollections(this.collections);
+      await this.storageService.deleteCollection(collection.id);
 
-      // Clear default collection from any avatars using it
       this.avatars.forEach(avatar => {
         if (avatar.defaultCollectionId === collection.id) {
           avatar.defaultCollectionId = undefined;
         }
       });
-      this.saveAvatarsToStorage();
+      this.storageService.saveAvatarSettings(this.avatars);
 
       if (this.activeCollection?.id === collection.id) {
         this.clearActiveCollection();
@@ -1406,7 +375,6 @@ export class LiveComponent implements OnInit, OnDestroy {
 
   prevBackground() {
     if (!this.activeCollection || this.activeCollection.images.length === 0) return;
-
     this.currentBackgroundIndex = this.currentBackgroundIndex === 0
       ? this.activeCollection.images.length - 1
       : this.currentBackgroundIndex - 1;
@@ -1415,7 +383,6 @@ export class LiveComponent implements OnInit, OnDestroy {
 
   nextBackground() {
     if (!this.activeCollection || this.activeCollection.images.length === 0) return;
-
     this.currentBackgroundIndex = (this.currentBackgroundIndex + 1) % this.activeCollection.images.length;
     this.updateCurrentBackground();
   }
@@ -1426,30 +393,39 @@ export class LiveComponent implements OnInit, OnDestroy {
     } else {
       this.currentBackground = null;
     }
+
+    // Force change detection to update the view
+    this.cdr.detectChanges();
   }
 
   onModeChange() {
-    if (this.carouselMode === 'auto') {
+    this.stopAutoChange(); // Always stop first
+    if (this.carouselMode === 'auto' && this.activeCollection && this.activeCollection.images.length > 1) {
       this.startAutoChange();
-    } else {
-      this.stopAutoChange();
     }
   }
 
   onIntervalChange() {
-    if (this.carouselMode === 'auto') {
-      this.startAutoChange();
+    // Only restart if we're in auto mode with an active collection
+    if (this.carouselMode === 'auto' && this.activeCollection && this.activeCollection.images.length > 1) {
+      this.startAutoChange(); // startAutoChange already calls stopAutoChange
     }
   }
 
   private startAutoChange() {
     this.stopAutoChange();
+    if (!this.activeCollection || this.activeCollection.images.length <= 1) {
+      return;
+    }
 
-    if (!this.activeCollection || this.activeCollection.images.length <= 1) return;
-
-    this.autoChangeInterval = setInterval(() => {
-      this.nextBackground();
-    }, this.autoIntervalSeconds * 1000);
+    // Run interval inside Angular zone to ensure change detection
+    this.ngZone.run(() => {
+      this.autoChangeInterval = setInterval(() => {
+        this.ngZone.run(() => {
+          this.nextBackground();
+        });
+      }, this.autoIntervalSeconds * 1000);
+    });
   }
 
   private stopAutoChange() {
@@ -1459,67 +435,14 @@ export class LiveComponent implements OnInit, OnDestroy {
     }
   }
 
-  // Storage
-  private saveCollectionsToStorage() {
-    try {
-      localStorage.setItem('bgCollections', JSON.stringify(this.collections));
-    } catch (e) {
-      console.warn('Could not save collections to storage:', e);
-    }
-  }
-
-  private loadCollectionsFromStorage() {
-    try {
-      const saved = localStorage.getItem('bgCollections');
-      if (saved) {
-        this.collections = JSON.parse(saved);
-      }
-    } catch (e) {
-      console.warn('Could not load collections from storage:', e);
-    }
-  }
-
-  private saveAvatarsToStorage() {
-    try {
-      // Only save the collection assignments
-      const avatarSettings = this.avatars.map(a => ({
-        id: a.id,
-        defaultCollectionId: a.defaultCollectionId
-      }));
-      localStorage.setItem('avatarSettings', JSON.stringify(avatarSettings));
-    } catch (e) {
-      console.warn('Could not save avatar settings:', e);
-    }
-  }
-
-  private loadAvatarsFromStorage() {
-    try {
-      const saved = localStorage.getItem('avatarSettings');
-      if (saved) {
-        const settings = JSON.parse(saved);
-        settings.forEach((setting: { id: string; defaultCollectionId?: string }) => {
-          const avatar = this.avatars.find(a => a.id === setting.id);
-          if (avatar) {
-            avatar.defaultCollectionId = setting.defaultCollectionId;
-          }
-        });
-      }
-    } catch (e) {
-      console.warn('Could not load avatar settings:', e);
-    }
-  }
-
-
-  // Scene Management Methods
+  // --- Scenes Logic ---
   saveCurrentScene() {
     const sceneName = prompt('Name this scene:', `Scene ${this.scenes.length + 1}`);
     if (!sceneName) return;
 
-    // Filter out circular references or non-serializable data from overlays
     const overlaysClone = this.mediaOverlays.map(o => ({
       ...o,
-      items: o.items.filter(i => i.type !== 'stream'), // Don't save live streams
-      // Ensure position is saved
+      items: o.items.filter(i => i.type !== 'stream'),
       position: o.position
     }));
 
@@ -1531,64 +454,117 @@ export class LiveComponent implements OnInit, OnDestroy {
         avatarSize: this.avatarSize,
         avatarPosition: this.avatarPosition,
         backgroundCollectionId: this.activeCollection?.id,
-        overlays: JSON.parse(JSON.stringify(overlaysClone))
+        overlays: JSON.parse(JSON.stringify(overlaysClone)),
+        isFreeMoveMode: this.isFreeMoveMode
       }
     };
 
     this.scenes.push(newScene);
-    this.saveScenesToStorage();
+    this.currentSceneId = newScene.id;
+    this.storageService.saveScenes(this.scenes);
+  }
+
+  updateCurrentScene() {
+    if (!this.currentSceneId) return;
+
+    const sceneIndex = this.scenes.findIndex(s => s.id === this.currentSceneId);
+    if (sceneIndex === -1) return;
+
+    if (!confirm(`Update scene "${this.scenes[sceneIndex].name}" with current layout?`)) return;
+
+    const overlaysClone = this.mediaOverlays.map(o => ({
+      ...o,
+      items: o.items.filter(i => i.type !== 'stream'),
+      position: o.position
+    }));
+
+    this.scenes[sceneIndex].config = {
+      avatarId: this.currentAvatar?.id,
+      avatarSize: this.avatarSize,
+      avatarPosition: this.avatarPosition,
+      backgroundCollectionId: this.activeCollection?.id,
+      overlays: JSON.parse(JSON.stringify(overlaysClone)),
+      isFreeMoveMode: this.isFreeMoveMode
+    };
+
+    this.storageService.saveScenes(this.scenes);
   }
 
   loadScene(scene: Scene) {
-    // 1. Set Avatar
-    if (scene.config.avatarId) {
-      const avatar = this.avatars.find(a => a.id === scene.config.avatarId);
-      if (avatar && avatar !== this.currentAvatar) {
-        this.selectAvatar(avatar);
+    console.log('🎬 Loading scene:', scene.name);
+    this.currentSceneId = scene.id;
+
+    // 1. Start hiding avatar immediately
+    this.isSceneLoading = true;
+    this.cdr.detectChanges(); // Force update to start fade out
+
+    // 2. Wait for fade out to complete (300ms) before changing anything
+    setTimeout(() => {
+      console.log('  Avatar hidden, applying changes...');
+      console.log('  Avatar ID:', scene.config.avatarId);
+      console.log('  Avatar Size:', scene.config.avatarSize);
+      console.log('  Avatar Position:', scene.config.avatarPosition);
+
+      let isChangingAvatar = false;
+
+      // 3. Apply changes while hidden
+      // First, select the avatar if specified
+      if (scene.config.avatarId) {
+        const avatar = this.avatars.find(a => a.id === scene.config.avatarId);
+        if (avatar && avatar !== this.currentAvatar) {
+          console.log('  Selecting avatar:', avatar.name);
+          isChangingAvatar = true;
+          this.selectAvatar(avatar);
+        }
       }
-    }
 
-    // 2. Set Size & Position
-    this.setAvatarSize(scene.config.avatarSize);
-    this.setAvatarPosition(scene.config.avatarPosition);
+      // Then set avatar size and position
+      this.avatarSize = scene.config.avatarSize;
+      this.avatarPosition = scene.config.avatarPosition;
 
-    // 3. Set Background
-    if (scene.config.backgroundCollectionId) {
-      const collection = this.collections.find(c => c.id === scene.config.backgroundCollectionId);
-      if (collection) {
-        this.selectCollection(collection);
+      this.cdr.detectChanges(); // Apply changes to components
+
+      // 4. Force transform update and show avatar
+      // Use longer delay if loading new avatar to ensure it's ready
+      const updateDelay = isChangingAvatar ? 1200 : 100;
+      console.log('  Will show avatar in', updateDelay, 'ms');
+
+      setTimeout(() => {
+        if (this.avatarViewer && (this.avatarViewer as any).updateModelTransform) {
+          console.log('  Forcing avatar transform update');
+          (this.avatarViewer as any).updateModelTransform();
+        }
+
+        // Show avatar again after update
+        this.isSceneLoading = false;
+        this.cdr.detectChanges();
+      }, updateDelay);
+
+      // Load background collection
+      if (scene.config.backgroundCollectionId) {
+        const collection = this.collections.find(c => c.id === scene.config.backgroundCollectionId);
+        if (collection) {
+          this.selectCollection(collection);
+        }
+      } else {
+        this.clearActiveCollection();
       }
-    } else {
-      this.clearActiveCollection();
-    }
 
-    // 4. Set Overlays
-    this.mediaOverlays = JSON.parse(JSON.stringify(scene.config.overlays));
+      // Load media overlays
+      this.mediaOverlays = JSON.parse(JSON.stringify(scene.config.overlays));
 
-    // Restore positions logic in free move if needed??? 
-    // Usually position is part of the overlay object so it should be fine.
+      // Restore free move mode state
+      this.isFreeMoveMode = scene.config.isFreeMoveMode || false;
+
+      console.log('✅ Scene loaded successfully');
+    }, 300); // Wait 300ms for fade out transition
   }
 
-  deleteScene(sceneId: string, event: Event) {
-    event.stopPropagation();
+  async deleteScene(sceneId: string) {
     if (confirm('Delete this scene?')) {
       this.scenes = this.scenes.filter(s => s.id !== sceneId);
-      this.saveScenesToStorage();
-    }
-  }
-
-  private saveScenesToStorage() {
-    try {
-      localStorage.setItem('scenes', JSON.stringify(this.scenes));
-    } catch (e) { console.error('Error saving scenes', e); }
-  }
-
-  private loadScenesFromStorage() {
-    const saved = localStorage.getItem('scenes');
-    if (saved) {
-      try {
-        this.scenes = JSON.parse(saved);
-      } catch (e) { console.error('Error loading scenes', e); }
+      await this.storageService.saveScenes(this.scenes);
+      await this.storageService.deleteScene(sceneId);
     }
   }
 }
