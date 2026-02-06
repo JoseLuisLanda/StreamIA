@@ -29,4 +29,5 @@ export interface Scene {
     id: string;
     name: string;
     config: SceneConfig;
+    orientation?: 'landscape' | 'portrait' | 'any';
 }
