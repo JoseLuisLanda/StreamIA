@@ -13,9 +13,8 @@ import { ImageCollection } from '../live.models';
         <input 
           type="text" 
           [(ngModel)]="collectionName" 
-          placeholder="Collection name *"
-          class="collection-name-input"
-          [class.required]="!collectionName.trim()"
+          placeholder="New Collection Name"
+          class="custom-input"
         />
         <input 
           type="file" 
@@ -26,12 +25,11 @@ import { ImageCollection } from '../live.models';
           style="display: none"
         />
         <button 
-          class="upload-btn" 
-          [class.disabled]="!collectionName.trim()"
+          class="primary-btn" 
           [disabled]="!collectionName.trim()"
           (click)="fileInput.click()"
         >
-          + Add
+          Add
         </button>
       </div>
       
@@ -48,29 +46,25 @@ import { ImageCollection } from '../live.models';
             </div>
             <div class="collection-info">
               <span class="collection-name">{{ collection.name }}</span>
-              <span class="collection-count">{{ collection.images.length }} images</span>
+              <span class="collection-count">{{ collection.images.length }} assets</span>
             </div>
-            <button class="delete-collection" (click)="deleteCollection(collection, $event)">🗑️</button>
+            <button class="delete-icon" (click)="deleteCollection(collection, $event)">×</button>
           </div>
         </div>
       </div>
       
-      <div class="no-collections" *ngIf="collections.length === 0">
-        <p class="no-data-msg">No collections yet. Create one above!</p>
-      </div>
-      
-      <div class="carousel-controls-panel" *ngIf="activeCollection && activeCollection.images.length > 1">
+      <!-- Carousel Controls -->
+      <div class="controls-card" *ngIf="activeCollection && activeCollection.images.length > 1">
+        <div class="card-title">Playback Controls</div>
+        
         <div class="carousel-nav">
-          <button class="nav-btn" (click)="onPrev.emit()">◀</button>
-          <span class="nav-indicator">{{ currentIndex + 1 }} / {{ activeCollection.images.length }}</span>
-          <button class="nav-btn" (click)="onNext.emit()">▶</button>
+          <button class="nav-btn" (click)="onPrev.emit()">←</button>
+          <span class="nav-display">{{ currentIndex + 1 }} / {{ activeCollection.images.length }}</span>
+          <button class="nav-btn" (click)="onNext.emit()">→</button>
         </div>
-      </div>
-      
-      <div class="carousel-settings" *ngIf="activeCollection && activeCollection.images.length > 1">
-        <div class="settings-header">
-          <span>Carousel Settings</span>
-        </div>
+
+        <div class="divider"></div>
+        
         <div class="mode-toggle">
           <label class="radio-label">
             <input type="radio" name="carouselMode" value="manual" [ngModel]="mode" (ngModelChange)="onModeChange.emit($event)" />
@@ -83,25 +77,28 @@ import { ImageCollection } from '../live.models';
         </div>
         
         <div class="auto-settings" *ngIf="mode === 'auto'">
-          <label>Interval:</label>
-          <input 
-            type="number" 
-            [ngModel]="interval" 
-            (ngModelChange)="onIntervalChange.emit($event)"
-            min="1" 
-            max="60"
-            class="interval-input"
-          />
-          <span>sec</span>
-          <span class="auto-status">
-            <span class="pulse"></span> Running
-          </span>
+          <label>Interval (s)</label>
+          <div class="input-row">
+            <input 
+                type="number" 
+                [ngModel]="interval" 
+                (ngModelChange)="onIntervalChange.emit($event)"
+                min="1" 
+                max="60"
+                class="small-input"
+            />
+            <span class="status-badge">Running</span>
+          </div>
         </div>
       </div>
       
-      <button class="clear-btn" *ngIf="activeCollection" (click)="onClear.emit()">
-        Deselect Collection
+      <button class="block-btn danger" *ngIf="activeCollection" (click)="onClear.emit()">
+        Remove Active Background
       </button>
+      
+      <div class="empty-state" *ngIf="collections.length === 0">
+         Create a collection to start.
+      </div>
     </div>
   `,
   styles: [`
@@ -110,88 +107,75 @@ import { ImageCollection } from '../live.models';
       gap: 0.5rem;
       margin-bottom: 1rem;
     }
-    .collection-name-input {
+    .custom-input {
       flex: 1;
-      padding: 12px;
-      background: rgba(0, 0, 0, 0.3);
+      padding: 10px;
+      border-radius: 6px;
+      background: #0B0F19;
       color: #fff;
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      border-radius: 10px;
+      border: 1px solid #23293D;
       font-size: 0.85rem;
       outline: none;
     }
-    .collection-name-input::placeholder {
-      color: rgba(255, 255, 255, 0.4);
+    .custom-input:focus {
+        border-color: #5C24FF;
     }
-    .collection-name-input:focus {
-      border-color: #00d9ff;
+    .primary-btn {
+        background: linear-gradient(135deg, #FF3BFF, #5C24FF);
+        color: white;
+        border: none;
+        padding: 0 16px;
+        border-radius: 6px;
+        font-weight: 600;
+        cursor: pointer;
+        font-size: 0.8rem;
     }
-    .upload-btn {
-      padding: 10px 18px;
-      background: linear-gradient(135deg, #00d9ff, #00ff88);
-      color: #fff;
-      border: none;
-      border-radius: 10px;
-      cursor: pointer;
-      font-weight: 700;
-      transition: all 0.2s;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      font-size: 0.8rem;
+    .primary-btn:disabled {
+        opacity: 0.5;
+        cursor: not-allowed;
+        background: #23293D;
+        color: #64748B;
     }
-    .upload-btn:hover {
-      transform: scale(1.05);
-      box-shadow: 0 4px 12px rgba(0, 255, 136, 0.3);
-    }
-    .upload-btn:disabled {
-      opacity: 0.5;
-      cursor: not-allowed;
-      transform: none;
-    }
+    
     .collections-list {
       display: flex;
       flex-direction: column;
-      gap: 0.75rem;
-      max-height: 200px;
+      gap: 0.5rem;
+      max-height: 250px;
       overflow-y: auto;
-      padding-right: 5px;
-    }
-    .collections-list::-webkit-scrollbar {
-      width: 4px;
-    }
-    .collections-list::-webkit-scrollbar-thumb {
-      background: rgba(255, 255, 255, 0.1);
-      border-radius: 10px;
+      margin-bottom: 1rem;
     }
     .collection-item {
-      background: rgba(255, 255, 255, 0.03);
-      border-radius: 10px;
-      border: 1px solid rgba(255, 255, 255, 0.08);
+      background: #151926;
+      border: 1px solid #23293D;
+      border-radius: 8px;
       transition: all 0.2s;
     }
     .collection-item:hover {
-      background: rgba(255, 255, 255, 0.08);
-      border-color: rgba(255, 255, 255, 0.15);
+      border-color: #3B4259;
     }
     .collection-item.active {
-      border-color: #00ff88;
-      background: rgba(0, 255, 136, 0.05);
+      border-color: #5C24FF;
+      background: #1A1E2E;
     }
+    
     .collection-header {
       display: flex;
       align-items: center;
       gap: 0.75rem;
       padding: 0.75rem;
       cursor: pointer;
+      position: relative;
     }
     .collection-preview {
-      width: 45px;
-      height: 30px;
+      width: 40px;
+      height: 40px;
       border-radius: 4px;
       overflow: hidden;
-      border: 1px solid rgba(255, 255, 255, 0.15);
+      border: 1px solid #23293D;
+      background: #000;
     }
-    .collection-preview img {
+    .collection-preview img, .collection-preview video {
       width: 100%;
       height: 100%;
       object-fit: cover;
@@ -201,153 +185,150 @@ import { ImageCollection } from '../live.models';
       display: flex;
       flex-direction: column;
     }
-    .no-data-msg {
-      font-size: 0.85rem;
-      color: rgba(255, 255, 255, 0.4);
-      font-style: italic;
-      text-align: center;
-      padding: 0.5rem 0;
-    }
     .collection-name {
-      color: #fff;
+      color: #E2E8F0;
       font-size: 0.85rem;
-      font-weight: 600;
+      font-weight: 500;
     }
     .collection-count {
-      color: rgba(255, 255, 255, 0.5);
+      color: #64748B;
       font-size: 0.7rem;
     }
+    .delete-icon {
+        background: transparent;
+        border: none;
+        color: #64748B;
+        cursor: pointer;
+        padding: 4px;
+        font-size: 1.2rem;
+        line-height: 1;
+        opacity: 0.5;
+        transition: opacity 0.2s;
+    }
+    .delete-icon:hover {
+        opacity: 1;
+        color: #ef4444;
+    }
+    
+    /* Controls Card */
+    .controls-card {
+        background: #0B0F19;
+        border: 1px solid #23293D;
+        border-radius: 8px;
+        padding: 1rem;
+        margin-bottom: 1rem;
+    }
+    .card-title {
+        color: #64748B;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        font-weight: 600;
+        margin-bottom: 1rem;
+    }
+    
     .carousel-nav {
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      gap: 1.5rem;
-      margin-top: 1.25rem;
-      background: rgba(0, 0, 0, 0.2);
-      padding: 0.75rem;
-      border-radius: 12px;
+        display: flex;
+        justify-content: center;
+        align-items: center;
+        gap: 1rem;
+        margin-bottom: 1rem;
     }
     .nav-btn {
-      width: 34px;
-      height: 34px;
-      border-radius: 50%;
-      background: rgba(255, 255, 255, 0.05);
-      color: #fff;
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      cursor: pointer;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all 0.2s;
+        width: 32px;
+        height: 32px;
+        border-radius: 50%;
+        background: #23293D;
+        color: #fff;
+        border: 1px solid #3B4259;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
     }
     .nav-btn:hover {
-      background: #00d9ff;
-      color: #000;
-      border-color: transparent;
-      transform: scale(1.1);
+        background: #5C24FF;
+        border-color: #5C24FF;
     }
-    .nav-indicator {
-      color: #fff;
-      font-size: 0.9rem;
-      font-weight: 600;
-      font-family: monospace;
+    .nav-display {
+        font-family: monospace;
+        color: #E2E8F0;
     }
-    .carousel-settings {
-      margin-top: 1rem;
-      padding: 1rem;
-      background: rgba(255, 255, 255, 0.03);
-      border-radius: 12px;
-      border: 1px solid rgba(255, 255, 255, 0.08);
+    
+    .divider {
+        height: 1px;
+        background: #1F2436;
+        margin-bottom: 1rem;
     }
-    .settings-header {
-      font-size: 0.7rem;
-      font-weight: 700;
-      color: rgba(255, 255, 255, 0.5);
-      text-transform: uppercase;
-      letter-spacing: 1px;
-      margin-bottom: 0.75rem;
-    }
+    
     .mode-toggle {
-      display: flex;
-      gap: 1.5rem;
-      margin-bottom: 0.75rem;
+        display: flex;
+        gap: 1rem;
+        margin-bottom: 1rem;
     }
     .radio-label {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: #fff;
-      font-size: 0.85rem;
-      cursor: pointer;
-      font-weight: 500;
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        color: #94A3B8;
+        font-size: 0.8rem;
+        cursor: pointer;
     }
-    .radio-label input[type="radio"] {
-      accent-color: #00d9ff;
+    .radio-label input {
+        accent-color: #5C24FF;
     }
-    .auto-settings {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      padding-top: 0.75rem;
-      border-top: 1px solid rgba(255, 255, 255, 0.08);
+    
+    .input-row {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
     }
-    .auto-settings label,
-    .auto-settings span {
-      color: rgba(255, 255, 255, 0.7);
-      font-size: 0.8rem;
-      font-weight: 500;
+    .small-input {
+        width: 60px;
+        padding: 6px;
+        background: #151926;
+        border: 1px solid #23293D;
+        color: #fff;
+        border-radius: 4px;
+        text-align: center;
     }
-    .auto-status {
-      display: flex;
-      align-items: center;
-      gap: 0.5rem;
-      color: #00ff88;
-      margin-left: auto;
-      font-weight: 600;
+    .status-badge {
+        font-size: 0.7rem;
+        color: #10B981;
+        background: rgba(16, 185, 129, 0.1);
+        padding: 2px 6px;
+        border-radius: 4px;
     }
-    .interval-input {
-      width: 50px;
-      background: rgba(0,0,0,0.3);
-      border: 1px solid rgba(255,255,255,0.15);
-      color: #fff;
-      padding: 6px;
-      border-radius: 6px;
-      text-align: center;
-      font-weight: 600;
-      outline: none;
+    .auto-settings label {
+        display: block;
+        font-size: 0.75rem;
+        color: #64748B;
+        margin-bottom: 4px;
     }
-    .interval-input:focus {
-      border-color: #00d9ff;
+    
+    .block-btn {
+        width: 100%;
+        padding: 10px;
+        border-radius: 6px;
+        border: none;
+        cursor: pointer;
+        font-size: 0.8rem;
+        font-weight: 500;
+        transition: opacity 0.2s;
     }
-    .clear-btn {
-      width: 100%;
-      padding: 12px;
-      background: rgba(255, 50, 50, 0.1);
-      color: #ff4444;
-      border: 1px solid rgba(255, 50, 50, 0.2);
-      border-radius: 10px;
-      margin-top: 1rem;
-      cursor: pointer;
-      font-weight: 600;
-      transition: all 0.2s;
+    .block-btn.danger {
+        background: rgba(239, 68, 68, 0.1);
+        color: #ef4444;
+        border: 1px solid rgba(239, 68, 68, 0.2);
     }
-    .clear-btn:hover {
-      background: rgba(255, 50, 50, 0.2);
-      border-color: #ff4444;
+    .block-btn.danger:hover {
+        background: rgba(239, 68, 68, 0.2);
     }
-    .pulse {
-      width: 8px;
-      height: 8px;
-      background: #00ff88;
-      border-radius: 50%;
-      display: inline-block;
-      box-shadow: 0 0 10px #00ff88;
-      animation: pulse 1.5s infinite;
-    }
-    @keyframes pulse {
-      0% { transform: scale(1); opacity: 1; }
-      50% { transform: scale(1.3); opacity: 0.6; }
-      100% { transform: scale(1); opacity: 1; }
+    
+    .empty-state {
+        text-align: center;
+        color: #64748B;
+        font-size: 0.8rem;
+        padding: 1rem;
     }
   `]
 })

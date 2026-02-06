@@ -10,22 +10,29 @@ import { Scene } from '../live.models';
     <div class="scene-manager-container">
        <div class="action-bar">
          <div class="btn-group">
-            <button class="add-overlay-btn update-btn" *ngIf="activeSceneId" (click)="updateScene()">↻ Update</button>
-            <button class="add-overlay-btn" (click)="saveScene()">+ Save</button>
+            <button class="action-btn update-btn" *ngIf="activeSceneId" (click)="updateScene()">
+                <span class="icon">↻</span> Update
+            </button>
+            <button class="action-btn save-btn" (click)="saveScene()">
+                <span class="icon">+</span> Save
+            </button>
          </div>
        </div>
        
        <div class="scenes-list" *ngIf="scenes.length > 0">
          <div 
-            class="scene-chip" 
+            class="scene-card" 
             *ngFor="let scene of scenes" 
             [class.active]="scene.id === activeSceneId"
             (click)="onLoad.emit(scene)">
-           <span class="scene-name">{{ scene.name }}</span>
+           <div class="scene-info">
+               <span class="scene-icon">🎬</span>
+               <span class="scene-name">{{ scene.name }}</span>
+           </div>
            <button class="scene-delete" (click)="deleteScene(scene.id, $event)">×</button>
          </div>
        </div>
-       <p class="no-data-msg" *ngIf="scenes.length === 0">Save current layout as a scene.</p>
+       <p class="no-data-msg" *ngIf="scenes.length === 0">No scenes saved. Create your first scene!</p>
     </div>
   `,
   styles: [`
@@ -38,81 +45,107 @@ import { Scene } from '../live.models';
         display: flex;
         gap: 8px;
     }
-    .add-overlay-btn {
-      padding: 6px 14px;
-      border-radius: 8px;
-      border: 1px solid rgba(0, 217, 255, 0.3);
-      background: rgba(0, 217, 255, 0.1);
-      color: #00d9ff;
+    .action-btn {
+      padding: 8px 16px;
+      border-radius: 6px;
       font-size: 0.8rem;
       font-weight: 600;
       cursor: pointer;
-      transition: all 0.2s;
-    }
-    .add-overlay-btn:hover {
-      background: #00d9ff;
-      color: #000;
-      transform: translateY(-1px);
-    }
-    .update-btn {
-        border-color: rgba(255, 200, 0, 0.3);
-        background: rgba(255, 200, 0, 0.1);
-        color: #ffc800;
-    }
-    .update-btn:hover {
-        background: #ffc800;
-        color: #000;
-    }
-    .scenes-list {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.75rem;
-    }
-    .scene-chip {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      border-radius: 10px;
-      padding: 8px 14px;
+      border: none;
       display: flex;
       align-items: center;
-      gap: 8px;
+      gap: 6px;
+      transition: opacity 0.2s;
+      color: #fff;
+    }
+    .action-btn:hover {
+        opacity: 0.9;
+    }
+    .save-btn {
+        background: linear-gradient(135deg, #FF3BFF, #5C24FF);
+    }
+    .update-btn {
+        background: #23293D;
+        border: 1px solid #3B4259;
+        color: #E2E8F0;
+    }
+    .update-btn:hover {
+        background: #2A3042;
+    }
+    .scenes-list {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(100px, 1fr));
+      gap: 0.5rem;
+    }
+    .scene-card {
+      background: #151926;
+      border: 1px solid #23293D;
+      border-radius: 8px;
+      padding: 10px;
       cursor: pointer;
-      transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+      position: relative;
+      transition: all 0.2s;
+      min-height: 60px;
+      display: flex;
+      flex-direction: column;
+      justify-content: center;
     }
-    .scene-chip:hover {
-      background: rgba(0, 217, 255, 0.1);
-      border-color: #00d9ff;
-      transform: translateY(-2px);
+    .scene-card:hover {
+      border-color: #5C24FF;
+      background: #1A1E2E;
     }
-    .scene-chip.active {
-        background: rgba(0, 217, 255, 0.15);
-        border-color: #00d9ff;
-        box-shadow: 0 0 10px rgba(0, 217, 255, 0.2);
+    .scene-card.active {
+        border-color: #A855F7;
+        background: linear-gradient(135deg, rgba(168, 85, 247, 0.1), rgba(92, 36, 255, 0.1));
+        box-shadow: 0 0 15px rgba(92, 36, 255, 0.15);
+    }
+    .scene-info {
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 4px;
+        text-align: center;
+    }
+    .scene-icon {
+        font-size: 1.2rem;
     }
     .scene-name {
-      font-size: 0.85rem;
-      color: #fff;
+      font-size: 0.75rem;
+      color: #cbd5e1;
       font-weight: 500;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      max-width: 100%;
     }
     .scene-delete {
+      position: absolute;
+      top: 2px;
+      right: 2px;
+      width: 20px;
+      height: 20px;
       background: transparent;
       border: none;
-      color: rgba(255, 255, 255, 0.3);
+      color: #64748b;
       cursor: pointer;
-      font-size: 1.1rem;
-      padding: 0;
+      font-size: 1.2rem;
       line-height: 1;
-      transition: color 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      border-radius: 4px;
     }
     .scene-delete:hover {
       color: #ff4444;
+      background: rgba(255, 68, 68, 0.1);
     }
     .no-data-msg {
       font-size: 0.85rem;
-      color: rgba(255, 255, 255, 0.4);
-      font-style: italic;
+      color: #64748b;
       text-align: center;
-      padding: 0.5rem 0;
+      padding: 1rem 0;
+      border: 1px dashed #23293D;
+      border-radius: 8px;
     }
   `]
 })

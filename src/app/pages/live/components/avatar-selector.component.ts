@@ -16,46 +16,50 @@ import { AvatarOption, AvatarSize, ImageCollection } from '../live.models';
           [class.selected]="currentAvatar?.id === avatar.id"
           (click)="onSelect.emit(avatar)"
         >
-          <img [src]="avatar.thumbnail" [alt]="avatar.name" class="avatar-thumb" />
+          <div class="avatar-thumb-wrapper">
+             <img [src]="avatar.thumbnail" [alt]="avatar.name" class="avatar-thumb" />
+          </div>
           <span class="avatar-name">{{ avatar.name }}</span>
           <span class="avatar-collection-badge" *ngIf="getCollectionName(avatar.defaultCollectionId)">
-            📁 {{ getCollectionName(avatar.defaultCollectionId) }}
+            {{ getCollectionName(avatar.defaultCollectionId) }}
           </span>
         </div>
       </div>
       
-      <div class="control-row">
-        <span class="control-label">Size:</span>
-        <div class="control-buttons">
-          <button 
-            *ngFor="let size of sizeOptions" 
-            class="control-btn" 
-            [class.active]="avatarSize === size.value"
-            (click)="onSetSize.emit(size.value)"
-          >
-            {{ size.label }}
-          </button>
-        </div>
+      <div class="control-section">
+          <div class="control-row">
+            <span class="control-label">Size</span>
+            <div class="segmented-control">
+              <button 
+                *ngFor="let size of sizeOptions" 
+                class="segment-btn" 
+                [class.active]="avatarSize === size.value"
+                (click)="onSetSize.emit(size.value)"
+              >
+                {{ size.label }}
+              </button>
+            </div>
+          </div>
+          
+          <div class="control-row">
+            <span class="control-label">Position</span>
+            <div class="segmented-control">
+              <button 
+                *ngFor="let pos of positionOptions" 
+                class="segment-btn" 
+                [class.active]="avatarPosition === pos.value"
+                (click)="onSetPosition.emit(pos.value)"
+                [title]="pos.value"
+              >
+                {{ pos.label }}
+              </button>
+            </div>
+          </div>
       </div>
       
-      <div class="control-row">
-        <span class="control-label">Pos:</span>
-        <div class="control-buttons">
-          <button 
-            *ngFor="let pos of positionOptions" 
-            class="control-btn" 
-            [class.active]="avatarPosition === pos.value"
-            (click)="onSetPosition.emit(pos.value)"
-            [title]="pos.value"
-          >
-            {{ pos.label }}
-          </button>
-        </div>
-      </div>
-      
-      <div class="assign-collection" *ngIf="currentAvatar && collections.length > 0">
-        <label>Default Collection:</label>
-        <select [(ngModel)]="currentAvatar.defaultCollectionId" (ngModelChange)="onCollectionChange.emit()">
+      <div class="control-row" *ngIf="currentAvatar && collections.length > 0">
+        <span class="control-label">Collection</span>
+        <select class="custom-select" [(ngModel)]="currentAvatar.defaultCollectionId" (ngModelChange)="onCollectionChange.emit()">
           <option [ngValue]="undefined">None</option>
           <option *ngFor="let col of collections" [value]="col.id">{{ col.name }}</option>
         </select>
@@ -63,22 +67,25 @@ import { AvatarOption, AvatarSize, ImageCollection } from '../live.models';
 
       <div class="divider"></div>
 
-      <div class="url-input-group">
-        <input 
-          type="text" 
-          [(ngModel)]="customUrl" 
-          placeholder="Paste Ready Player Me URL"
-          class="url-input"
-        />
-        <button (click)="loadCustom()" class="load-btn">Load</button>
+      <div class="custom-url-section">
+        <span class="section-label">Custom Avatar</span>
+        <div class="url-input-group">
+            <input 
+            type="text" 
+            [(ngModel)]="customUrl" 
+            placeholder="Ready Player Me URL..."
+            class="custom-input"
+            />
+            <button (click)="loadCustom()" class="load-btn">Load</button>
+        </div>
       </div>
     </div>
   `,
   styles: [`
     .divider {
         height: 1px;
-        background: rgba(255, 255, 255, 0.1);
-        margin: 1.5rem 0;
+        background: #23293D;
+        margin: 1rem 0;
     }
     .avatar-grid {
       display: grid;
@@ -91,157 +98,133 @@ import { AvatarOption, AvatarSize, ImageCollection } from '../live.models';
       flex-direction: column;
       align-items: center;
       padding: 0.75rem;
-      background: rgba(255, 255, 255, 0.03);
-      border-radius: 10px;
+      background: #151926;
+      border-radius: 8px;
       cursor: pointer;
       transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
-      border: 1px solid rgba(255, 255, 255, 0.1);
+      border: 1px solid #23293D;
     }
     .avatar-card:hover {
-      background: rgba(255, 255, 255, 0.08);
-      transform: translateY(-2px);
-      border-color: rgba(0, 217, 255, 0.3);
+      background: #1A1E2E;
+      border-color: #5C24FF;
     }
     .avatar-card.selected {
-      border-color: #00d9ff;
-      background: rgba(0, 217, 255, 0.1);
-      box-shadow: 0 0 15px rgba(0, 217, 255, 0.2);
+      border-color: #A855F7;
+      background: #1E2338;
+      box-shadow: 0 0 0 1px #A855F7;
+    }
+    .avatar-thumb-wrapper {
+        width: 60px;
+        height: 60px;
+        border-radius: 50%;
+        padding: 2px;
+        border: 1px solid #23293D;
+        margin-bottom: 0.5rem;
+        background: #0B0F19;
     }
     .avatar-thumb {
-      width: 70px;
-      height: 70px;
+      width: 100%;
+      height: 100%;
       border-radius: 50%;
       object-fit: cover;
-      background: rgba(0, 0, 0, 0.3);
-      border: 2px solid rgba(255, 255, 255, 0.1);
     }
     .avatar-name {
-      margin-top: 0.5rem;
-      color: rgba(255, 255, 255, 0.9);
-      font-size: 0.85rem;
+      color: #E2E8F0;
+      font-size: 0.8rem;
       font-weight: 500;
       text-align: center;
     }
     .avatar-collection-badge {
       margin-top: 0.25rem;
       font-size: 0.65rem;
-      color: #00ff88;
-      background: rgba(0, 255, 136, 0.1);
-      padding: 2px 8px;
-      border-radius: 10px;
+      color: #10B981;
+      background: rgba(16, 185, 129, 0.1);
+      padding: 2px 6px;
+      border-radius: 4px;
+    }
+    
+    /* Controls */
+    .control-section {
+        display: flex;
+        flex-direction: column;
+        gap: 0.75rem;
+        margin-bottom: 0.75rem;
     }
     .control-row {
-      margin-top: 0.75rem;
       display: flex;
-      align-items: center;
-      gap: 0.75rem;
+      flex-direction: column;
+      gap: 0.35rem;
     }
-    .control-label {
-      color: rgba(255, 255, 255, 0.7);
+    .control-label, .section-label {
+      color: #94A3B8;
       font-size: 0.75rem;
-      min-width: 45px;
-      font-weight: 700;
+      font-weight: 600;
       text-transform: uppercase;
       letter-spacing: 0.5px;
     }
-    .control-buttons {
+    
+    /* Segmented Control (Leonardo toggle style) */
+    .segmented-control {
       display: flex;
-      gap: 0.5rem;
-      flex: 1;
+      background: #0B0F19;
+      padding: 3px;
+      border-radius: 6px;
+      border: 1px solid #23293D;
     }
-    .control-btn {
+    .segment-btn {
       flex: 1;
-      padding: 10px;
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      background: rgba(255, 255, 255, 0.05);
-      color: #fff;
-      border-radius: 8px;
+      padding: 6px;
+      border: none;
+      background: transparent;
+      color: #94A3B8;
+      border-radius: 4px;
       cursor: pointer;
-      font-size: 0.85rem;
+      font-size: 0.75rem;
       font-weight: 600;
       transition: all 0.2s;
-      text-align: center;
     }
-    .control-btn:hover {
-      background: rgba(255, 255, 255, 0.12);
-      border-color: rgba(255, 255, 255, 0.25);
+    .segment-btn:hover {
+      color: #E2E8F0;
     }
-    .control-btn.active {
-      background: linear-gradient(135deg, #00d9ff, #00ff88);
+    .segment-btn.active {
+      background: #23293D;
       color: #fff;
-      border-color: transparent;
-      box-shadow: 0 4px 10px rgba(0, 217, 255, 0.3);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.3);
     }
-    .assign-collection {
-      margin-top: 1.25rem;
-      display: flex;
-      flex-direction: column;
-      gap: 0.5rem;
-    }
-    .assign-collection label {
-      color: rgba(255, 255, 255, 0.7);
-      font-size: 0.75rem;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-    }
-    .assign-collection select {
+    
+    /* Inputs & Selects */
+    .custom-select, .custom-input {
       width: 100%;
-      padding: 12px;
-      border-radius: 10px;
-      background: rgba(0, 0, 0, 0.4);
+      padding: 10px;
+      border-radius: 6px;
+      background: #0B0F19;
       color: #fff;
-      border: 1px solid rgba(255, 255, 255, 0.15);
-      font-size: 0.9rem;
-      outline: none;
-      cursor: pointer;
-    }
-    .assign-collection select:focus {
-      border-color: #00d9ff;
-    }
-    .url-input-group {
-      display: flex;
-      flex-direction: column;
-      gap: 0.75rem;
-    }
-    .url-input {
-      width: 100%;
-      padding: 14px;
-      border-radius: 10px;
-      background: rgba(0, 0, 0, 0.3);
-      color: #fff;
-      border: 1px solid rgba(255, 255, 255, 0.15);
+      border: 1px solid #23293D;
       font-size: 0.85rem;
       outline: none;
-      transition: all 0.2s;
+      transition: border-color 0.2s;
     }
-    .url-input::placeholder {
-      color: rgba(255, 255, 255, 0.4);
+    .custom-select:focus, .custom-input:focus {
+      border-color: #A855F7;
     }
-    .url-input:focus {
-      border-color: #00d9ff;
-      background: rgba(0, 0, 0, 0.5);
+    
+    .url-input-group {
+      display: flex;
+      gap: 0.5rem;
     }
     .load-btn {
-      width: 100%;
-      padding: 14px;
-      border-radius: 10px;
-      background: linear-gradient(135deg, #00d9ff, #00ff88);
+      padding: 0 16px;
+      border-radius: 6px;
+      background: linear-gradient(135deg, #FF3BFF, #5C24FF);
       color: #fff;
-      font-weight: 700;
-      font-size: 0.95rem;
+      font-weight: 600;
+      font-size: 0.85rem;
       cursor: pointer;
       border: none;
-      transition: all 0.2s;
-      text-transform: uppercase;
-      letter-spacing: 1px;
+      transition: opacity 0.2s;
     }
     .load-btn:hover {
-      transform: scale(1.02);
-      box-shadow: 0 5px 15px rgba(0, 217, 255, 0.4);
-    }
-    .load-btn:active {
-      transform: scale(0.98);
+      opacity: 0.9;
     }
   `]
 })

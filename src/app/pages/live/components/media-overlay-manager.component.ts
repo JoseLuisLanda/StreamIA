@@ -11,36 +11,38 @@ import { ImageCollection } from '../live.models';
   template: `
     <div class="overlay-manager-content">
       <div class="action-bar">
-        <div class="header-controls">
-          <button 
-            class="icon-btn" 
-            [class.active]="isFreeMoveMode" 
-            (click)="onToggleFreeMove.emit()"
-            title="Toggle Free Move Mode"
-          >
-            ✋
-          </button>
-          <button class="add-overlay-btn" (click)="onAddOverlay.emit()">+ Add</button>
-        </div>
+        <button 
+          class="icon-toggle-btn" 
+          [class.active]="isFreeMoveMode" 
+          (click)="onToggleFreeMove.emit()"
+          title="Toggle Free Move Mode"
+        >
+          <span class="btn-icon">✋</span> Free Move
+        </button>
+        <button class="primary-btn" (click)="onAddOverlay.emit()">+ Add Screen</button>
       </div>
       
-      <!-- Size and Layout Controls (only shown when an overlay is selected) -->
-      <div class="overlay-settings" *ngIf="selectedOverlay">
-        <div class="selected-overlay-label">
-          Editing: <strong>{{ selectedOverlay.name }}</strong>
+      <!-- Settings Panel -->
+      <div class="settings-panel" *ngIf="selectedOverlay">
+        <div class="panel-header">
+           <span class="panel-label">Selected:</span>
+           <span class="selected-name">{{ selectedOverlay.name }}</span>
         </div>
         
-        <div class="setting-row">
-          <label>Layout:</label>
-          <select [(ngModel)]="selectedOverlay.layout" (ngModelChange)="onLayoutChangeHandler($event)">
-            <option value="horizontal">Horizontal (4:3)</option>
-            <option value="square">Square (1:1)</option>
-            <option value="vertical">Vertical (3:4)</option>
-          </select>
+        <div class="control-row">
+          <label>Layout</label>
+          <div class="segmented-control">
+             <button class="segment-btn" [class.active]="selectedOverlay.layout === 'horizontal'" (click)="onLayoutChangeHandler('horizontal')">4:3</button>
+             <button class="segment-btn" [class.active]="selectedOverlay.layout === 'square'" (click)="onLayoutChangeHandler('square')">1:1</button>
+             <button class="segment-btn" [class.active]="selectedOverlay.layout === 'vertical'" (click)="onLayoutChangeHandler('vertical')">3:4</button>
+          </div>
         </div>
         
-        <div class="setting-row">
-          <label>Size:</label>
+        <div class="control-row">
+          <div class="label-row">
+            <label>Size</label>
+            <span class="value-display">{{ selectedOverlay.width }}px</span>
+          </div>
           <input 
             type="range" 
             [ngModel]="selectedOverlay.width" 
@@ -48,255 +50,281 @@ import { ImageCollection } from '../live.models';
             min="150" 
             max="800" 
             step="10"
+            class="range-slider"
           >
-          <span class="size-display">{{ selectedOverlay.width }}x{{ selectedOverlay.height }}</span>
         </div>
       </div>
 
       <div class="overlays-list" *ngIf="mediaOverlays.length > 0">
         <div 
-          class="item-card" 
+          class="list-item" 
           *ngFor="let overlay of mediaOverlays"
           [class.selected]="overlay.id === selectedOverlayId"
           (click)="onSelectOverlay.emit(overlay.id)"
         >
-          <div class="item-header">
-            <span class="item-name">{{ overlay.name }}</span>
-            <button class="item-remove" (click)="onRemoveOverlay.emit(overlay.id); $event.stopPropagation()">🗑️</button>
+          <div class="item-main">
+            <span class="item-icon">📺</span>
+            <div class="item-details">
+                <span class="item-name">{{ overlay.name }}</span>
+                <span class="item-sub">{{ overlay.width }}x{{ overlay.height }}</span>
+            </div>
           </div>
           
-          <div class="item-controls">
-            <button class="share-screen-btn" (click)="onCaptureScreen.emit(overlay); $event.stopPropagation()">
-              🖥️ Share Window/Screen
+          <div class="item-actions">
+             <button class="action-icon-btn delete" (click)="onRemoveOverlay.emit(overlay.id); $event.stopPropagation()">🗑️</button>
+          </div>
+          
+          <div class="item-tools" *ngIf="overlay.id === selectedOverlayId" (click)="$event.stopPropagation()">
+            <button class="tool-btn" (click)="onCaptureScreen.emit(overlay)">
+               🖥️ Share Screen
             </button>
-            
             <select 
               [ngModel]="''" 
-              (ngModelChange)="onAssignCollection.emit({overlay, collectionId: $event}); $event.stopPropagation()"
-              (click)="$event.stopPropagation()"
-              class="collection-select"
+              (ngModelChange)="onAssignCollection.emit({overlay, collectionId: $event})"
+              class="tool-select"
               *ngIf="collections.length > 0"
             >
-              <option value="" disabled selected>Or select collection...</option>
+              <option value="" disabled selected>Assign Collection...</option>
               <option *ngFor="let col of collections" [value]="col.id">{{ col.name }}</option>
             </select>
           </div>
         </div>
+      </div>
+      
+      <div class="empty-state" *ngIf="mediaOverlays.length === 0">
+         No screens added yet.
       </div>
     </div>
   `,
   styles: [`
     .action-bar {
         display: flex;
-        justify-content: flex-end;
+        justify-content: space-between;
+        margin-bottom: 1rem;
+        gap: 0.5rem;
+    }
+    .primary-btn {
+        background: linear-gradient(135deg, #FF3BFF, #5C24FF);
+        color: white;
+        border: none;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        font-weight: 600;
+        cursor: pointer;
+        transition: opacity 0.2s;
+    }
+    .primary-btn:hover {
+        opacity: 0.9;
+    }
+    .icon-toggle-btn {
+        background: #0B0F19;
+        border: 1px solid #23293D;
+        color: #94A3B8;
+        padding: 8px 12px;
+        border-radius: 6px;
+        font-size: 0.8rem;
+        font-weight: 500;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        gap: 6px;
+    }
+    .icon-toggle-btn.active {
+        background: #23293D;
+        color: #fff;
+        border-color: #5C24FF;
+    }
+    
+    /* Settings Panel */
+    .settings-panel {
+        background: #0B0F19;
+        border: 1px solid #23293D;
+        border-radius: 8px;
+        padding: 0.75rem;
         margin-bottom: 1rem;
     }
-    .header-controls {
+    .panel-header {
+        display: flex;
+        align-items: center;
+        gap: 6px;
+        margin-bottom: 0.75rem;
+        border-bottom: 1px solid #1F2436;
+        padding-bottom: 0.5rem;
+    }
+    .panel-label {
+        color: #64748B;
+        font-size: 0.75rem;
+        text-transform: uppercase;
+        font-weight: 600;
+    }
+    .selected-name {
+        color: #fff;
+        font-weight: 600;
+        font-size: 0.85rem;
+    }
+    
+    .control-row {
+        margin-bottom: 0.75rem;
+    }
+    .control-row label {
+        display: block;
+        color: #94A3B8;
+        font-size: 0.75rem;
+        font-weight: 600;
+        margin-bottom: 0.4rem;
+        text-transform: uppercase;
+    }
+    
+    /* Segmented Control */
+    .segmented-control {
       display: flex;
-      align-items: center;
-      gap: 0.5rem;
-    }
-    .add-overlay-btn {
-      padding: 6px 14px;
-      border-radius: 8px;
-      border: 1px solid rgba(0, 217, 255, 0.3);
-      background: rgba(0, 217, 255, 0.1);
-      color: #00d9ff;
-      font-size: 0.8rem;
-      font-weight: 600;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .add-overlay-btn:hover {
-      background: #00d9ff;
-      color: #000;
-      transform: translateY(-1px);
-    }
-    .overlay-settings {
-      margin-bottom: 1.25rem;
-      padding: 1rem;
-      background: rgba(0, 0, 0, 0.2);
-      border-radius: 12px;
-      border: 1px solid rgba(255, 255, 255, 0.05);
-    }
-    .selected-overlay-label {
-      color: #00d9ff;
-      font-size: 0.85rem;
-      margin-bottom: 0.75rem;
-      padding: 0.5rem;
-      background: rgba(0, 217, 255, 0.1);
+      background: #151926;
+      padding: 3px;
       border-radius: 6px;
-      border: 1px solid rgba(0, 217, 255, 0.2);
+      border: 1px solid #23293D;
     }
-    .selected-overlay-label strong {
-      color: #fff;
-    }
-    .setting-row {
-      display: flex;
-      align-items: center;
-      gap: 0.75rem;
-      margin-bottom: 0.75rem;
-    }
-    .setting-row:last-child {
-      margin-bottom: 0;
-    }
-    .setting-row label {
-      color: rgba(255, 255, 255, 0.7);
-      font-size: 0.8rem;
-      min-width: 60px;
-    }
-    .setting-row select {
+    .segment-btn {
       flex: 1;
-      padding: 0.4rem 0.6rem;
-      background: rgba(0, 0, 0, 0.4);
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      border-radius: 6px;
-      color: #fff;
-      font-size: 0.8rem;
+      padding: 6px;
+      border: none;
+      background: transparent;
+      color: #94A3B8;
+      border-radius: 4px;
       cursor: pointer;
-      transition: all 0.2s;
-    }
-    .setting-row select:hover {
-      background: rgba(0, 0, 0, 0.6);
-      border-color: rgba(0, 217, 255, 0.4);
-    }
-    .setting-row select:focus {
-      outline: none;
-      border-color: #00d9ff;
-      box-shadow: 0 0 8px rgba(0, 217, 255, 0.3);
-    }
-    .setting-row select option {
-      background: #1a1a1a;
-      color: #fff;
-      padding: 0.5rem;
-    }
-    .setting-row input[type="range"] {
-      flex: 1;
-      height: 4px;
-      border-radius: 2px;
-      background: rgba(255, 255, 255, 0.1);
-      outline: none;
-      -webkit-appearance: none;
-    }
-    .setting-row input[type="range"]::-webkit-slider-thumb {
-      -webkit-appearance: none;
-      width: 14px;
-      height: 14px;
-      border-radius: 50%;
-      background: #00d9ff;
-      cursor: pointer;
-      transition: all 0.2s;
-    }
-    .setting-row input[type="range"]::-webkit-slider-thumb:hover {
-      transform: scale(1.2);
-      box-shadow: 0 0 10px rgba(0, 217, 255, 0.5);
-    }
-    .size-display {
-      color: rgba(255, 255, 255, 0.6);
       font-size: 0.75rem;
-      min-width: 80px;
-      text-align: right;
-    }
-    .item-card {
-      background: rgba(255, 255, 255, 0.03);
-      border: 1px solid rgba(255, 255, 255, 0.05);
-      border-radius: 12px;
-      padding: 1rem;
-      margin-bottom: 0.75rem;
+      font-weight: 600;
       transition: all 0.2s;
-      cursor: pointer;
     }
-    .item-card:hover {
-      background: rgba(255, 255, 255, 0.05);
-      border-color: rgba(0, 217, 255, 0.2);
+    .segment-btn.active {
+      background: #23293D;
+      color: #fff;
     }
-    .item-card.selected {
-      background: rgba(0, 217, 255, 0.1);
-      border-color: rgba(0, 217, 255, 0.4);
-      box-shadow: 0 0 15px rgba(0, 217, 255, 0.2);
+    
+    /* Range Slider */
+    .label-row {
+        display: flex;
+        justify-content: space-between;
+        margin-bottom: 0.4rem;
     }
-    .item-header {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      margin-bottom: 0.75rem;
+    .value-display {
+        color: #5C24FF;
+        font-size: 0.75rem;
+        font-weight: 600;
+    }
+    .range-slider {
+        width: 100%;
+        height: 4px;
+        border-radius: 2px;
+        background: #23293D;
+        outline: none;
+        -webkit-appearance: none;
+        accent-color: #5C24FF;
+    }
+    
+    /* List Items */
+    .list-item {
+        background: #151926;
+        border: 1px solid #23293D;
+        border-radius: 8px;
+        margin-bottom: 0.5rem;
+        overflow: hidden;
+        transition: all 0.2s;
+        cursor: pointer;
+    }
+    .list-item:hover {
+        border-color: #3B4259;
+    }
+    .list-item.selected {
+        border-color: #5C24FF;
+        background: #1A1E2E;
+    }
+    .item-main {
+        padding: 10px;
+        display: flex;
+        align-items: center;
+        gap: 10px;
+    }
+    .item-icon {
+        font-size: 1.2rem;
+    }
+    .item-details {
+        display: flex;
+        flex-direction: column;
     }
     .item-name {
-      color: #fff;
-      font-size: 0.9rem;
-      font-weight: 600;
+        color: #E2E8F0;
+        font-size: 0.85rem;
+        font-weight: 600;
     }
-    .item-remove {
-      background: transparent;
-      border: none;
-      cursor: pointer;
-      color: rgba(255, 255, 255, 0.3);
-      font-size: 1.1rem;
-      transition: color 0.2s;
+    .item-sub {
+        color: #64748B;
+        font-size: 0.75rem;
     }
-    .item-remove:hover {
-      color: #ff4444;
+    .item-actions {
+        margin-left: auto;
+        padding-right: 10px;
     }
-    .share-screen-btn {
-      width: 100%;
-      padding: 10px;
-      background: rgba(0, 217, 255, 0.1);
-      border: 1px solid rgba(0, 217, 255, 0.2);
-      color: #00d9ff;
-      border-radius: 8px;
-      cursor: pointer;
-      margin-bottom: 0.75rem;
-      font-weight: 600;
-      font-size: 0.85rem;
-      transition: all 0.2s;
+    .list-item .item-main {
+        position: relative;
     }
-    .share-screen-btn:hover {
-      background: rgba(0, 217, 255, 0.2);
-      transform: translateY(-1px);
+    .list-item .item-actions {
+        position: absolute; 
+        right: 10px; 
+        top: 10px;
     }
-    .collection-select {
-      width: 100%;
-      padding: 10px;
-      background: rgba(0, 0, 0, 0.4);
-      color: #fff;
-      border: 1px solid rgba(255, 255, 255, 0.2);
-      border-radius: 8px;
-      font-size: 0.85rem;
-      outline: none;
-      cursor: pointer;
-      transition: all 0.2s;
+    
+    .action-icon-btn {
+        background: transparent;
+        border: none;
+        cursor: pointer;
+        opacity: 0.5;
+        transition: opacity 0.2s;
+        font-size: 1rem;
     }
-    .collection-select:hover {
-      background: rgba(0, 0, 0, 0.6);
-      border-color: rgba(0, 217, 255, 0.4);
+    .action-icon-btn:hover {
+        opacity: 1;
     }
-    .collection-select:focus {
-      border-color: #00d9ff;
-      box-shadow: 0 0 8px rgba(0, 217, 255, 0.3);
+    
+    /* Item Tools (Expanded) */
+    .item-tools {
+        padding: 10px;
+        background: #0B0F19;
+        border-top: 1px solid #23293D;
+        display: flex;
+        flex-direction: column;
+        gap: 8px;
     }
-    .collection-select option {
-      background: #1a1a1a;
-      color: #fff;
-      padding: 0.5rem;
+    .tool-btn {
+        width: 100%;
+        padding: 8px;
+        background: #23293D;
+        color: #E2E8F0;
+        border: 1px solid #3B4259;
+        border-radius: 6px;
+        cursor: pointer;
+        font-size: 0.8rem;
+        transition: all 0.2s;
     }
-    .icon-btn {
-      width: 32px;
-      height: 32px;
-      background: rgba(255, 255, 255, 0.05);
-      border: 1px solid rgba(255, 255, 255, 0.1);
-      color: #fff;
-      cursor: pointer;
-      border-radius: 8px;
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      transition: all 0.2s;
+    .tool-btn:hover {
+        background: #2A3042;
+        color: #fff;
     }
-    .icon-btn.active {
-      color: #000;
-      background: #00d9ff;
-      border-color: transparent;
-      box-shadow: 0 0 10px rgba(0, 217, 255, 0.3);
+    .tool-select {
+        width: 100%;
+        padding: 8px;
+        background: #0B0F19;
+        color: #fff;
+        border: 1px solid #23293D;
+        border-radius: 6px;
+        font-size: 0.8rem;
+    }
+    
+    .empty-state {
+        text-align: center;
+        color: #64748B;
+        font-size: 0.85rem;
+        padding: 1rem;
     }
   `]
 })
