@@ -80,9 +80,9 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
 
     // Position mapping (X axis offset)
     private positionXMap = {
-        left: -0.8,
+        left: -0.6,
         center: 0,
-        right: 0.8
+        right: 0.6
     };
 
     private trackService = inject(FaceTrackingService);
@@ -174,7 +174,7 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
 
         // Camera
         this.camera = new THREE.PerspectiveCamera(25, width / height, 0.1, 1000);
-        this.camera.position.set(0, 0, 3); // Ajustado para encuadre similar al original
+        this.camera.position.set(0, 0.1, 2.5); // Closer shot for chest-up view
 
         // Renderer
         this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });

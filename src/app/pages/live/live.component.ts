@@ -96,7 +96,7 @@ export class LiveComponent implements OnInit, OnDestroy {
   isSceneLoading = false;
 
   // Accordion State
-  activeSections: Set<string> = new Set(['scenes']);
+  activeSections: Set<string> = new Set([]);
 
   toggleSection(section: string) {
     if (this.activeSections.has(section)) {
