@@ -39,7 +39,6 @@ export class FaceTrackingService {
             };
 
             this.faceLandmarker = await FaceLandmarker.createFromOptions(filesetResolver, options);
-            console.log('MediaPipe Face Landmarker initialized');
 
             await this.startCamera();
         } catch (error) {

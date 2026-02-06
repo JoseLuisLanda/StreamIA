@@ -4,13 +4,27 @@ import * as THREE from 'three';
 // @ts-ignore
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 import { FaceTrackingService } from '../../services/face-tracking.service';
+import { ModelCacheService } from '../../services/model-cache.service';
 
 @Component({
     selector: 'app-avatar-viewer',
     standalone: true,
     imports: [CommonModule],
     template: `
-    <div #canvasContainer class="canvas-container" [style.backgroundImage]="backgroundImage ? 'url(' + backgroundImage + ')' : null"></div>
+    <div #canvasContainer class="canvas-container">
+        <!-- Background Video -->
+        <video *ngIf="isVideo(backgroundImage)" 
+               [src]="backgroundImage" 
+               autoplay loop muted playsinline 
+               class="background-media is-video">
+        </video>
+        
+        <!-- Background Image -->
+        <div *ngIf="!isVideo(backgroundImage) && backgroundImage" 
+             class="background-media is-image" 
+             [style.backgroundImage]="'url(' + backgroundImage + ')'">
+        </div>
+    </div>
   `,
     styles: [`
     :host {
@@ -23,10 +37,28 @@ import { FaceTrackingService } from '../../services/face-tracking.service';
       height: 100%;
       overflow: hidden;
       background-color: #222;
-      background-size: cover;
-      background-position: center;
-      background-repeat: no-repeat;
-      transition: background-image 0.5s ease-in-out;
+      position: relative;
+    }
+    .background-media {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        object-fit: cover;
+        z-index: 0;
+    }
+    .background-media.is-image {
+        background-size: cover;
+        background-position: center;
+        background-repeat: no-repeat;
+        transition: background-image 0.5s ease-in-out;
+    }
+    
+    /* Ensure canvas is on top */
+    ::ng-deep canvas {
+        position: relative;
+        z-index: 1;
     }
   `]
 })
@@ -54,6 +86,7 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
     };
 
     private trackService = inject(FaceTrackingService);
+    private modelCache = inject(ModelCacheService);
     private ngZone = inject(NgZone);
     public isLoading = true;
     private isInitialized = false;
@@ -117,6 +150,11 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
         }
     }
 
+    public isVideo(url: string | null): boolean {
+        if (!url) return false;
+        return url.startsWith('data:video') || url.endsWith('.mp4') || url.endsWith('.webm') || url.endsWith('.mov');
+    }
+
     // Public method to force resize - call from parent when container size changes
     public forceResize() {
         setTimeout(() => this.onWindowResize(), 50);
@@ -166,7 +204,7 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
         window.addEventListener('resize', this.onWindowResize.bind(this));
     }
 
-    private loadAvatar(url: string) {
+    private async loadAvatar(url: string) {
         this.isLoading = true;
         const loader = new GLTFLoader();
 
@@ -175,81 +213,114 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
             url += (url.includes('?') ? '&' : '?') + 'morphTargets=ARKit&textureAtlas=1024';
         }
 
-        loader.load(url, (gltf: any) => {
-            // Cleanup previous model if exists
-            if (this.currentModel) {
-                this.scene.remove(this.currentModel);
-                this.currentModel.traverse((node: THREE.Object3D) => {
-                    if ((node as THREE.Mesh).geometry) {
-                        (node as THREE.Mesh).geometry.dispose();
-                    }
-                    if ((node as THREE.Mesh).material) {
-                        const material = (node as THREE.Mesh).material;
-                        if (Array.isArray(material)) {
-                            material.forEach(m => m.dispose());
-                        } else {
-                            material.dispose();
-                        }
-                    }
+        try {
+            // Try to get from cache first
+            const cachedData = await this.modelCache.getCachedModel(url);
+
+            if (cachedData) {
+                // Load from cache
+                loader.parse(cachedData, '', (gltf: any) => {
+                    this.processLoadedModel(gltf);
+                }, (error: any) => {
+                    console.error('Error parsing cached model:', error);
+                    // If cache is corrupted, download fresh
+                    this.downloadAndCacheModel(url, loader);
                 });
+            } else {
+                // Download and cache
+                this.downloadAndCacheModel(url, loader);
             }
-
-            const model = gltf.scene;
-            // Apply scale based on size setting
-            const scale = this.sizeScaleMap[this.avatarSize];
-            model.scale.set(scale, scale, scale);
-
-            // Apply position with Y offset based on size
-            const baseY = -1.75;
-            const yOffset = this.avatarSize === 'large' ? -0.5 :
-                this.avatarSize === 'small' ? 0.2 : 0;
-            model.position.set(0, baseY + yOffset, 0);
-
-            this.currentModel = model;
-
-            this.scene.add(model);
-
-            this.headMesh = [];
-            this.nodes = {};
-
-            model.traverse((node: THREE.Object3D) => {
-                // Build nodes map
-                this.nodes[node.name] = node;
-
-                // Identify head meshes for blendshapes
-                if (node.name === 'Wolf3D_Head' ||
-                    node.name === 'Wolf3D_Teeth' ||
-                    node.name === 'Wolf3D_Beard' ||
-                    node.name === 'Wolf3D_Avatar' ||
-                    node.name === 'Wolf3D_Head_Custom') {
-                    this.headMesh.push(node);
-                }
-            });
-
-            console.log('Model loaded', this.nodes);
-
-            // DEBUG: Log arm-related bones to find correct names
-            console.log('🦴 Looking for arm bones...');
-            Object.keys(this.nodes).forEach(name => {
-                const lowerName = name.toLowerCase();
-                if (lowerName.includes('arm') || lowerName.includes('shoulder') ||
-                    lowerName.includes('hand') || lowerName.includes('elbow')) {
-                    console.log('  Found bone:', name);
-                }
-            });
-
+        } catch (error) {
+            console.error('Error loading avatar:', error);
             this.isLoading = false;
-        },
-            (xhr: ProgressEvent) => {
-                // progress info
-                console.log((xhr.loaded / xhr.total * 100) + '% loaded');
-            },
-            (error: any) => {
-                console.error('An error happened loading the avatar:', error);
+        }
+    }
+
+    private downloadAndCacheModel(url: string, loader: GLTFLoader) {
+        console.log('📥 Downloading model from:', url);
+
+        // Use custom loader to get ArrayBuffer for caching
+        fetch(url)
+            .then(response => response.arrayBuffer())
+            .then(async (arrayBuffer) => {
+                // Cache the model
+                await this.modelCache.cacheModel(url, arrayBuffer);
+
+                // Parse and load
+                loader.parse(arrayBuffer, '', (gltf: any) => {
+                    this.processLoadedModel(gltf);
+                }, (error: any) => {
+                    console.error('Error parsing downloaded model:', error);
+                    this.isLoading = false;
+                });
+            })
+            .catch((error) => {
                 this.isLoading = false;
-                const msg = error.message || error.target?.statusText || 'Unknown error';
-                alert('Error loading avatar: ' + msg);
+                const msg = error.message || 'Unknown error';
+                alert('Error downloading avatar: ' + msg);
             });
+    }
+
+    private processLoadedModel(gltf: any) {
+        // Cleanup previous model if exists
+        if (this.currentModel) {
+            this.scene.remove(this.currentModel);
+            this.currentModel.traverse((node: THREE.Object3D) => {
+                if ((node as THREE.Mesh).geometry) {
+                    (node as THREE.Mesh).geometry.dispose();
+                }
+                if ((node as THREE.Mesh).material) {
+                    const material = (node as THREE.Mesh).material;
+                    if (Array.isArray(material)) {
+                        material.forEach(m => m.dispose());
+                    } else {
+                        material.dispose();
+                    }
+                }
+            });
+        }
+
+        const model = gltf.scene;
+        // Apply scale based on size setting
+        const scale = this.sizeScaleMap[this.avatarSize];
+        model.scale.set(scale, scale, scale);
+
+        // Apply position with Y offset based on size
+        const baseY = -1.75;
+        const yOffset = this.avatarSize === 'large' ? -0.5 :
+            this.avatarSize === 'small' ? 0.2 : 0;
+        model.position.set(0, baseY + yOffset, 0);
+
+        this.currentModel = model;
+
+        this.scene.add(model);
+
+        this.headMesh = [];
+        this.nodes = {};
+
+        model.traverse((node: THREE.Object3D) => {
+            // Build nodes map
+            this.nodes[node.name] = node;
+
+            // Identify head meshes for blendshapes
+            if (node.name === 'Wolf3D_Head' ||
+                node.name === 'Wolf3D_Teeth' ||
+                node.name === 'Wolf3D_Beard' ||
+                node.name === 'Wolf3D_Avatar' ||
+                node.name === 'Wolf3D_Head_Custom') {
+                this.headMesh.push(node);
+            }
+        });
+
+        // DEBUG: Log arm-related bones to find correct names
+        Object.keys(this.nodes).forEach(name => {
+            const lowerName = name.toLowerCase();
+            if (lowerName.includes('arm') || lowerName.includes('shoulder') ||
+                lowerName.includes('hand') || lowerName.includes('elbow')) {
+            }
+        });
+
+        this.isLoading = false;
     }
 
     private onWindowResize() {

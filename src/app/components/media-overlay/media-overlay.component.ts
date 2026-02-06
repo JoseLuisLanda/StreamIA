@@ -16,6 +16,9 @@ export interface MediaOverlay {
   autoLoop: boolean;
   intervalSeconds: number;
   position?: { x: number, y: number };
+  width: number;
+  height: number;
+  layout: 'horizontal' | 'vertical' | 'square'; // horizontal = 4:3, vertical = 3:4, square = 1:1
 }
 
 @Component({
@@ -27,11 +30,11 @@ export interface MediaOverlay {
         class="overlay-box" 
         [class.draggable]="draggable"
         [class.dragging]="isDragging"
-        [style.width.px]="width" 
-        [style.height.px]="height"
-        [style.position]="draggable && overlay.position ? 'absolute' : 'relative'"
-        [style.left.px]="draggable && overlay.position ? overlay.position.x : null"
-        [style.top.px]="draggable && overlay.position ? overlay.position.y : null"
+        [style.width.px]="overlay.width" 
+        [style.height.px]="overlay.height"
+        [style.position]="overlay.position ? 'absolute' : 'relative'"
+        [style.left.px]="overlay.position ? overlay.position.x : null"
+        [style.top.px]="overlay.position ? overlay.position.y : null"
         (mousedown)="onMouseDown($event)"
     >
       <!-- Media Content -->
@@ -213,8 +216,6 @@ export interface MediaOverlay {
 })
 export class MediaOverlayComponent implements OnDestroy {
   @Input() overlay!: MediaOverlay;
-  @Input() width = 200;
-  @Input() height = 150;
   @Input() draggable = false;
 
   @Output() onRemove = new EventEmitter<string>();

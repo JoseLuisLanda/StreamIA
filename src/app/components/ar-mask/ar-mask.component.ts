@@ -222,7 +222,6 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       }
     }
 
-    console.log(`Valid triangles: ${validIndices.length / 3} of ${FACE_MESH_TRIANGULATION.length / 3}`);
 
     // Set indices from validated triangulation
     const indices = new Uint16Array(validIndices);
@@ -253,7 +252,6 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
         texture.minFilter = THREE.LinearFilter;
         texture.magFilter = THREE.LinearFilter;
         mask.texture = texture;
-        console.log(`Loaded texture: ${mask.name}`);
         if (mask.id === this.selectedMaskId) {
           this.updateMaterial();
         }

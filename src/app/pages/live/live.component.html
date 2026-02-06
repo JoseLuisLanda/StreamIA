@@ -1,0 +1,115 @@
+<div class="app-container">
+    <!-- Avatar Container -->
+    <div class="avatar-wrapper" [class.panel-open]="isPanelOpen">
+        <app-avatar-viewer #avatarViewer [avatarUrl]="currentAvatarUrl" [backgroundImage]="currentBackground"
+            [avatarSize]="avatarSize" [avatarPosition]="avatarPosition" [style.opacity]="isSceneLoading ? '0' : '1'"
+            [style.transition]="'opacity 0.3s ease-in-out'"></app-avatar-viewer>
+
+        <!-- Media Overlays -->
+        <div class="overlays-container" [class.free-move]="isFreeMoveMode" *ngIf="mediaOverlays.length > 0">
+            <app-media-overlay *ngFor="let overlay of mediaOverlays" [overlay]="overlay" [draggable]="isFreeMoveMode"
+                (onRemove)="removeOverlay($event)" (onUpdate)="updateOverlay($event)"
+                (onPositionChange)="updateOverlay($event)"></app-media-overlay>
+        </div>
+
+        <!-- Scene Loading Overlay -->
+        <div class="loading-scene-overlay" [class.visible]="isSceneLoading">
+            <div class="loading-spinner"></div>
+            <div class="loading-text">Loading Scene...</div>
+        </div>
+    </div>
+
+    <!-- Panel Toggle -->
+    <button class="panel-toggle" (click)="togglePanel()" [class.panel-open]="isPanelOpen">
+        <span class="toggle-icon">{{ isPanelOpen ? '◀' : '▶' }}</span>
+    </button>
+
+    <!-- Side Panel -->
+    <div class="side-panel" [class.open]="isPanelOpen">
+        <div class="panel-content">
+            <h3 class="panel-title">Studio Controls</h3>
+
+            <!-- Scenes Accordion -->
+            <div class="accordion-item" [class.open]="activeSections.has('scenes')">
+                <div class="accordion-header" (click)="toggleSection('scenes')">
+                    <span class="accordion-title">🎬 Scenes</span>
+                    <span class="accordion-chevron">▼</span>
+                </div>
+                <div class="accordion-content">
+                    <app-scene-manager [scenes]="scenes" [activeSceneId]="currentSceneId" (onSave)="saveCurrentScene()"
+                        (onUpdate)="updateCurrentScene()" (onLoad)="loadScene($event)" (onDelete)="deleteScene($event)">
+                    </app-scene-manager>
+                </div>
+            </div>
+
+            <!-- Camera Accordion -->
+            <div class="accordion-item" [class.open]="activeSections.has('camera')">
+                <div class="accordion-header" (click)="toggleSection('camera')">
+                    <span class="accordion-title">📹 Camera</span>
+                    <span class="accordion-chevron">▼</span>
+                </div>
+                <div class="accordion-content">
+                    <div class="camera-container">
+                        <app-video-preview></app-video-preview>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Avatar Accordion -->
+            <div class="accordion-item" [class.open]="activeSections.has('avatar')">
+                <div class="accordion-header" (click)="toggleSection('avatar')">
+                    <span class="accordion-title">🎭 Avatar</span>
+                    <span class="accordion-chevron">▼</span>
+                </div>
+                <div class="accordion-content">
+                    <app-avatar-selector [avatars]="avatars" [currentAvatar]="currentAvatar" [avatarSize]="avatarSize"
+                        [avatarPosition]="avatarPosition" [collections]="collections" [sizeOptions]="sizeOptions"
+                        [positionOptions]="positionOptions" (onSelect)="selectAvatar($event)"
+                        (onSetSize)="setAvatarSize($event)" (onSetPosition)="setAvatarPosition($event)"
+                        (onCollectionChange)="onAvatarCollectionChange()" (onLoadCustom)="loadCustomAvatar($event)">
+                    </app-avatar-selector>
+                </div>
+            </div>
+
+            <!-- Media Overlays Accordion -->
+            <div class="accordion-item" [class.open]="activeSections.has('media')">
+                <div class="accordion-header" (click)="toggleSection('media')">
+                    <span class="accordion-title">📺 Media Screens</span>
+                    <span class="accordion-chevron">▼</span>
+                </div>
+                <div class="accordion-content">
+                    <app-media-overlay-manager [mediaOverlays]="mediaOverlays" [isFreeMoveMode]="isFreeMoveMode"
+                        [selectedOverlayId]="selectedOverlayId" [collections]="collections"
+                        (onToggleFreeMove)="toggleFreeMoveMode()" (onAddOverlay)="addOverlay()"
+                        (onRemoveOverlay)="removeOverlay($event)" (onCaptureScreen)="captureScreen($event)"
+                        (onAssignCollection)="assignCollectionToOverlay($event.overlay, $event.collectionId)"
+                        (onSelectOverlay)="selectOverlay($event)" (onResizeOverlay)="resizeOverlay($event)"
+                        (onLayoutChange)="changeOverlayLayout($event)">
+                    </app-media-overlay-manager>
+                </div>
+            </div>
+
+            <!-- Backgrounds Accordion -->
+            <div class="accordion-item" [class.open]="activeSections.has('backgrounds')">
+                <div class="accordion-header" (click)="toggleSection('backgrounds')">
+                    <span class="accordion-title">🖼️ Backgrounds</span>
+                    <span class="accordion-chevron">▼</span>
+                </div>
+                <div class="accordion-content">
+                    <app-background-manager [collections]="collections" [activeCollection]="activeCollection"
+                        [currentIndex]="currentBackgroundIndex" [mode]="carouselMode" [interval]="autoIntervalSeconds"
+                        (onFilesSelected)="onFilesSelected($event)" (onSelect)="selectCollection($event)"
+                        (onDelete)="deleteCollection($event)" (onPrev)="prevBackground()" (onNext)="nextBackground()"
+                        (onModeChange)="carouselMode = $event; onModeChange()"
+                        (onIntervalChange)="autoIntervalSeconds = $event; onIntervalChange()"
+                        (onClear)="clearActiveCollection()">
+                    </app-background-manager>
+                </div>
+            </div>
+
+            <div class="panel-footer">
+                <a routerLink="/" class="back-btn">← Back to Home</a>
+            </div>
+        </div>
+    </div>
+</div>
