@@ -11,22 +11,47 @@ import { ImageCollection } from '../live.models';
   template: `
     <div class="overlay-manager-content">
       <div class="action-bar">
+        <div class="add-group">
+            <input 
+              type="text" 
+              [(ngModel)]="newScreenName" 
+              placeholder="Screen Name"
+              class="custom-input"
+            />
+            <button 
+              class="primary-btn" 
+              (click)="handleAdd()" 
+              [disabled]="!newScreenName.trim() || (isPortrait && mediaOverlays.length >= 1)"
+            >
+              {{ isPortrait && mediaOverlays.length >= 1 ? 'Max 1' : '+ Add' }}
+            </button>
+        </div>
+        
         <button 
           class="icon-toggle-btn" 
           [class.active]="isFreeMoveMode" 
           (click)="onToggleFreeMove.emit()"
           title="Toggle Free Move Mode"
+          *ngIf="!isPortrait"
         >
-          <span class="btn-icon">✋</span> Free Move
+          <span class="btn-icon">✋</span>
         </button>
-        <button class="primary-btn" (click)="onAddOverlay.emit()">+ Add Screen</button>
       </div>
       
       <!-- Settings Panel -->
       <div class="settings-panel" *ngIf="selectedOverlay">
-        <div class="panel-header">
-           <span class="panel-label">Selected:</span>
-           <span class="selected-name">{{ selectedOverlay.name }}</span>
+        <div class="panel-header-edit">
+           <div class="edit-row">
+               <input 
+                 type="text" 
+                 [(ngModel)]="selectedOverlay.name" 
+                 (ngModelChange)="onNameChange()"
+                 class="name-edit-input"
+               />
+               <button class="delete-icon-btn-header" (click)="onRemoveOverlay.emit(selectedOverlay.id)" title="Delete Screen">
+                 🗑️
+               </button>
+           </div>
         </div>
         
         <div class="control-row">
@@ -320,6 +345,68 @@ import { ImageCollection } from '../live.models';
         font-size: 0.8rem;
     }
     
+    /* NEW STYLES for Inline Editing */
+    .add-group {
+        display: flex;
+        flex: 1;
+        gap: 6px;
+    }
+    .custom-input {
+        flex: 1;
+        background: #0B0F19;
+        border: 1px solid #23293D;
+        color: #fff;
+        padding: 6px 10px;
+        border-radius: 6px;
+        outline: none;
+        min-width: 0;
+        font-size: 0.8rem;
+    }
+    .custom-input:focus { border-color: #5C24FF; }
+    
+    .panel-header-edit {
+        margin-bottom: 0.75rem;
+        border-bottom: 1px solid #1F2436;
+        padding-bottom: 0.5rem;
+    }
+    .edit-row {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+    }
+    .name-edit-input {
+        flex: 1;
+        background: #151926;
+        border: 1px solid #23293D;
+        color: #fff;
+        padding: 6px;
+        border-radius: 4px;
+        font-weight: 600;
+        font-size: 0.9rem;
+        min-width: 0; /* Important for flex shrinking */
+    }
+    .name-edit-input:focus { border-color: #5C24FF; outline: none; }
+    
+    .delete-icon-btn-header {
+        background: rgba(239, 68, 68, 0.2);
+        color: #ef4444;
+        border: 1px solid rgba(239, 68, 68, 0.3);
+        border-radius: 4px;
+        padding: 0; /* Remove padding for centering */
+        width: 32px;
+        height: 32px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        transition: all 0.2s;
+        font-size: 1rem;
+        flex-shrink: 0; /* Prevent shrinking/overflow squish */
+    }
+    .delete-icon-btn-header:hover {
+        background: rgba(239, 68, 68, 0.4);
+    }
+    
     .empty-state {
         text-align: center;
         color: #64748B;
@@ -333,15 +420,32 @@ export class MediaOverlayManagerComponent {
   @Input() isFreeMoveMode = false;
   @Input() selectedOverlayId: string | null = null;
   @Input() collections: ImageCollection[] = [];
+  @Input() isPortrait = false;
 
   @Output() onToggleFreeMove = new EventEmitter<void>();
-  @Output() onAddOverlay = new EventEmitter<void>();
+  @Output() onAddOverlay = new EventEmitter<string>();
   @Output() onRemoveOverlay = new EventEmitter<string>();
   @Output() onCaptureScreen = new EventEmitter<MediaOverlay>();
   @Output() onAssignCollection = new EventEmitter<{ overlay: MediaOverlay, collectionId: string }>();
   @Output() onSelectOverlay = new EventEmitter<string>();
   @Output() onResizeOverlay = new EventEmitter<{ overlayId: string, size: number }>();
   @Output() onLayoutChange = new EventEmitter<{ overlayId: string, layout: 'horizontal' | 'vertical' | 'square' }>();
+  @Output() onUpdateOverlay = new EventEmitter<MediaOverlay>();
+
+  newScreenName = '';
+
+  handleAdd() {
+    if (this.newScreenName.trim()) {
+      this.onAddOverlay.emit(this.newScreenName);
+      this.newScreenName = '';
+    }
+  }
+
+  onNameChange() {
+    if (this.selectedOverlay) {
+      this.onUpdateOverlay.emit(this.selectedOverlay);
+    }
+  }
 
   get selectedOverlay(): MediaOverlay | null {
     if (!this.selectedOverlayId) return null;

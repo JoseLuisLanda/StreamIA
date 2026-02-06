@@ -50,6 +50,7 @@ import { AvatarOption, AvatarSize, ImageCollection } from '../live.models';
                 [class.active]="avatarPosition === pos.value"
                 (click)="onSetPosition.emit(pos.value)"
                 [title]="pos.value"
+                [style.display]="isPortrait && pos.value !== 'center' ? 'none' : 'block'"
               >
                 {{ pos.label }}
               </button>
@@ -236,6 +237,7 @@ export class AvatarSelectorComponent {
   @Input() collections: ImageCollection[] = [];
   @Input() sizeOptions: any[] = [];
   @Input() positionOptions: any[] = [];
+  @Input() isPortrait = false;
 
   @Output() onSelect = new EventEmitter<AvatarOption>();
   @Output() onSetSize = new EventEmitter<AvatarSize>();

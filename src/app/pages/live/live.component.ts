@@ -98,6 +98,39 @@ export class LiveComponent implements OnInit, OnDestroy {
   // Accordion State
   activeSections: Set<string> = new Set([]);
 
+  // Orientation State
+  currentOrientation: 'landscape' | 'portrait' = 'landscape';
+
+  get filteredScenes() {
+    return this.scenes.filter(s => !s.orientation || s.orientation === 'any' || s.orientation === this.currentOrientation);
+  }
+
+  checkOrientation() {
+    this.currentOrientation = window.innerWidth < window.innerHeight ? 'portrait' : 'landscape';
+
+    if (this.currentOrientation === 'portrait') {
+      // Enforce portrait constraints
+      if (this.avatarPosition !== 'center') {
+        this.setAvatarPosition('center');
+      }
+      this.isFreeMoveMode = false;
+
+      // Enforce Max 1 Screen logic
+      if (this.mediaOverlays.length > 1) {
+        // Keep only the last one or first one? Let's keep the first.
+        this.mediaOverlays = this.mediaOverlays.slice(0, 1);
+      }
+
+      // Ensure the single overlay is selected so sidebar controls (Share Screen) appear
+      if (this.mediaOverlays.length > 0) {
+        // Don't overwrite if already selected to avoid flicker, but ensure non-null
+        if (this.selectedOverlayId !== this.mediaOverlays[0].id) {
+          this.selectOverlay(this.mediaOverlays[0].id);
+        }
+      }
+    }
+  }
+
   toggleSection(section: string) {
     if (this.activeSections.has(section)) {
       this.activeSections.delete(section);
@@ -107,6 +140,11 @@ export class LiveComponent implements OnInit, OnDestroy {
   }
 
   async ngOnInit() {
+    this.checkOrientation();
+    window.addEventListener('resize', () => {
+      this.checkOrientation();
+    });
+
     // Load data from IndexedDB
     this.collections = await this.storageService.loadCollections();
     this.scenes = await this.storageService.loadScenes();
@@ -184,10 +222,10 @@ export class LiveComponent implements OnInit, OnDestroy {
   }
 
   // --- Media Overlays Logic ---
-  addOverlay() {
+  addOverlay(name?: string) {
     const newOverlay: MediaOverlay = {
       id: Date.now().toString(),
-      name: `Screen ${this.mediaOverlays.length + 1}`,
+      name: name || `Screen ${this.mediaOverlays.length + 1}`,
       items: [],
       currentIndex: 0,
       isPlaying: false,
@@ -449,6 +487,7 @@ export class LiveComponent implements OnInit, OnDestroy {
     const newScene: Scene = {
       id: Date.now().toString(),
       name: sceneName,
+      orientation: this.currentOrientation,
       config: {
         avatarId: this.currentAvatar?.id,
         avatarSize: this.avatarSize,

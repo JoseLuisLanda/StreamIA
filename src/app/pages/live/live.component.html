@@ -36,8 +36,9 @@
                     <span class="accordion-chevron">▼</span>
                 </div>
                 <div class="accordion-content">
-                    <app-scene-manager [scenes]="scenes" [activeSceneId]="currentSceneId" (onSave)="saveCurrentScene()"
-                        (onUpdate)="updateCurrentScene()" (onLoad)="loadScene($event)" (onDelete)="deleteScene($event)">
+                    <app-scene-manager [scenes]="filteredScenes" [activeSceneId]="currentSceneId"
+                        (onSave)="saveCurrentScene()" (onUpdate)="updateCurrentScene()" (onLoad)="loadScene($event)"
+                        (onDelete)="deleteScene($event)">
                     </app-scene-manager>
                 </div>
             </div>
@@ -64,9 +65,10 @@
                 <div class="accordion-content">
                     <app-avatar-selector [avatars]="avatars" [currentAvatar]="currentAvatar" [avatarSize]="avatarSize"
                         [avatarPosition]="avatarPosition" [collections]="collections" [sizeOptions]="sizeOptions"
-                        [positionOptions]="positionOptions" (onSelect)="selectAvatar($event)"
-                        (onSetSize)="setAvatarSize($event)" (onSetPosition)="setAvatarPosition($event)"
-                        (onCollectionChange)="onAvatarCollectionChange()" (onLoadCustom)="loadCustomAvatar($event)">
+                        [positionOptions]="positionOptions" [isPortrait]="currentOrientation === 'portrait'"
+                        (onSelect)="selectAvatar($event)" (onSetSize)="setAvatarSize($event)"
+                        (onSetPosition)="setAvatarPosition($event)" (onCollectionChange)="onAvatarCollectionChange()"
+                        (onLoadCustom)="loadCustomAvatar($event)">
                     </app-avatar-selector>
                 </div>
             </div>
@@ -80,11 +82,12 @@
                 <div class="accordion-content">
                     <app-media-overlay-manager [mediaOverlays]="mediaOverlays" [isFreeMoveMode]="isFreeMoveMode"
                         [selectedOverlayId]="selectedOverlayId" [collections]="collections"
-                        (onToggleFreeMove)="toggleFreeMoveMode()" (onAddOverlay)="addOverlay()"
-                        (onRemoveOverlay)="removeOverlay($event)" (onCaptureScreen)="captureScreen($event)"
+                        [isPortrait]="currentOrientation === 'portrait'" (onToggleFreeMove)="toggleFreeMoveMode()"
+                        (onAddOverlay)="addOverlay($event)" (onRemoveOverlay)="removeOverlay($event)"
+                        (onCaptureScreen)="captureScreen($event)"
                         (onAssignCollection)="assignCollectionToOverlay($event.overlay, $event.collectionId)"
                         (onSelectOverlay)="selectOverlay($event)" (onResizeOverlay)="resizeOverlay($event)"
-                        (onLayoutChange)="changeOverlayLayout($event)">
+                        (onLayoutChange)="changeOverlayLayout($event)" (onUpdateOverlay)="updateOverlay($event)">
                     </app-media-overlay-manager>
                 </div>
             </div>

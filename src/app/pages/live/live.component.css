@@ -8,10 +8,9 @@
     overflow: hidden;
     background: #000;
     font-family: 'Inter', 'Outfit', sans-serif;
-    /* Leonardo uses Inter primarily */
 }
 
-/* Avatar Wrapper */
+/* Avatar Wrapper - Desktop Behavior */
 .avatar-wrapper {
     position: absolute;
     top: 0;
@@ -20,8 +19,11 @@
     height: 100%;
     overflow: hidden;
     transition: left 0.3s cubic-bezier(0.2, 0, 0.2, 1), width 0.3s cubic-bezier(0.2, 0, 0.2, 1);
+    z-index: 1;
+    /* Base level */
 }
 
+/* Desktop: Push content when panel opens */
 .avatar-wrapper.panel-open {
     left: 340px;
     width: calc(100% - 340px);
@@ -44,21 +46,19 @@
     pointer-events: auto;
 }
 
-/* Side Panel - STRICT Leonardo Style */
+/* Side Panel - Desktop */
 .side-panel {
     position: fixed;
     left: -340px;
     top: 0;
     width: 340px;
     height: 100vh;
-    /* Solid Dark Background matching Leonardo sidebar */
     background: #0B0F19;
     z-index: 1500;
-    transition: left 0.3s cubic-bezier(0.2, 0, 0.2, 1);
+    transition: left 0.3s cubic-bezier(0.2, 0, 0.2, 1), box-shadow 0.3s ease;
     overflow-y: auto;
     overflow-x: hidden;
     border-right: 1px solid #1F2436;
-    /* Distinct subtle border */
     box-shadow: 5px 0 20px rgba(0, 0, 0, 0.5);
 }
 
@@ -98,7 +98,6 @@
     letter-spacing: -0.01em;
 }
 
-/* Leonardo gradient brand accent */
 .panel-title::before {
     content: '';
     width: 24px;
@@ -139,14 +138,9 @@
     left: 340px;
 }
 
-.toggle-icon {
-    font-size: 10px;
-}
-
-/* Accordion Styling - Boxed & Bordered like Leonardo Cards */
+/* Accordion Styling */
 .accordion-item {
     background: #10141E;
-    /* Dark card background */
     border: 1px solid #23293D;
     border-radius: 10px;
     overflow: hidden;
@@ -160,7 +154,6 @@
 
 .accordion-item.open {
     border-color: #5C24FF;
-    /* Active purple/blue brand border */
     background: #131724;
 }
 
@@ -208,12 +201,12 @@
     overflow: hidden;
     transition: max-height 0.3s cubic-bezier(0.2, 0, 0.2, 1), opacity 0.3s ease;
     opacity: 0;
-    /* Content background */
     background: #0B0F19;
 }
 
 .accordion-item.open .accordion-content {
     max-height: 2000px;
+    /* Allow content to flow downwards */
     opacity: 1;
     padding: 1rem;
     border-top: 1px solid #1F2436;
@@ -300,5 +293,163 @@
 @keyframes spin {
     to {
         transform: rotate(360deg);
+    }
+}
+
+/* ==========================================================================
+   RESPONSIVE QUERIES (Mobile/Tablet)
+   ========================================================================== */
+@media (max-width: 768px) {
+
+    /* Avatar - Full Screen Behind Panel */
+    .avatar-wrapper.panel-open {
+        left: 0;
+        width: 100%;
+        /* Do NOT shrink avatar on mobile, let panel overlay */
+    }
+
+    /* Side Panel - Overlay Drawer */
+    .side-panel {
+        width: 85%;
+        max-width: 320px;
+        box-shadow: 10px 0 50px rgba(0, 0, 0, 0.8);
+        border-right: 1px solid #1F2436;
+    }
+
+    /* Panel toggle follows the sidebar edge */
+    .panel-toggle.panel-open {
+        left: 85%;
+        left: calc(85% - 1px);
+        background: #151926;
+    }
+
+    @media (min-width: 380px) {
+        .panel-toggle.panel-open {
+            left: 320px;
+        }
+    }
+
+    /* Add backdrop when panel is open */
+    .side-panel.open::before {
+        content: '';
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100vw;
+        height: 100vh;
+        background: rgba(0, 0, 0, 0.5);
+        backdrop-filter: blur(2px);
+        z-index: -1;
+        pointer-events: none;
+    }
+
+    .panel-content {
+        padding: 1rem;
+    }
+
+    .accordion-header {
+        padding: 1rem;
+    }
+
+    /* --- MOBILE OVERLAYS OPTIMIZATION --- */
+    .overlays-container {
+        top: 60px;
+        /* Start below header */
+        width: 100%;
+        padding: 0 16px;
+        /* Use Flexbox for perfect centering of the single allowed screen */
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 12px;
+        pointer-events: none;
+        /* Ensure it doesn't expand infinitely down covering face */
+        max-height: 40vh;
+        overflow: hidden;
+    }
+
+    /* Force Media Overlay to be responsive and stacked */
+    /* We use ::ng-deep to override the component's internal inline styles and cdkDrag positioning */
+    ::ng-deep app-media-overlay {
+        position: relative !important;
+        /* Disable absolute free-move on mobile */
+        transform: translate3d(0, 0, 0) !important;
+        /* Reset drag transforms */
+        width: auto !important;
+        /* Allow auto width but constrained by max-width */
+        max-width: 90vw !important;
+        height: auto !important;
+        pointer-events: auto;
+        display: flex;
+        justify-content: center;
+        margin: 0 auto !important;
+        /* Auto margins for centering */
+    }
+
+    ::ng-deep app-media-overlay .media-content,
+    ::ng-deep app-media-overlay .overlay-card {
+        width: 100% !important;
+        min-width: 250px;
+        /* Minimum width to be usable */
+        height: auto !important;
+        aspect-ratio: 16/9;
+        /* Force a standard ratio or use object-fit */
+        max-height: 120px !important;
+        /* Cap height to keep avatar visible */
+    }
+
+    /* Fix: Always show controls bar on mobile (touch devices don't have hover) */
+    ::ng-deep app-media-overlay .controls-bar {
+        /* On mobile we might want it visible or just rely on tap? 
+           User moved functionality to sidebar. 
+           Let's keep it clean but accessible if they really want close there too. 
+           But remove red debugs. */
+        /* opacity: 1 !important; -> Maybe revert to hover if sidebar is primary? 
+           But user said "sigo sin poder eliminarla" before moving to sidebar.
+           Now that sidebar handles it, we can relax this or keep it subtle. */
+        opacity: 0;
+        transition: opacity 0.2s;
+    }
+
+    ::ng-deep app-media-overlay.active .controls-bar,
+    ::ng-deep app-media-overlay:active .controls-bar {
+        opacity: 1 !important;
+    }
+
+    @media (hover: none) {
+        ::ng-deep app-media-overlay .controls-bar {
+            opacity: 1;
+            /* Keep visible on touch to show play/pause */
+            background: rgba(0, 0, 0, 0.5);
+        }
+    }
+
+    /* Ensure buttons inside are interactable */
+    ::ng-deep app-media-overlay .control-btn,
+    ::ng-deep app-media-overlay .close-btn {
+        pointer-events: auto !important;
+        width: 32px !important;
+        height: 32px !important;
+    }
+}
+
+/* Small Phones */
+@media (max-width: 380px) {
+    .side-panel {
+        width: 100%;
+        border-right: none;
+    }
+
+    .panel-toggle.panel-open {
+        left: auto;
+        right: 0;
+        border-radius: 6px 0 0 6px;
+        border-left: 1px solid #1F2436;
+        border-right: none;
+    }
+
+    .overlays-container>* {
+        transform: scale(0.55);
+        /* Smaller scale for tiny screens */
     }
 }
