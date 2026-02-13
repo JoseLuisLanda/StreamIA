@@ -68,7 +68,7 @@
                         [positionOptions]="positionOptions" [isPortrait]="currentOrientation === 'portrait'"
                         (onSelect)="selectAvatar($event)" (onSetSize)="setAvatarSize($event)"
                         (onSetPosition)="setAvatarPosition($event)" (onCollectionChange)="onAvatarCollectionChange()"
-                        (onLoadCustom)="loadCustomAvatar($event)">
+                        (onLoadCustom)="loadCustomAvatar($event)" (onDelete)="deleteAvatar($event)">
                     </app-avatar-selector>
                 </div>
             </div>

@@ -207,15 +207,10 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
     private async loadAvatar(url: string) {
         this.isLoading = true;
         const loader = new GLTFLoader();
-
-        // Ensure URL has necessary params if missing (Ready Player Me specific)
-        if (!url.includes('morphTargets')) {
-            url += (url.includes('?') ? '&' : '?') + 'morphTargets=ARKit&textureAtlas=1024';
-        }
+        const normalizedUrl = this.normalizeAvatarUrl(url);
 
         try {
-            // Try to get from cache first
-            const cachedData = await this.modelCache.getCachedModel(url);
+            const cachedData = await this.modelCache.getCachedModel(normalizedUrl);
 
             if (cachedData) {
                 // Load from cache
@@ -223,12 +218,10 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
                     this.processLoadedModel(gltf);
                 }, (error: any) => {
                     console.error('Error parsing cached model:', error);
-                    // If cache is corrupted, download fresh
-                    this.downloadAndCacheModel(url, loader);
+                    this.downloadAndParseModel(normalizedUrl, loader);
                 });
             } else {
-                // Download and cache
-                this.downloadAndCacheModel(url, loader);
+                this.downloadAndParseModel(normalizedUrl, loader);
             }
         } catch (error) {
             console.error('Error loading avatar:', error);
@@ -236,17 +229,55 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
         }
     }
 
-    private downloadAndCacheModel(url: string, loader: GLTFLoader) {
+    public async preloadAvatar(url: string): Promise<string> {
+        const normalizedUrl = this.normalizeAvatarUrl(url);
+        const cachedData = await this.modelCache.getCachedModel(normalizedUrl);
+
+        if (!cachedData) {
+            await this.downloadAndCacheModel(normalizedUrl);
+        }
+
+        return normalizedUrl;
+    }
+
+    private normalizeAvatarUrl(url: string): string {
+        const trimmedUrl = url.trim();
+        if (!trimmedUrl) {
+            return trimmedUrl;
+        }
+
+        let normalizedUrl = trimmedUrl;
+
+        if (!/\.glb(\?|$)/i.test(normalizedUrl)) {
+            const queryStart = normalizedUrl.indexOf('?');
+            if (queryStart >= 0) {
+                const base = normalizedUrl.slice(0, queryStart);
+                const query = normalizedUrl.slice(queryStart);
+                normalizedUrl = `${base}.glb${query}`;
+            } else {
+                normalizedUrl = `${normalizedUrl}.glb`;
+            }
+        }
+
+        if (!normalizedUrl.includes('morphTargets')) {
+            normalizedUrl += (normalizedUrl.includes('?') ? '&' : '?') + 'morphTargets=ARKit&textureAtlas=1024';
+        }
+
+        return normalizedUrl;
+    }
+
+    private async downloadAndCacheModel(url: string): Promise<ArrayBuffer> {
+        const response = await fetch(url);
+        const arrayBuffer = await response.arrayBuffer();
+        await this.modelCache.cacheModel(url, arrayBuffer);
+        return arrayBuffer;
+    }
+
+    private downloadAndParseModel(url: string, loader: GLTFLoader) {
         console.log('📥 Downloading model from:', url);
 
-        // Use custom loader to get ArrayBuffer for caching
-        fetch(url)
-            .then(response => response.arrayBuffer())
+        this.downloadAndCacheModel(url)
             .then(async (arrayBuffer) => {
-                // Cache the model
-                await this.modelCache.cacheModel(url, arrayBuffer);
-
-                // Parse and load
                 loader.parse(arrayBuffer, '', (gltf: any) => {
                     this.processLoadedModel(gltf);
                 }, (error: any) => {

@@ -6,6 +6,10 @@ export interface AvatarOption {
     url: string;
     thumbnail: string;
     defaultCollectionId?: string;
+    isCustom?: boolean;
+    storagePath?: string;
+    ownerEmail?: string;
+    sourceUrl?: string;
 }
 
 export interface ImageCollection {
