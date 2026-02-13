@@ -10,13 +10,15 @@ import { MediaOverlayComponent, MediaOverlay, MediaItem } from '../../components
 
 // Subcomponents
 import { SceneManagerComponent } from './components/scene-manager.component';
-import { AvatarSelectorComponent } from './components/avatar-selector.component';
+import { AvatarSelectorComponent, CustomAvatarRequest } from './components/avatar-selector.component';
 import { MediaOverlayManagerComponent } from './components/media-overlay-manager.component';
 import { BackgroundManagerComponent } from './components/background-manager.component';
 
 // Models & Services
 import { AvatarOption, ImageCollection, AvatarSize, Scene } from './live.models';
 import { LiveStorageService } from './live-storage.service';
+import { ModelCacheService } from '../../services/model-cache.service';
+import { FirebaseAvatarStorageService } from '../../services/firebase-avatar-storage.service';
 
 @Component({
   selector: 'app-live',
@@ -40,11 +42,13 @@ export class LiveComponent implements OnInit, OnDestroy {
   @ViewChild('avatarViewer') avatarViewer!: AvatarViewerComponent;
 
   private storageService = inject(LiveStorageService);
+  private modelCache = inject(ModelCacheService);
+  private firebaseAvatarStorage = inject(FirebaseAvatarStorageService);
   private cdr = inject(ChangeDetectorRef);
   private ngZone = inject(NgZone);
 
   // Constants / Config
-  avatars: AvatarOption[] = [
+  private readonly defaultAvatars: AvatarOption[] = [
     {
       id: 'avatar1',
       name: 'Avatar 1',
@@ -58,6 +62,8 @@ export class LiveComponent implements OnInit, OnDestroy {
       thumbnail: 'https://models.readyplayer.me/6984ad1a0b547ce9ae29d70d.png'
     }
   ];
+
+  avatars: AvatarOption[] = [...this.defaultAvatars];
 
   sizeOptions = [
     { label: 'S', value: 'small' as AvatarSize },
@@ -74,7 +80,7 @@ export class LiveComponent implements OnInit, OnDestroy {
   // State
   avatarPosition: 'left' | 'center' | 'right' = 'center';
   currentAvatar: AvatarOption | null = null;
-  currentAvatarUrl = this.avatars[0]?.url || '';
+  currentAvatarUrl = this.defaultAvatars[0]?.url || '';
   isPanelOpen = false;
   avatarSize: AvatarSize = 'medium';
 
@@ -100,6 +106,7 @@ export class LiveComponent implements OnInit, OnDestroy {
 
   // Orientation State
   currentOrientation: 'landscape' | 'portrait' = 'landscape';
+  private hiddenAvatarIds = new Set<string>();
 
   get filteredScenes() {
     return this.scenes.filter(s => !s.orientation || s.orientation === 'any' || s.orientation === this.currentOrientation);
@@ -145,10 +152,19 @@ export class LiveComponent implements OnInit, OnDestroy {
       this.checkOrientation();
     });
 
-    // Load data from IndexedDB
-    this.collections = await this.storageService.loadCollections();
-    this.scenes = await this.storageService.loadScenes();
-    this.storageService.loadAvatarSettings(this.avatars);
+    const [collections, scenes, savedCustomAvatars, hiddenAvatarIds] = await Promise.all([
+      this.storageService.loadCollections(),
+      this.storageService.loadScenes(),
+      this.storageService.loadCustomAvatars(),
+      this.storageService.loadHiddenAvatarIds()
+    ]);
+
+    this.collections = collections;
+    this.scenes = scenes;
+    this.hiddenAvatarIds = new Set(hiddenAvatarIds);
+    this.avatars = [...this.defaultAvatars, ...this.getUniqueCustomAvatars(savedCustomAvatars)]
+      .filter(avatar => !this.hiddenAvatarIds.has(avatar.id));
+    await this.storageService.loadAvatarSettings(this.avatars);
 
     // Force change detection after loading
     this.cdr.detectChanges();
@@ -184,7 +200,7 @@ export class LiveComponent implements OnInit, OnDestroy {
         this.selectCollection(collection);
       } else {
         avatar.defaultCollectionId = undefined;
-        this.storageService.saveAvatarSettings(this.avatars);
+        void this.storageService.saveAvatarSettings(this.avatars);
         this.clearActiveCollection();
       }
     } else {
@@ -201,7 +217,8 @@ export class LiveComponent implements OnInit, OnDestroy {
   }
 
   onAvatarCollectionChange() {
-    this.storageService.saveAvatarSettings(this.avatars);
+    void this.storageService.saveAvatarSettings(this.avatars);
+    void this.storageService.saveCustomAvatars(this.avatars);
     if (this.currentAvatar?.defaultCollectionId) {
       const collection = this.collections.find(c => c.id === this.currentAvatar!.defaultCollectionId);
       if (collection) {
@@ -210,15 +227,100 @@ export class LiveComponent implements OnInit, OnDestroy {
     }
   }
 
-  loadCustomAvatar(url: string) {
-    if (url && url.trim()) {
-      let finalUrl = url.trim();
-      if (!finalUrl.endsWith('.glb')) {
-        finalUrl += '.glb';
-      }
-      this.currentAvatarUrl = finalUrl;
-      this.currentAvatar = null;
+  async loadCustomAvatar(request: CustomAvatarRequest) {
+    if (!request?.url || !request.url.trim()) {
+      return;
     }
+
+    try {
+      const avatarName = this.resolveAvatarName(request.name);
+      if (!avatarName) {
+        alert('Avatar name is required.');
+        return;
+      }
+
+      const email = await this.resolveUserEmail();
+      if (!email) {
+        alert('Necesitas iniciar sesión para guardar el avatar en Firebase Storage.');
+        return;
+      }
+
+      const normalizedUrl = this.normalizeAvatarUrl(request.url);
+      const expectedStoragePath = this.firebaseAvatarStorage.buildAvatarPath(email, avatarName);
+      const customAvatarId = this.createAvatarIdFromUrl(expectedStoragePath);
+
+      if (this.hiddenAvatarIds.has(customAvatarId)) {
+        this.hiddenAvatarIds.delete(customAvatarId);
+        await this.storageService.saveHiddenAvatarIds(Array.from(this.hiddenAvatarIds));
+      }
+
+      const avatarBuffer = await this.preloadAvatarModel(normalizedUrl);
+      const uploadResult = await this.firebaseAvatarStorage.uploadAvatar(email, avatarName, avatarBuffer);
+
+      let customAvatar = this.avatars.find(avatar => avatar.storagePath === uploadResult.path);
+
+      if (!customAvatar) {
+        customAvatar = this.createCustomAvatar(normalizedUrl, avatarName, email, uploadResult.path, normalizedUrl);
+        this.avatars = [...this.avatars, customAvatar];
+      } else {
+        customAvatar.id = this.createAvatarIdFromUrl(uploadResult.path);
+        customAvatar.name = avatarName;
+        customAvatar.url = normalizedUrl;
+        customAvatar.storagePath = uploadResult.path;
+        customAvatar.ownerEmail = email;
+        customAvatar.sourceUrl = normalizedUrl;
+      }
+
+      this.selectAvatar(customAvatar);
+      await this.storageService.saveCustomAvatars(this.avatars);
+      await this.storageService.saveAvatarSettings(this.avatars);
+      this.cdr.detectChanges();
+    } catch (error) {
+      console.error('Error loading custom avatar:', error);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      alert('Error loading custom avatar: ' + message);
+    }
+  }
+
+  async deleteAvatar(avatar: AvatarOption) {
+    if (this.avatars.length <= 1) {
+      alert('At least one avatar must remain available.');
+      return;
+    }
+
+    if (!confirm(`Delete avatar "${avatar.name}"?`)) {
+      return;
+    }
+
+    if (avatar.storagePath) {
+      try {
+        await this.firebaseAvatarStorage.deleteAvatar(avatar.storagePath);
+      } catch (error) {
+        console.error('Error deleting avatar from Firebase Storage:', error);
+        alert('Could not delete avatar from Firebase Storage. Try again.');
+        return;
+      }
+    }
+
+    this.avatars = this.avatars.filter(item => item.id !== avatar.id);
+    this.hiddenAvatarIds.add(avatar.id);
+
+    await this.storageService.saveHiddenAvatarIds(Array.from(this.hiddenAvatarIds));
+    await this.storageService.saveCustomAvatars(this.avatars);
+    await this.storageService.saveAvatarSettings(this.avatars);
+
+    if (this.currentAvatar?.id === avatar.id) {
+      const nextAvatar = this.avatars[0] ?? null;
+      if (nextAvatar) {
+        this.selectAvatar(nextAvatar);
+      } else {
+        this.currentAvatar = null;
+        this.currentAvatarUrl = '';
+        this.clearActiveCollection();
+      }
+    }
+
+    this.cdr.detectChanges();
   }
 
   // --- Media Overlays Logic ---
@@ -396,7 +498,8 @@ export class LiveComponent implements OnInit, OnDestroy {
           avatar.defaultCollectionId = undefined;
         }
       });
-      this.storageService.saveAvatarSettings(this.avatars);
+      await this.storageService.saveAvatarSettings(this.avatars);
+      await this.storageService.saveCustomAvatars(this.avatars);
 
       if (this.activeCollection?.id === collection.id) {
         this.clearActiveCollection();
@@ -605,5 +708,119 @@ export class LiveComponent implements OnInit, OnDestroy {
       await this.storageService.saveScenes(this.scenes);
       await this.storageService.deleteScene(sceneId);
     }
+  }
+
+  private getUniqueCustomAvatars(savedCustomAvatars: AvatarOption[]): AvatarOption[] {
+    const usedUrls = new Set(this.defaultAvatars.map(avatar => avatar.url));
+    const uniqueCustomAvatars: AvatarOption[] = [];
+
+    for (const avatar of savedCustomAvatars) {
+      const preferredUrl = avatar.sourceUrl || avatar.url;
+      const normalizedUrl = this.normalizeAvatarUrl(preferredUrl);
+      if (usedUrls.has(normalizedUrl)) {
+        continue;
+      }
+
+      uniqueCustomAvatars.push({
+        ...avatar,
+        id: avatar.id || this.createAvatarIdFromUrl(avatar.storagePath || avatar.sourceUrl || normalizedUrl),
+        name: avatar.name || `Custom ${uniqueCustomAvatars.length + 1}`,
+        url: normalizedUrl,
+        thumbnail: avatar.thumbnail || this.buildAvatarThumbnail(normalizedUrl),
+        isCustom: true
+      });
+      usedUrls.add(normalizedUrl);
+    }
+
+    return uniqueCustomAvatars;
+  }
+
+  private async resolveUserEmail(): Promise<string | null> {
+    const firebaseEmail = this.firebaseAvatarStorage.getAuthenticatedEmail();
+    if (firebaseEmail) {
+      await this.storageService.saveUserEmail(firebaseEmail);
+      return firebaseEmail;
+    }
+    return null;
+  }
+
+  private resolveAvatarName(name: string): string | null {
+    const trimmedName = name?.trim();
+    if (trimmedName) {
+      return trimmedName;
+    }
+
+    const promptedName = prompt('Name for the avatar:', '');
+    const normalizedName = promptedName?.trim() ?? '';
+    return normalizedName || null;
+  }
+
+  private async preloadAvatarModel(url: string): Promise<ArrayBuffer> {
+    if (this.avatarViewer) {
+      await this.avatarViewer.preloadAvatar(url);
+    }
+
+    const cachedData = await this.modelCache.getCachedModel(url);
+    if (cachedData) {
+      return cachedData;
+    }
+
+    const response = await fetch(url);
+    const arrayBuffer = await response.arrayBuffer();
+    await this.modelCache.cacheModel(url, arrayBuffer);
+    return arrayBuffer;
+  }
+
+  private createCustomAvatar(url: string, name: string, ownerEmail: string, storagePath: string, sourceUrl: string): AvatarOption {
+    const customCount = this.avatars.filter(avatar => avatar.isCustom).length + 1;
+
+    return {
+      id: this.createAvatarIdFromUrl(storagePath),
+      name: name || `Custom ${customCount}`,
+      url,
+      thumbnail: this.buildAvatarThumbnail(url),
+      isCustom: true,
+      storagePath,
+      ownerEmail,
+      sourceUrl
+    };
+  }
+
+  private createAvatarIdFromUrl(url: string): string {
+    let hash = 0;
+    for (let i = 0; i < url.length; i++) {
+      hash = ((hash << 5) - hash) + url.charCodeAt(i);
+      hash |= 0;
+    }
+    return `custom-${Math.abs(hash)}`;
+  }
+
+  private buildAvatarThumbnail(url: string): string {
+    const baseUrl = url.split('?')[0];
+    if (baseUrl.toLowerCase().endsWith('.glb')) {
+      return `${baseUrl.slice(0, -4)}.png`;
+    }
+    return baseUrl;
+  }
+
+  private normalizeAvatarUrl(url: string): string {
+    let normalizedUrl = url.trim();
+
+    if (!/\.glb(\?|$)/i.test(normalizedUrl)) {
+      const queryStart = normalizedUrl.indexOf('?');
+      if (queryStart >= 0) {
+        const base = normalizedUrl.slice(0, queryStart);
+        const query = normalizedUrl.slice(queryStart);
+        normalizedUrl = `${base}.glb${query}`;
+      } else {
+        normalizedUrl = `${normalizedUrl}.glb`;
+      }
+    }
+
+    if (!normalizedUrl.includes('morphTargets')) {
+      normalizedUrl += (normalizedUrl.includes('?') ? '&' : '?') + 'morphTargets=ARKit&textureAtlas=1024';
+    }
+
+    return normalizedUrl;
   }
 }

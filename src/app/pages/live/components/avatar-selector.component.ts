@@ -3,6 +3,11 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { AvatarOption, AvatarSize, ImageCollection } from '../live.models';
 
+export interface CustomAvatarRequest {
+  url: string;
+  name: string;
+}
+
 @Component({
   selector: 'app-avatar-selector',
   standalone: true,
@@ -16,6 +21,13 @@ import { AvatarOption, AvatarSize, ImageCollection } from '../live.models';
           [class.selected]="currentAvatar?.id === avatar.id"
           (click)="onSelect.emit(avatar)"
         >
+          <button
+            type="button"
+            class="avatar-delete-btn"
+            title="Delete avatar"
+            (click)="deleteAvatar($event, avatar)">
+            ×
+          </button>
           <div class="avatar-thumb-wrapper">
              <img [src]="avatar.thumbnail" [alt]="avatar.name" class="avatar-thumb" />
           </div>
@@ -71,6 +83,14 @@ import { AvatarOption, AvatarSize, ImageCollection } from '../live.models';
       <div class="custom-url-section">
         <span class="section-label">Custom Avatar</span>
         <div class="url-input-group">
+            <input
+            type="text"
+            [(ngModel)]="customName"
+            placeholder="Avatar name..."
+            class="custom-input"
+            />
+        </div>
+        <div class="url-input-group">
             <input 
             type="text" 
             [(ngModel)]="customUrl" 
@@ -95,6 +115,7 @@ import { AvatarOption, AvatarSize, ImageCollection } from '../live.models';
       margin-bottom: 1rem;
     }
     .avatar-card {
+      position: relative;
       display: flex;
       flex-direction: column;
       align-items: center;
@@ -113,6 +134,30 @@ import { AvatarOption, AvatarSize, ImageCollection } from '../live.models';
       border-color: #A855F7;
       background: #1E2338;
       box-shadow: 0 0 0 1px #A855F7;
+    }
+    .avatar-delete-btn {
+      position: absolute;
+      top: 0.35rem;
+      right: 0.35rem;
+      width: 20px;
+      height: 20px;
+      border-radius: 50%;
+      border: 1px solid #23293D;
+      background: #0B0F19;
+      color: #94A3B8;
+      cursor: pointer;
+      font-size: 0.9rem;
+      line-height: 1;
+      padding: 0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+    .avatar-delete-btn:hover {
+      border-color: #A855F7;
+      color: #fff;
+      background: #23293D;
     }
     .avatar-thumb-wrapper {
         width: 60px;
@@ -243,9 +288,11 @@ export class AvatarSelectorComponent {
   @Output() onSetSize = new EventEmitter<AvatarSize>();
   @Output() onSetPosition = new EventEmitter<'left' | 'center' | 'right'>();
   @Output() onCollectionChange = new EventEmitter<void>();
-  @Output() onLoadCustom = new EventEmitter<string>();
+  @Output() onLoadCustom = new EventEmitter<CustomAvatarRequest>();
+  @Output() onDelete = new EventEmitter<AvatarOption>();
 
   customUrl = '';
+  customName = '';
 
   getCollectionName(id?: string) {
     if (!id) return '';
@@ -253,7 +300,16 @@ export class AvatarSelectorComponent {
   }
 
   loadCustom() {
-    this.onLoadCustom.emit(this.customUrl);
+    this.onLoadCustom.emit({
+      url: this.customUrl,
+      name: this.customName
+    });
     this.customUrl = '';
+    this.customName = '';
+  }
+
+  deleteAvatar(event: Event, avatar: AvatarOption) {
+    event.stopPropagation();
+    this.onDelete.emit(avatar);
   }
 }
