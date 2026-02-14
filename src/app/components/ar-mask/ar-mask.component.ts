@@ -486,6 +486,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
   public avatarEnabled = false;
   public avatarUrl = 'https://models.readyplayer.me/6984a7a905b43df7aaeb9df1.glb?morphTargets=ARKit&textureAtlas=1024';
   private breathingTime = 0;
+  private avatarCalculatedScale: number | null = null;  // Scale calculated once based on face proportions
 
   public faceDetected = false;
   public selectedMaskId = 'none';  // Para UI, último clickeado para gestures
@@ -837,6 +838,11 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     this.ngZone.run(() => {
       // Toggle active state
       mask.isActive = !mask.isActive;
+      
+      // Si se activa el avatar, resetear la escala calculada para que recalcule
+      if (mask.isActive && maskId === 'avatar') {
+        this.avatarCalculatedScale = null;
+      }
       
       // Si se activa, se convierte en el seleccionado para gestures
       if (mask.isActive) {
@@ -1460,14 +1466,35 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
 
     const blendshapes = this.trackService.blendshapes();
     const rotation = this.trackService.rotation();
+    const landmarks = this.trackService.landmarks();
     
-    // Apply position and scale offsets from mask
-    const baseScale = 1.2;
+    // Calculate scale ONLY ONCE based on face proportions
+    if (this.avatarCalculatedScale === null && landmarks && landmarks.length > 468) {
+      const leftEyeOuter = landmarks[33];   // Left eye outer corner
+      const rightEyeOuter = landmarks[263]; // Right eye outer corner
+      
+      if (leftEyeOuter && rightEyeOuter) {
+        // Calculate distance between eyes
+        const eyeDistance = Math.sqrt(
+          Math.pow(rightEyeOuter.x - leftEyeOuter.x, 2) +
+          Math.pow(rightEyeOuter.y - leftEyeOuter.y, 2) +
+          Math.pow(rightEyeOuter.z - leftEyeOuter.z, 2)
+        );
+        
+        // Scale avatar based on eye distance (calculated once)
+        // Multiplier adjusted to match face size (roughly 2.0-2.2)
+        this.avatarCalculatedScale = eyeDistance * 30.0;
+      }
+    }
+    
+    // Use calculated scale or default
+    const baseScale = this.avatarCalculatedScale || 2.2;
     const finalScale = baseScale * (avatarMask.scaleOffset || 1.0);
     this.avatarModel.scale.set(finalScale, finalScale, finalScale);
     
+    // Keep position fixed (only use user offsets)
     this.avatarModel.position.x = 0 + (avatarMask.positionOffsetX || 0);
-    this.avatarModel.position.y = -1.5 + (avatarMask.positionOffsetY || 0);
+    this.avatarModel.position.y = -3.75 + (avatarMask.positionOffsetY || 0);
     this.avatarModel.position.z = 0 + (avatarMask.positionOffsetZ || 0);
 
     // Apply Face Blendshapes (ARKit morphTargets)
@@ -1511,8 +1538,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       if (parts['Head']) parts['Head'].rotation.set(rotation.x, -rotation.y, -rotation.z);
       if (parts['Neck']) parts['Neck'].rotation.set(rotation.x / 5 + 0.3, -rotation.y / 5, -rotation.z / 5);
       
-         }
+      }
     
- 
-  }
+ }
 }
