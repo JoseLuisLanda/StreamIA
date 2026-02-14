@@ -8,7 +8,7 @@ interface MaskOption {
   id: string;
   name: string;
   modelPath: string;
-  type: 'glasses' | 'facial-hair' | 'hair';
+  type: 'glasses' | 'facial-hair' | 'hair' | 'mask' | 'hat' | 'clothing';
   model?: THREE.Group;
   loaded?: boolean;
   // State
@@ -18,6 +18,7 @@ interface MaskOption {
   scaleOffset?: number;
   positionOffsetX?: number;
   positionOffsetY?: number;
+  positionOffsetZ?: number;
 }
 
 @Component({
@@ -47,6 +48,20 @@ interface MaskOption {
       </div>
       <div class="mask-btn-wrapper">
         <button 
+          (click)="toggleMask('glasses1')"
+          [class.active]="isMaskActive('glasses1')"
+          [class.selected]="selectedMaskId === 'glasses1'"
+          class="mask-btn">
+          <span class="icon">🕶️</span>
+          <span>Lentes 2</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'glasses1'"
+              [class.active]="isMaskActive('glasses1')"
+              (click)="selectForEditing($event, 'glasses1')">✏️</span>
+      </div>
+      <div class="mask-btn-wrapper">
+        <button 
           (click)="toggleMask('mustache')"
           [class.active]="isMaskActive('mustache')"
           [class.selected]="selectedMaskId === 'mustache'"
@@ -58,6 +73,132 @@ interface MaskOption {
               [class.editing]="selectedMaskId === 'mustache'"
               [class.active]="isMaskActive('mustache')"
               (click)="selectForEditing($event, 'mustache')">✏️</span>
+      </div>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('mustache1')"
+          [class.active]="isMaskActive('mustache1')"
+          [class.selected]="selectedMaskId === 'mustache1'"
+          class="mask-btn">
+          <span class="icon">🧔</span>
+          <span>Bigote 2</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'mustache1'"
+              [class.active]="isMaskActive('mustache1')"
+              (click)="selectForEditing($event, 'mustache1')">✏️</span>
+      </div>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('beard')"
+          [class.active]="isMaskActive('beard')"
+          [class.selected]="selectedMaskId === 'beard'"
+          class="mask-btn">
+          <span class="icon">🧔‍♂️</span>
+          <span>Barba</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'beard'"
+              [class.active]="isMaskActive('beard')"
+              (click)="selectForEditing($event, 'beard')">✏️</span>
+      </div>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('mask')"
+          [class.active]="isMaskActive('mask')"
+          [class.selected]="selectedMaskId === 'mask'"
+          class="mask-btn">
+          <span class="icon">🎭</span>
+          <span>Máscara</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'mask'"
+              [class.active]="isMaskActive('mask')"
+              (click)="selectForEditing($event, 'mask')">✏️</span>
+      </div>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('mask1')"
+          [class.active]="isMaskActive('mask1')"
+          [class.selected]="selectedMaskId === 'mask1'"
+          class="mask-btn">
+          <span class="icon">😷</span>
+          <span>Máscara 2</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'mask1'"
+              [class.active]="isMaskActive('mask1')"
+              (click)="selectForEditing($event, 'mask1')">✏️</span>
+      </div>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('gorra')"
+          [class.active]="isMaskActive('gorra')"
+          [class.selected]="selectedMaskId === 'gorra'"
+          class="mask-btn">
+          <span class="icon">🧢</span>
+          <span>Gorra</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'gorra'"
+              [class.active]="isMaskActive('gorra')"
+              (click)="selectForEditing($event, 'gorra')">✏️</span>
+      </div>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('gorra1')"
+          [class.active]="isMaskActive('gorra1')"
+          [class.selected]="selectedMaskId === 'gorra1'"
+          class="mask-btn">
+          <span class="icon">🎩</span>
+          <span>Gorra 2</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'gorra1'"
+              [class.active]="isMaskActive('gorra1')"
+              (click)="selectForEditing($event, 'gorra1')">✏️</span>
+      </div>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('hair')"
+          [class.active]="isMaskActive('hair')"
+          [class.selected]="selectedMaskId === 'hair'"
+          class="mask-btn">
+          <span class="icon">💇</span>
+          <span>Cabello</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'hair'"
+              [class.active]="isMaskActive('hair')"
+              (click)="selectForEditing($event, 'hair')">✏️</span>
+      </div>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('hair1')"
+          [class.active]="isMaskActive('hair1')"
+          [class.selected]="selectedMaskId === 'hair1'"
+          class="mask-btn">
+          <span class="icon">💁</span>
+          <span>Cabello 2</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'hair1'"
+              [class.active]="isMaskActive('hair1')"
+              (click)="selectForEditing($event, 'hair1')">✏️</span>
+      </div>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('tshirt')"
+          [class.active]="isMaskActive('tshirt')"
+          [class.selected]="selectedMaskId === 'tshirt'"
+          class="mask-btn">
+          <span class="icon">👕</span>
+          <span>Playera</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'tshirt'"
+              [class.active]="isMaskActive('tshirt')"
+              (click)="selectForEditing($event, 'tshirt')">✏️</span>
       </div>
       <button 
         (click)="clearAll()"
@@ -80,6 +221,14 @@ interface MaskOption {
         <span class="icon">🔄</span>
         <span>Cámara</span>
       </button>
+      <button 
+        (click)="toggleAvatar()"
+        [class.active]="avatarEnabled"
+        class="mask-btn avatar-btn"
+        title="Avatar sincronizado">
+        <span class="icon">🧑</span>
+        <span>Avatar</span>
+      </button>
     </div>
     
     <div class="debug-info">
@@ -91,7 +240,7 @@ interface MaskOption {
         Botón: Activar/Desactivar<br>
         ✏️ Click en lápiz: Seleccionar para editar<br>
         📱 Pinch: Zoom | Drag: Mover<br>
-        🖱️ Scroll: Zoom | Drag: Mover
+        🖱️ Scroll: Zoom | Shift+Scroll: Profundidad | Drag: Mover
       </p>
     </div>
   `,
@@ -131,6 +280,28 @@ interface MaskOption {
       border-radius: 20px;
       backdrop-filter: blur(10px);
       pointer-events: auto;
+      max-width: 95vw;
+      overflow-x: auto;
+      overflow-y: hidden;
+      scrollbar-width: thin;
+      scrollbar-color: rgba(255,255,255,0.3) transparent;
+    }
+    
+    .mask-selector::-webkit-scrollbar {
+      height: 6px;
+    }
+    
+    .mask-selector::-webkit-scrollbar-track {
+      background: transparent;
+    }
+    
+    .mask-selector::-webkit-scrollbar-thumb {
+      background: rgba(255,255,255,0.3);
+      border-radius: 3px;
+    }
+    
+    .mask-selector::-webkit-scrollbar-thumb:hover {
+      background: rgba(255,255,255,0.5);
     }
     
     .mask-btn-wrapper {
@@ -285,11 +456,29 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
   
   // 3D model objects for each accessory
   private glassesModel!: THREE.Group;
+  private glasses1Model!: THREE.Group;
   private mustacheModel!: THREE.Group;
+  private mustache1Model!: THREE.Group;
+  private maskModel!: THREE.Group;
+  private mask1Model!: THREE.Group;
+  private gorraModel!: THREE.Group;
+  private gorra1Model!: THREE.Group;
+  private hairModel!: THREE.Group;
+  private hair1Model!: THREE.Group;
+  private tshirtModel!: THREE.Group;
+  private beardModel!: THREE.Group;
   
   // Lights
   private ambientLight!: THREE.AmbientLight;
   private directionalLight!: THREE.DirectionalLight;
+
+  // Avatar with bones (Ready Player Me)
+  private avatarModel: THREE.Object3D | null = null;
+  private avatarNodes: Record<string, THREE.Object3D> = {};
+  private avatarHeadMeshes: THREE.Object3D[] = [];
+  public avatarEnabled = false;
+  public avatarUrl = 'https://models.readyplayer.me/6984a7a905b43df7aaeb9df1.glb?morphTargets=ARKit&textureAtlas=1024';
+  private breathingTime = 0;
 
   public faceDetected = false;
   public selectedMaskId = 'none';  // Para UI, último clickeado para gestures
@@ -308,9 +497,25 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       modelPath: 'assets/models/glasses.glb',
       type: 'glasses',
       loaded: false,
+      isActive: false,
+      isSelected: false,
       scaleOffset: 1.0,
       positionOffsetX: 0,
-      positionOffsetY: 0
+      positionOffsetY: 0,
+      positionOffsetZ: 0
+    },
+    {
+      id: 'glasses1',
+      name: 'Lentes 2',
+      modelPath: 'assets/models/glasses1.glb',
+      type: 'glasses',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
     },
     {
       id: 'mustache',
@@ -322,7 +527,124 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       isSelected: false,
       scaleOffset: 1.0,
       positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
+    },
+    {
+      id: 'mustache1',
+      name: 'Bigote 2',
+      modelPath: 'assets/models/mustache1.glb',
+      type: 'facial-hair',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
+    },
+    {
+      id: 'beard',
+      name: 'Barba',
+      modelPath: 'assets/models/beard.glb',
+      type: 'facial-hair',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
+    },
+    {
+      id: 'mask',
+      name: 'Máscara',
+      modelPath: 'assets/models/mask.glb',
+      type: 'mask',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
+    },
+    {
+      id: 'mask1',
+      name: 'Máscara 2',
+      modelPath: 'assets/models/mask1.glb',
+      type: 'mask',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
+    },
+    {
+      id: 'gorra',
+      name: 'Gorra',
+      modelPath: 'assets/models/gorra.glb',
+      type: 'hat',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
+    },
+    {
+      id: 'gorra1',
+      name: 'Gorra 2',
+      modelPath: 'assets/models/gorra1.glb',
+      type: 'hat',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
+    },
+    {
+      id: 'hair',
+      name: 'Cabello',
+      modelPath: 'assets/models/hair.glb',
+      type: 'hair',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
+    },
+    {
+      id: 'hair1',
+      name: 'Cabello 2',
+      modelPath: 'assets/models/hair1.glb',
+      type: 'hair',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
       positionOffsetY: 0
+    },
+    {
+      id: 'tshirt',
+      name: 'Playera',
+      modelPath: 'assets/models/tshirt.glb',
+      type: 'clothing',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
     }
   ];
 
@@ -388,9 +710,49 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     this.glassesModel.visible = false;
     this.scene.add(this.glassesModel);
 
+    this.glasses1Model = new THREE.Group();
+    this.glasses1Model.visible = false;
+    this.scene.add(this.glasses1Model);
+
     this.mustacheModel = new THREE.Group();
     this.mustacheModel.visible = false;
     this.scene.add(this.mustacheModel);
+
+    this.mustache1Model = new THREE.Group();
+    this.mustache1Model.visible = false;
+    this.scene.add(this.mustache1Model);
+
+    this.beardModel = new THREE.Group();
+    this.beardModel.visible = false;
+    this.scene.add(this.beardModel);
+
+    this.maskModel = new THREE.Group();
+    this.maskModel.visible = false;
+    this.scene.add(this.maskModel);
+
+    this.mask1Model = new THREE.Group();
+    this.mask1Model.visible = false;
+    this.scene.add(this.mask1Model);
+
+    this.gorraModel = new THREE.Group();
+    this.gorraModel.visible = false;
+    this.scene.add(this.gorraModel);
+
+    this.gorra1Model = new THREE.Group();
+    this.gorra1Model.visible = false;
+    this.scene.add(this.gorra1Model);
+
+    this.hairModel = new THREE.Group();
+    this.hairModel.visible = false;
+    this.scene.add(this.hairModel);
+
+    this.hair1Model = new THREE.Group();
+    this.hair1Model.visible = false;
+    this.scene.add(this.hair1Model);
+
+    this.tshirtModel = new THREE.Group();
+    this.tshirtModel.visible = false;
+    this.scene.add(this.tshirtModel);
   }
 
   private load3DModels() {
@@ -405,8 +767,28 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
           // Assign model to appropriate group
           if (mask.id === 'glasses') {
             this.glassesModel.add(gltf.scene);
+          } else if (mask.id === 'glasses1') {
+            this.glasses1Model.add(gltf.scene);
           } else if (mask.id === 'mustache') {
             this.mustacheModel.add(gltf.scene);
+          } else if (mask.id === 'mustache1') {
+            this.mustache1Model.add(gltf.scene);
+          } else if (mask.id === 'beard') {
+            this.beardModel.add(gltf.scene);
+          } else if (mask.id === 'mask') {
+            this.maskModel.add(gltf.scene);
+          } else if (mask.id === 'mask1') {
+            this.mask1Model.add(gltf.scene);
+          } else if (mask.id === 'gorra') {
+            this.gorraModel.add(gltf.scene);
+          } else if (mask.id === 'gorra1') {
+            this.gorra1Model.add(gltf.scene);
+          } else if (mask.id === 'hair') {
+            this.hairModel.add(gltf.scene);
+          } else if (mask.id === 'hair1') {
+            this.hair1Model.add(gltf.scene);
+          } else if (mask.id === 'tshirt') {
+            this.tshirtModel.add(gltf.scene);
           }
         },
         (progress) => {
@@ -510,6 +892,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       activeMask.scaleOffset = 1.0;
       activeMask.positionOffsetX = 0;
       activeMask.positionOffsetY = 0;
+      activeMask.positionOffsetZ = 0;
       console.log(`Reset adjustments for ${this.selectedMaskId}`);
     }
   }
@@ -646,14 +1029,32 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     const activeMask = this.masks.find(m => m.id === this.selectedMaskId);
     if (!activeMask) return;
 
-    const scaleDelta = -event.deltaY * 0.0005;
-    activeMask.scaleOffset = Math.max(0.3, Math.min(3.0, (activeMask.scaleOffset || 1.0) + scaleDelta));
+    if (event.shiftKey) {
+      // Shift + Scroll: Move in Z axis (depth)
+      const zDelta = -event.deltaY * 0.002;
+      activeMask.positionOffsetZ = (activeMask.positionOffsetZ || 0) + zDelta;
+      console.log(`Z offset for ${this.selectedMaskId}: ${activeMask.positionOffsetZ.toFixed(3)}`);
+    } else {
+      // Normal scroll: Scale
+      const scaleDelta = -event.deltaY * 0.0005;
+      activeMask.scaleOffset = Math.max(0.3, Math.min(3.0, (activeMask.scaleOffset || 1.0) + scaleDelta));
+    }
   }
 
   private updateVisibility() {
     // Update visibility based on active state, not selected
     this.glassesModel.visible = this.isMaskActive('glasses') && this.faceDetected;
+    this.glasses1Model.visible = this.isMaskActive('glasses1') && this.faceDetected;
     this.mustacheModel.visible = this.isMaskActive('mustache') && this.faceDetected;
+    this.mustache1Model.visible = this.isMaskActive('mustache1') && this.faceDetected;
+    this.beardModel.visible = this.isMaskActive('beard') && this.faceDetected;
+    this.maskModel.visible = this.isMaskActive('mask') && this.faceDetected;
+    this.mask1Model.visible = this.isMaskActive('mask1') && this.faceDetected;
+    this.gorraModel.visible = this.isMaskActive('gorra') && this.faceDetected;
+    this.gorra1Model.visible = this.isMaskActive('gorra1') && this.faceDetected;
+    this.hairModel.visible = this.isMaskActive('hair') && this.faceDetected;
+    this.hair1Model.visible = this.isMaskActive('hair1') && this.faceDetected;
+    this.tshirtModel.visible = this.isMaskActive('tshirt') && this.faceDetected;
   }
 
   private animate() {
@@ -675,6 +1076,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       this.faceDetected = true;
       this.updateAccessories(landmarks, rect.width, rect.height);
       this.updateVisibility();
+      this.updateAvatar(); // Update avatar with face tracking
     } else {
       this.faceDetected = false;
       this.updateVisibility();
@@ -751,7 +1153,8 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       // Apply position offsets from gestures
       const offsetX = mask?.positionOffsetX || 0;
       const offsetY = mask?.positionOffsetY || 0;
-      this.glassesModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z);
+      const offsetZ = mask?.positionOffsetZ || 0;
+      this.glassesModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
       
       // Scale based on eye distance + gesture scale offset
       const baseScale = eyeDistance * 1.5;
@@ -772,7 +1175,8 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       // Apply position offsets from gestures
       const offsetX = mask?.positionOffsetX || 0;
       const offsetY = mask?.positionOffsetY || 0;
-      this.mustacheModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z);
+      const offsetZ = mask?.positionOffsetZ || 0;
+      this.mustacheModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
       
       // Scale + gesture offset
       const baseScale = eyeDistance * 1.0;
@@ -783,6 +1187,165 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
 // Rotation (reduced to 50%)
       this.mustacheModel.rotation.z = eyeAngle * 0.5;
     }
+
+    // Update glasses1 model
+    if (this.isMaskActive('glasses1') && this.glasses1Model) {
+      const mask = this.masks.find(m => m.id === 'glasses1');
+      const worldPos = toWorld3D(eyeCenterX, eyeCenterY, nose.z);
+      const offsetX = mask?.positionOffsetX || 0;
+      const offsetY = mask?.positionOffsetY || 0;
+      const offsetZ = mask?.positionOffsetZ || 0;
+      this.glasses1Model.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
+      const baseScale = eyeDistance * 1.4;
+      const scaleMultiplier = mask?.scaleOffset || 1.0;
+      const finalScale = baseScale * scaleMultiplier;
+      this.glasses1Model.scale.set(finalScale, finalScale, finalScale);
+      this.glasses1Model.rotation.z = eyeAngle * 0.5;
+    }
+
+    // Update mustache1 model
+    if (this.isMaskActive('mustache1') && this.mustache1Model) {
+      const mask = this.masks.find(m => m.id === 'mustache1');
+      const mustacheY = upperLip.y - (eyeDistance * 0.05);
+      const worldPos = toWorld3D(mouthCenterX, mustacheY, nose.z);
+      const offsetX = mask?.positionOffsetX || 0;
+      const offsetY = mask?.positionOffsetY || 0;
+      const offsetZ = mask?.positionOffsetZ || 0;
+      this.mustache1Model.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
+      const baseScale = eyeDistance * 1.0;
+      const scaleMultiplier = mask?.scaleOffset || 1.0;
+      const finalScale = baseScale * scaleMultiplier;
+      this.mustache1Model.scale.set(finalScale, finalScale, finalScale);
+      this.mustache1Model.rotation.z = eyeAngle * 0.5;
+    }
+
+    // Update beard model
+    if (this.isMaskActive('beard') && this.beardModel) {
+      const mask = this.masks.find(m => m.id === 'beard');
+      const beardY = chin.y + (eyeDistance * 0.15);
+      const worldPos = toWorld3D(mouthCenterX, beardY, nose.z);
+      const offsetX = mask?.positionOffsetX || 0;
+      const offsetY = mask?.positionOffsetY || 0;
+      const offsetZ = mask?.positionOffsetZ || 0;
+      this.beardModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
+      const baseScale = eyeDistance * 1.2;
+      const scaleMultiplier = mask?.scaleOffset || 1.0;
+      const finalScale = baseScale * scaleMultiplier;
+      this.beardModel.scale.set(finalScale, finalScale, finalScale);
+      this.beardModel.rotation.z = eyeAngle * 0.5;
+    }
+
+    // Update mask model (cubre toda la cara)
+    if (this.isMaskActive('mask') && this.maskModel) {
+      const mask = this.masks.find(m => m.id === 'mask');
+      const faceCenterY = (eyeCenterY + nose.y) / 2;
+      const worldPos = toWorld3D(eyeCenterX, faceCenterY, nose.z);
+      const offsetX = mask?.positionOffsetX || 0;
+      const offsetY = mask?.positionOffsetY || 0;
+      const offsetZ = mask?.positionOffsetZ || 0;
+      this.maskModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
+      const baseScale = eyeDistance * 2.0;
+      const scaleMultiplier = mask?.scaleOffset || 1.0;
+      const finalScale = baseScale * scaleMultiplier;
+      this.maskModel.scale.set(finalScale, finalScale, finalScale);
+      this.maskModel.rotation.z = eyeAngle * 0.5;
+    }
+
+    // Update mask1 model
+    if (this.isMaskActive('mask1') && this.mask1Model) {
+      const mask = this.masks.find(m => m.id === 'mask1');
+      const faceCenterY = (eyeCenterY + nose.y) / 2;
+      const worldPos = toWorld3D(eyeCenterX, faceCenterY, nose.z);
+      const offsetX = mask?.positionOffsetX || 0;
+      const offsetY = mask?.positionOffsetY || 0;
+      const offsetZ = mask?.positionOffsetZ || 0;
+      this.mask1Model.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
+      const baseScale = eyeDistance * 2.0;
+      const scaleMultiplier = mask?.scaleOffset || 1.0;
+      const finalScale = baseScale * scaleMultiplier;
+      this.mask1Model.scale.set(finalScale, finalScale, finalScale);
+      this.mask1Model.rotation.z = eyeAngle * 0.5;
+    }
+
+    // Update gorra model (sobre la cabeza)
+    if (this.isMaskActive('gorra') && this.gorraModel) {
+      const mask = this.masks.find(m => m.id === 'gorra');
+      const hatY = forehead.y - (eyeDistance * 0.4);
+      const worldPos = toWorld3D(eyeCenterX, hatY, nose.z);
+      const offsetX = mask?.positionOffsetX || 0;
+      const offsetY = mask?.positionOffsetY || 0;
+      const offsetZ = (mask?.positionOffsetZ || 0) - 0.15; // Gorra más atrás por defecto
+      this.gorraModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
+      const baseScale = eyeDistance * 1.6;
+      const scaleMultiplier = mask?.scaleOffset || 1.0;
+      const finalScale = baseScale * scaleMultiplier;
+      this.gorraModel.scale.set(finalScale, finalScale, finalScale);
+      this.gorraModel.rotation.z = eyeAngle * 0.5;
+    }
+
+    // Update gorra1 model
+    if (this.isMaskActive('gorra1') && this.gorra1Model) {
+      const mask = this.masks.find(m => m.id === 'gorra1');
+      const hatY = forehead.y - (eyeDistance * 0.4);
+      const worldPos = toWorld3D(eyeCenterX, hatY, nose.z);
+      const offsetX = mask?.positionOffsetX || 0;
+      const offsetY = mask?.positionOffsetY || 0;
+      const offsetZ = (mask?.positionOffsetZ || 0) - 0.15; // Gorra más atrás por defecto
+      this.gorra1Model.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
+      const baseScale = eyeDistance * 1.6;
+      const scaleMultiplier = mask?.scaleOffset || 1.0;
+      const finalScale = baseScale * scaleMultiplier;
+      this.gorra1Model.scale.set(finalScale, finalScale, finalScale);
+      this.gorra1Model.rotation.z = eyeAngle * 0.5;
+    }
+
+    // Update hair model
+    if (this.isMaskActive('hair') && this.hairModel) {
+      const mask = this.masks.find(m => m.id === 'hair');
+      const hairY = forehead.y - (eyeDistance * 0.3);
+      const worldPos = toWorld3D(eyeCenterX, hairY, nose.z);
+      const offsetX = mask?.positionOffsetX || 0;
+      const offsetY = mask?.positionOffsetY || 0;
+      const offsetZ = mask?.positionOffsetZ || 0;
+      this.hairModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
+      const baseScale = eyeDistance * 1.8;
+      const scaleMultiplier = mask?.scaleOffset || 1.0;
+      const finalScale = baseScale * scaleMultiplier;
+      this.hairModel.scale.set(finalScale, finalScale, finalScale);
+      this.hairModel.rotation.z = eyeAngle * 0.5;
+    }
+
+    // Update hair1 model
+    if (this.isMaskActive('hair1') && this.hair1Model) {
+      const mask = this.masks.find(m => m.id === 'hair1');
+      const hairY = forehead.y - (eyeDistance * 0.3);
+      const worldPos = toWorld3D(eyeCenterX, hairY, nose.z);
+      const offsetX = mask?.positionOffsetX || 0;
+      const offsetY = mask?.positionOffsetY || 0;
+      const offsetZ = mask?.positionOffsetZ || 0;
+      this.hair1Model.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
+      const baseScale = eyeDistance * 1.8;
+      const scaleMultiplier = mask?.scaleOffset || 1.0;
+      const finalScale = baseScale * scaleMultiplier;
+      this.hair1Model.scale.set(finalScale, finalScale, finalScale);
+      this.hair1Model.rotation.z = eyeAngle * 0.5;
+    }
+
+    // Update tshirt model (abajo en el torso)
+    if (this.isMaskActive('tshirt') && this.tshirtModel) {
+      const mask = this.masks.find(m => m.id === 'tshirt');
+      const tshirtY = chin.y + (eyeDistance * 0.8);
+      const worldPos = toWorld3D(eyeCenterX, tshirtY, nose.z);
+      const offsetX = mask?.positionOffsetX || 0;
+      const offsetY = mask?.positionOffsetY || 0;
+      const offsetZ = mask?.positionOffsetZ || 0;
+      this.tshirtModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
+      const baseScale = eyeDistance * 2.5;
+      const scaleMultiplier = mask?.scaleOffset || 1.0;
+      const finalScale = baseScale * scaleMultiplier;
+      this.tshirtModel.scale.set(finalScale, finalScale, finalScale);
+      this.tshirtModel.rotation.z = eyeAngle * 0.5;
+    }
   }
 
   switchCamera() {
@@ -790,6 +1353,127 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       await this.trackService.switchCamera();
       console.log('Camera switched');
     });
+  }
+
+  toggleAvatar() {
+    this.ngZone.run(() => {
+      this.avatarEnabled = !this.avatarEnabled;
+      
+      if (this.avatarEnabled && !this.avatarModel) {
+        // Load avatar on first enable
+        this.loadAvatar();
+      } else if (this.avatarModel) {
+        // Just toggle visibility
+        this.avatarModel.visible = this.avatarEnabled;
+      }
+      
+      console.log(`Avatar ${this.avatarEnabled ? 'enabled' : 'disabled'}`);
+    });
+  }
+
+  private loadAvatar() {
+    console.log('Loading avatar:', this.avatarUrl);
+    
+    this.gltfLoader.load(
+      this.avatarUrl,
+      (gltf) => {
+        // Remove previous avatar if exists
+        if (this.avatarModel) {
+          this.scene.remove(this.avatarModel);
+        }
+
+        const model = gltf.scene;
+        
+        // Position avatar to overlay on person
+        model.position.set(0, -1.0, 0);
+        model.scale.set(0.8, 0.8, 0.8);
+        
+        this.avatarModel = model;
+        this.avatarNodes = {};
+        this.avatarHeadMeshes = [];
+        
+        // Build nodes map and find head meshes for blendshapes
+        model.traverse((node: THREE.Object3D) => {
+          this.avatarNodes[node.name] = node;
+          
+          // Identify head meshes for facial expressions
+          if (node.name === 'Wolf3D_Head' ||
+              node.name === 'Wolf3D_Teeth' ||
+              node.name === 'Wolf3D_Beard' ||
+              node.name === 'Wolf3D_Avatar' ||
+              node.name === 'Wolf3D_Head_Custom') {
+            this.avatarHeadMeshes.push(node);
+          }
+        });
+        
+        this.scene.add(model);
+        model.visible = this.avatarEnabled;
+        
+        console.log('✅ Avatar loaded with', Object.keys(this.avatarNodes).length, 'nodes');
+      },
+      (progress) => {
+        const percent = (progress.loaded / progress.total) * 100;
+        console.log(`Loading avatar: ${percent.toFixed(0)}%`);
+      },
+      (error) => {
+        console.error('❌ Error loading avatar:', error);
+      }
+    );
+  }
+
+  private updateAvatar() {
+    if (!this.avatarModel || !this.avatarEnabled || !this.avatarModel.visible) return;
+
+    this.breathingTime += 0.02;
+
+    const blendshapes = this.trackService.blendshapes();
+    const rotation = this.trackService.rotation();
+
+    // Apply Face Blendshapes (ARKit morphTargets)
+    if (blendshapes.length > 0 && this.avatarHeadMeshes.length > 0) {
+      blendshapes.forEach(element => {
+        this.avatarHeadMeshes.forEach(mesh => {
+          const m = mesh as any;
+          if (m.morphTargetDictionary && m.morphTargetInfluences) {
+            const index = m.morphTargetDictionary[element.categoryName];
+            if (index !== undefined && index >= 0) {
+              m.morphTargetInfluences[index] = element.score;
+            }
+          }
+        });
+      });
+    }
+
+    // Breathing animation
+    const breathCycle = Math.sin(this.breathingTime * 0.5);
+    const breathIntensity = 0.05;
+    const parts = this.avatarNodes;
+
+    // Spine breathing
+    if (parts['Spine']) parts['Spine'].rotation.x = breathCycle * breathIntensity * 0.2;
+    if (parts['Spine1']) parts['Spine1'].rotation.x = breathCycle * breathIntensity * 0.2;
+
+    // Spine2 with face tracking lean
+    if (parts['Spine2'] && rotation) {
+      const baseRotX = rotation.x / 10;
+      const baseRotY = rotation.y / 10;
+      const baseRotZ = rotation.z / 10;
+      parts['Spine2'].rotation.set(
+        baseRotX + breathCycle * breathIntensity,
+        baseRotY,
+        baseRotZ
+      );
+    }
+
+    // Face tracking rotations
+    if (rotation) {
+      if (parts['Head']) parts['Head'].rotation.set(rotation.x, rotation.y, rotation.z);
+      if (parts['Neck']) parts['Neck'].rotation.set(rotation.x / 5 + 0.3, rotation.y / 5, rotation.z / 5);
+      
+      // Shoulders
+      if (parts['LeftShoulder']) parts['LeftShoulder'].rotation.set(rotation.x / 15, rotation.y / 15, rotation.z / 15);
+      if (parts['RightShoulder']) parts['RightShoulder'].rotation.set(rotation.x / 15, rotation.y / 15, rotation.z / 15);
+    }
   }
 }
 
