@@ -1,6 +1,11 @@
-import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, inject, NgZone } from '@angular/core';
+import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, inject, NgZone, ChangeDetectorRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { FormsModule } from '@angular/forms';
 import { FaceTrackingService } from '../../services/face-tracking.service';
+import { LiveStorageService } from '../../pages/live/live-storage.service';
+import { FirebaseAvatarStorageService } from '../../services/firebase-avatar-storage.service';
+import { ModelCacheService } from '../../services/model-cache.service';
+import { AvatarSelectorComponent, CustomAvatarRequest } from '../../pages/live/components/avatar-selector.component';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
@@ -21,13 +26,25 @@ interface MaskOption {
   positionOffsetZ?: number;
 }
 
+interface AvatarOption {
+  id: string;
+  name: string;
+  url: string;
+  thumbnail: string;
+  defaultCollectionId?: string;
+  isCustom?: boolean;
+  storagePath?: string;
+  ownerEmail?: string;
+  sourceUrl?: string;
+}
+
 @Component({
   selector: 'app-ar-mask',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, FormsModule, AvatarSelectorComponent],
   template: `
     <div #container class="ar-container">
-      <canvas #maskCanvas class="ar-canvas"></canvas>
+      <canvas #maskCanvas class="ar-canvas" [class.panel-open]="isAvatarPanelOpen"></canvas>
     </div>
     
     <!-- Accessory Selector UI -->
@@ -230,6 +247,14 @@ interface MaskOption {
         <span>F.Verde</span>
       </button>
       <button 
+        (click)="toggleVideoHideBlack()"
+        [class.active]="isVideoHiddenBlack()"
+        class="mask-btn hide-black-btn"
+        title="Ocultar video (fondo negro)">
+        <span class="icon">⚫</span>
+        <span>F.Negro</span>
+      </button>
+      <button 
         (click)="toggleSegmentation()"
         [class.active]="isSegmentationActive()"
         class="mask-btn segmentation-btn"
@@ -252,6 +277,64 @@ interface MaskOption {
               [class.active]="isMaskActive('avatar')"
               (click)="selectForEditing($event, 'avatar')">✏️</span>
       </div>
+      <button 
+        (click)="toggleAvatarPanel()"
+        [class.active]="isAvatarPanelOpen"
+        class="mask-btn config-btn"
+        title="Configurar avatares">
+        <span class="icon">⚙️</span>
+        <span>Config</span>
+      </button>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('header')"
+          [class.active]="isMaskActive('header')"
+          [class.selected]="selectedMaskId === 'header'"
+          class="mask-btn header-btn"
+          title="Header (solo cabeza)">
+          <span class="icon">🗣️</span>
+          <span>Header</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'header'"
+              [class.active]="isMaskActive('header')"
+              (click)="selectForEditing($event, 'header')">✏️</span>
+      </div>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('avatar1')"
+          [class.active]="isMaskActive('avatar1')"
+          [class.selected]="selectedMaskId === 'avatar1'"
+          class="mask-btn avatar1-btn"
+          title="Avatar1 (local)">
+          <span class="icon">👤</span>
+          <span>Avatar1</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'avatar1'"
+              [class.active]="isMaskActive('avatar1')"
+              (click)="selectForEditing($event, 'avatar1')">✏️</span>
+      </div>
+    </div>
+
+    <!-- Avatar Configuration Panel -->
+    <div class="avatar-panel" *ngIf="isAvatarPanelOpen">
+      <div class="panel-header">
+        <h3>👤 Avatar</h3>
+        <button class="close-btn" (click)="toggleAvatarPanel()">✕</button>
+      </div>
+      <app-avatar-selector
+        [avatars]="avatars"
+        [currentAvatar]="currentAvatar"
+        [avatarSize]="'medium'"
+        [avatarPosition]="'center'"
+        [collections]="[]"
+        [sizeOptions]="sizeOptions"
+        [positionOptions]="positionOptions"
+        (onSelect)="selectAvatar($event)"
+        (onLoadCustom)="loadCustomAvatar($event)"
+        (onDelete)="deleteAvatar($event)">
+      </app-avatar-selector>
     </div>
     
     <div class="debug-info">
@@ -284,6 +367,11 @@ interface MaskOption {
       pointer-events: auto;
       touch-action: none;
       cursor: grab;
+    }
+    
+    .ar-canvas.panel-open {
+      pointer-events: none !important;
+      cursor: default;
     }
     
     .ar-canvas:active {
@@ -461,6 +549,83 @@ interface MaskOption {
     .debug-info p {
       margin: 2px 0;
     }
+
+    /* Avatar Panel Styles */
+    .avatar-panel {
+      position: fixed;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      width: 90%;
+      max-width: 400px;
+      max-height: 80vh;
+      background: #0B0F19;
+      border: 1px solid #5C24FF;
+      border-radius: 12px;
+      box-shadow: 0 8px 32px rgba(0, 0, 0, 0.8);
+      z-index: 400;
+      overflow: hidden;
+      display: flex;
+      flex-direction: column;
+      pointer-events: auto;
+      touch-action: auto;
+    }
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 1rem;
+      background: linear-gradient(135deg, #1e1e2e 0%, #252538 100%);
+      border-bottom: 1px solid #23293D;
+    }
+
+    .panel-header h3 {
+      margin: 0;
+      color: #E2E8F0;
+      font-size: 1.1rem;
+      font-weight: 600;
+    }
+
+    .close-btn {
+      width: 32px;
+      height: 32px;
+      border-radius: 50%;
+      border: 1px solid #23293D;
+      background: #151926;
+      color: #94A3B8;
+      font-size: 1.2rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.2s;
+    }
+
+    .close-btn:hover {
+      border-color: #A855F7;
+      color: #fff;
+      background: #23293D;
+    }
+
+    .avatar-panel app-avatar-selector {
+      flex: 1;
+      overflow-y: auto;
+      padding: 1rem;
+    }
+
+    .config-btn {
+      background: rgba(92, 36, 255, 0.2) !important;
+    }
+
+    .config-btn.active {
+      background: rgba(92, 36, 255, 0.4) !important;
+      border-color: #A855F7 !important;
+    }
+
+    .config-btn:hover {
+      background: rgba(92, 36, 255, 0.3) !important;
+    }
   `]
 })
 export class ArMaskComponent implements AfterViewInit, OnDestroy {
@@ -469,7 +634,44 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
 
   private trackService = inject(FaceTrackingService);
   private ngZone = inject(NgZone);
+  private storageService = inject(LiveStorageService);
+  private firebaseAvatarStorage = inject(FirebaseAvatarStorageService);
+  private modelCache = inject(ModelCacheService);
+  private cdr = inject(ChangeDetectorRef);
   private requestID: number = 0;
+
+  // Avatar management
+  private readonly defaultAvatars: AvatarOption[] = [
+    {
+      id: 'avatar1',
+      name: 'Avatar 1',
+      url: 'https://models.readyplayer.me/6984a7a905b43df7aaeb9df1.glb',
+      thumbnail: 'https://models.readyplayer.me/6984a7a905b43df7aaeb9df1.png'
+    },
+    {
+      id: 'avatar2',
+      name: 'Avatar 2',
+      url: 'https://models.readyplayer.me/6984ad1a0b547ce9ae29d70d.glb',
+      thumbnail: 'https://models.readyplayer.me/6984ad1a0b547ce9ae29d70d.png'
+    }
+  ];
+
+  avatars: AvatarOption[] = [...this.defaultAvatars];
+  currentAvatar: AvatarOption | null = null;
+  isAvatarPanelOpen = false;
+  private hiddenAvatarIds = new Set<string>();
+
+  sizeOptions = [
+    { label: 'S', value: 'small' },
+    { label: 'M', value: 'medium' },
+    { label: 'L', value: 'large' }
+  ];
+
+  positionOptions = [
+    { label: '⬅️', value: 'left' as const },
+    { label: '⏺️', value: 'center' as const },
+    { label: '➡️', value: 'right' as const }
+  ];
 
   // Three.js objects
   private renderer!: THREE.WebGLRenderer;
@@ -503,6 +705,22 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
   public avatarUrl = 'https://models.readyplayer.me/6984a7a905b43df7aaeb9df1.glb?morphTargets=ARKit&textureAtlas=1024';
   private breathingTime = 0;
   private avatarCalculatedScale: number | null = null;  // Scale calculated once based on face proportions
+
+  // Header model (avatar sin cuerpo)
+  private headerModel: THREE.Object3D | null = null;
+  private headerNodes: Record<string, THREE.Object3D> = {};
+  private headerHeadMeshes: THREE.Object3D[] = [];
+  public headerEnabled = false;
+  private headerBreathingTime = 0;
+  private headerCalculatedScale: number | null = null;
+
+  // Avatar1 model (desde assets/models)
+  private avatar1Model: THREE.Object3D | null = null;
+  private avatar1Nodes: Record<string, THREE.Object3D> = {};
+  private avatar1HeadMeshes: THREE.Object3D[] = [];
+  public avatar1Enabled = false;
+  private avatar1BreathingTime = 0;
+  private avatar1CalculatedScale: number | null = null;
 
   public faceDetected = false;
   public selectedMaskId = 'none';  // Para UI, último clickeado para gestures
@@ -682,10 +900,39 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       positionOffsetX: 0,
       positionOffsetY: 0,
       positionOffsetZ: 0
+    },
+    {
+      id: 'header',
+      name: 'Header (Solo cabeza)',
+      modelPath: 'assets/models/header.glb',
+      type: 'avatar',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
+    },
+    {
+      id: 'avatar1',
+      name: 'Avatar1 (Local)',
+      modelPath: 'assets/models/avatar1.glb',
+      type: 'avatar',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
     }
   ];
 
   ngAfterViewInit() {
+    // Load stored avatars
+    this.loadStoredAvatars();
+    
     this.initThreeJS();
     this.setupLighting();
     this.create3DModels();
@@ -858,6 +1105,16 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       // Si se activa el avatar, resetear la escala calculada para que recalcule
       if (mask.isActive && maskId === 'avatar') {
         this.avatarCalculatedScale = null;
+      }
+      
+      // Si se activa el header, resetear la escala calculada para que recalcule
+      if (mask.isActive && maskId === 'header') {
+        this.headerCalculatedScale = null;
+      }
+      
+      // Si se activa el avatar1, resetear la escala calculada para que recalcule
+      if (mask.isActive && maskId === 'avatar1') {
+        this.avatar1CalculatedScale = null;
       }
       
       // Si se activa, se convierte en el seleccionado para gestures
@@ -1086,8 +1343,20 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       console.log(`Z offset for ${this.selectedMaskId}: ${activeMask.positionOffsetZ.toFixed(3)}`);
     } else {
       // Normal scroll: Scale
+      const oldScale = activeMask.scaleOffset || 1.0;
       const scaleDelta = -event.deltaY * 0.0005;
-      activeMask.scaleOffset = Math.max(0.3, Math.min(3.0, (activeMask.scaleOffset || 1.0) + scaleDelta));
+      const newScale = Math.max(0.3, Math.min(3.0, oldScale + scaleDelta));
+      
+      // For avatar types, adjust Y position proportionally to scale change
+      // to make it appear to scale from center instead of from feet
+      if (activeMask.type === 'avatar') {
+        const scaleChange = newScale - oldScale;
+        const yAdjustment = scaleChange * 2.0; // Compensate upward movement
+        activeMask.positionOffsetY = (activeMask.positionOffsetY || 0) - yAdjustment;
+      }
+      
+      activeMask.scaleOffset = newScale;
+      console.log(`Scale for ${this.selectedMaskId}: ${newScale.toFixed(3)}`);
     }
   }
 
@@ -1100,6 +1369,28 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
         this.loadAvatar();
       } else if (this.avatarModel) {
         this.avatarModel.visible = this.avatarEnabled && this.faceDetected;
+      }
+    }
+
+    // Handle header model
+    const headerMask = this.masks.find(m => m.id === 'header');
+    if (headerMask) {
+      this.headerEnabled = headerMask.isActive || false;
+      if (this.headerEnabled && !this.headerModel) {
+        this.loadHeader();
+      } else if (this.headerModel) {
+        this.headerModel.visible = this.headerEnabled && this.faceDetected;
+      }
+    }
+
+    // Handle avatar1 model
+    const avatar1Mask = this.masks.find(m => m.id === 'avatar1');
+    if (avatar1Mask) {
+      this.avatar1Enabled = avatar1Mask.isActive || false;
+      if (this.avatar1Enabled && !this.avatar1Model) {
+        this.loadAvatar1();
+      } else if (this.avatar1Model) {
+        this.avatar1Model.visible = this.avatar1Enabled && this.faceDetected;
       }
     }
     
@@ -1138,6 +1429,8 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       this.updateAccessories(landmarks, rect.width, rect.height);
       this.updateVisibility();
       this.updateAvatar(); // Update avatar with face tracking
+      this.updateHeader(); // Update header with face tracking
+      this.updateAvatar1(); // Update avatar1 with face tracking
     } else {
       this.faceDetected = false;
       this.updateVisibility();
@@ -1421,9 +1714,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const currentState = this.trackService.hideVideo();
       this.trackService.toggleVideoVisibility(!currentState);
       
-      // Si se activa hide video, desactivar segmentación
+      // Si se activa hide video verde, desactivar segmentación y fondo negro
       if (!currentState) {
         this.trackService.togglePersonMask(false);
+        this.trackService.toggleVideoVisibilityBlack(false);
       }
     });
   }
@@ -1432,14 +1726,32 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     return this.trackService.hideVideo();
   }
 
+  toggleVideoHideBlack() {
+    this.ngZone.run(() => {
+      const currentState = this.trackService.hideVideoBlack();
+      this.trackService.toggleVideoVisibilityBlack(!currentState);
+      
+      // Si se activa hide video negro, desactivar segmentación y fondo verde
+      if (!currentState) {
+        this.trackService.togglePersonMask(false);
+        this.trackService.toggleVideoVisibility(false);
+      }
+    });
+  }
+
+  isVideoHiddenBlack(): boolean {
+    return this.trackService.hideVideoBlack();
+  }
+
   toggleSegmentation() {
     this.ngZone.run(() => {
       const currentState = this.trackService.hidePersonWithGreen();
       this.trackService.togglePersonMask(!currentState);
       
-      // Si se activa mask persona, desactivar hide video
+      // Si se activa mask persona, desactivar hide video (verde y negro)
       if (!currentState) {
         this.trackService.toggleVideoVisibility(false);
+        this.trackService.toggleVideoVisibilityBlack(false);
       }
     });
   }
@@ -1502,6 +1814,59 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       },
       (error) => {
         console.error('❌ Error loading avatar:', error);
+      }
+    );
+  }
+
+  private loadHeader() {
+    const headerMask = this.masks.find(m => m.id === 'header');
+    if (!headerMask) return;
+
+    console.log('Loading header:', headerMask.modelPath);
+    
+    this.gltfLoader.load(
+      headerMask.modelPath,
+      (gltf) => {
+        // Remove previous header if exists
+        if (this.headerModel) {
+          this.scene.remove(this.headerModel);
+        }
+
+        const model = gltf.scene;
+        
+        // Base position (will be modified by offsets in updateHeader)
+        model.position.set(0, -1.5, 0);
+        model.scale.set(1.2, 1.2, 1.2);
+        
+        this.headerModel = model;
+        this.headerNodes = {};
+        this.headerHeadMeshes = [];
+        
+        // Build nodes map and find head meshes for blendshapes
+        model.traverse((node: THREE.Object3D) => {
+          this.headerNodes[node.name] = node;
+          
+          // Identify head meshes for facial expressions
+          if (node.name === 'Wolf3D_Head' ||
+              node.name === 'Wolf3D_Teeth' ||
+              node.name === 'Wolf3D_Beard' ||
+              node.name === 'Wolf3D_Avatar' ||
+              node.name === 'Wolf3D_Head_Custom') {
+            this.headerHeadMeshes.push(node);
+          }
+        });
+        
+        this.scene.add(model);
+        model.visible = this.headerEnabled;
+        
+        console.log('✅ Header loaded with', Object.keys(this.headerNodes).length, 'nodes');
+      },
+      (progress) => {
+        const percent = (progress.loaded / progress.total) * 100;
+        console.log(`Loading header: ${percent.toFixed(0)}%`);
+      },
+      (error) => {
+        console.error('❌ Error loading header:', error);
       }
     );
   }
@@ -1588,5 +1953,453 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       
       }
     
- }
+    this.breathingTime += 0.016;
+  }
+
+  private updateHeader() {
+    const headerMask = this.masks.find(m => m.id === 'header');
+    if (!this.headerModel || !headerMask || !headerMask.isActive || !this.headerModel.visible) return;
+
+    this.headerBreathingTime += 0.02;
+
+    const blendshapes = this.trackService.blendshapes();
+    const rotation = this.trackService.rotation();
+    const landmarks = this.trackService.landmarks();
+    
+    // Calculate scale ONLY ONCE based on face proportions
+    if (this.headerCalculatedScale === null && landmarks && landmarks.length > 468) {
+      const leftEyeOuter = landmarks[33];   // Left eye outer corner
+      const rightEyeOuter = landmarks[263]; // Right eye outer corner
+      
+      if (leftEyeOuter && rightEyeOuter) {
+        // Calculate distance between eyes
+        const eyeDistance = Math.sqrt(
+          Math.pow(rightEyeOuter.x - leftEyeOuter.x, 2) +
+          Math.pow(rightEyeOuter.y - leftEyeOuter.y, 2) +
+          Math.pow(rightEyeOuter.z - leftEyeOuter.z, 2)
+        );
+        
+        // Scale header based on eye distance (calculated once)
+        // Same multiplier as avatar for consistency
+        this.headerCalculatedScale = eyeDistance * 32.0;
+      }
+    }
+    
+    // Use calculated scale or default
+    const baseScale = this.headerCalculatedScale || 2.2;
+    const finalScale = baseScale * (headerMask.scaleOffset || 1.0);
+    this.headerModel.scale.set(finalScale, finalScale, finalScale);
+    
+    // Keep position fixed (only use user offsets)
+    this.headerModel.position.x = 0 + (headerMask.positionOffsetX || 0);
+    this.headerModel.position.y = -4.3 + (headerMask.positionOffsetY || 0);
+    this.headerModel.position.z = 0 + (headerMask.positionOffsetZ || 0);
+
+    // Apply Face Blendshapes (ARKit morphTargets)
+    if (blendshapes.length > 0 && this.headerHeadMeshes.length > 0) {
+      blendshapes.forEach(element => {
+        this.headerHeadMeshes.forEach(mesh => {
+          const m = mesh as any;
+          if (m.morphTargetDictionary && m.morphTargetInfluences) {
+            const index = m.morphTargetDictionary[element.categoryName];
+            if (index !== undefined && index >= 0) {
+              m.morphTargetInfluences[index] = element.score;
+            }
+          }
+        });
+      });
+    }
+
+    // Breathing animation
+    const breathCycle = Math.sin(this.headerBreathingTime * 0.5);
+    const breathIntensity = 0.05;
+    const parts = this.headerNodes;
+
+    // Spine breathing (si tiene huesos de spine)
+    if (parts['Spine']) parts['Spine'].rotation.x = breathCycle * breathIntensity * 0.2;
+    if (parts['Spine1']) parts['Spine1'].rotation.x = breathCycle * breathIntensity * 0.2;
+
+    // Spine2 with face tracking lean
+    if (parts['Spine2'] && rotation) {
+      const baseRotX = rotation.x / 10;
+      const baseRotY = -rotation.y / 10;
+      const baseRotZ = -rotation.z / 10;
+      parts['Spine2'].rotation.set(
+        baseRotX + breathCycle * breathIntensity,
+        baseRotY,
+        baseRotZ
+      );
+    }
+
+    // Face tracking rotations
+    if (rotation) {
+      if (parts['Head']) parts['Head'].rotation.set(rotation.x, -rotation.y, -rotation.z);
+      if (parts['Neck']) parts['Neck'].rotation.set(rotation.x / 5 + 0.3, -rotation.y / 5, -rotation.z / 5);
+    }
+    
+    this.headerBreathingTime += 0.016;
+  }
+
+  private loadAvatar1() {
+    const avatar1Mask = this.masks.find(m => m.id === 'avatar1');
+    if (!avatar1Mask) return;
+
+    console.log('Loading avatar1:', avatar1Mask.modelPath);
+    
+    this.gltfLoader.load(
+      avatar1Mask.modelPath,
+      (gltf) => {
+        // Remove previous avatar1 if exists
+        if (this.avatar1Model) {
+          this.scene.remove(this.avatar1Model);
+        }
+
+        const model = gltf.scene;
+        
+        // Base position (will be modified by offsets in updateAvatar1)
+        model.position.set(0, -1.5, 0);
+        model.scale.set(1.2, 1.2, 1.2);
+        
+        this.avatar1Model = model;
+        this.avatar1Nodes = {};
+        this.avatar1HeadMeshes = [];
+        
+        // Build nodes map and find head meshes for blendshapes
+        model.traverse((node: THREE.Object3D) => {
+          this.avatar1Nodes[node.name] = node;
+          
+          // Identify head meshes for facial expressions
+          if (node.name === 'Wolf3D_Head' ||
+              node.name === 'Wolf3D_Teeth' ||
+              node.name === 'Wolf3D_Beard' ||
+              node.name === 'Wolf3D_Avatar' ||
+              node.name === 'Wolf3D_Head_Custom') {
+            this.avatar1HeadMeshes.push(node);
+          }
+        });
+        
+        this.scene.add(model);
+        model.visible = this.avatar1Enabled;
+        
+        console.log('✅ Avatar1 loaded with', Object.keys(this.avatar1Nodes).length, 'nodes');
+      },
+      (progress) => {
+        const percent = (progress.loaded / progress.total) * 100;
+        console.log(`Loading avatar1: ${percent.toFixed(0)}%`);
+      },
+      (error) => {
+        console.error('❌ Error loading avatar1:', error);
+      }
+    );
+  }
+
+  private updateAvatar1() {
+    const avatar1Mask = this.masks.find(m => m.id === 'avatar1');
+    if (!this.avatar1Model || !avatar1Mask || !avatar1Mask.isActive || !this.avatar1Model.visible) return;
+
+    this.avatar1BreathingTime += 0.02;
+
+    const blendshapes = this.trackService.blendshapes();
+    const rotation = this.trackService.rotation();
+    const landmarks = this.trackService.landmarks();
+    
+    // Calculate scale ONLY ONCE based on face proportions
+    if (this.avatar1CalculatedScale === null && landmarks && landmarks.length > 468) {
+      const leftEyeOuter = landmarks[33];   // Left eye outer corner
+      const rightEyeOuter = landmarks[263]; // Right eye outer corner
+      
+      if (leftEyeOuter && rightEyeOuter) {
+        // Calculate distance between eyes
+        const eyeDistance = Math.sqrt(
+          Math.pow(rightEyeOuter.x - leftEyeOuter.x, 2) +
+          Math.pow(rightEyeOuter.y - leftEyeOuter.y, 2) +
+          Math.pow(rightEyeOuter.z - leftEyeOuter.z, 2)
+        );
+        
+        // Scale avatar1 based on eye distance (calculated once)
+        // Same multiplier as main avatar for consistency
+        this.avatar1CalculatedScale = eyeDistance * 32.0;
+      }
+    }
+    
+    // Use calculated scale or default
+    const baseScale = this.avatar1CalculatedScale || 2.2;
+    const finalScale = baseScale * (avatar1Mask.scaleOffset || 1.0);
+    this.avatar1Model.scale.set(finalScale, finalScale, finalScale);
+    
+    // Keep position fixed (only use user offsets)
+    this.avatar1Model.position.x = 0 + (avatar1Mask.positionOffsetX || 0);
+    this.avatar1Model.position.y = -4.3 + (avatar1Mask.positionOffsetY || 0);
+    this.avatar1Model.position.z = 0 + (avatar1Mask.positionOffsetZ || 0);
+
+    // Apply Face Blendshapes (ARKit morphTargets)
+    if (blendshapes.length > 0 && this.avatar1HeadMeshes.length > 0) {
+      blendshapes.forEach(element => {
+        this.avatar1HeadMeshes.forEach(mesh => {
+          const m = mesh as any;
+          if (m.morphTargetDictionary && m.morphTargetInfluences) {
+            const index = m.morphTargetDictionary[element.categoryName];
+            if (index !== undefined && index >= 0) {
+              m.morphTargetInfluences[index] = element.score;
+            }
+          }
+        });
+      });
+    }
+
+    // Breathing animation
+    const breathCycle = Math.sin(this.avatar1BreathingTime * 0.5);
+    const breathIntensity = 0.05;
+    const parts = this.avatar1Nodes;
+
+    // Spine breathing
+    if (parts['Spine']) parts['Spine'].rotation.x = breathCycle * breathIntensity * 0.2;
+    if (parts['Spine1']) parts['Spine1'].rotation.x = breathCycle * breathIntensity * 0.2;
+
+    // Spine2 with face tracking lean
+    if (parts['Spine2'] && rotation) {
+      const baseRotX = rotation.x / 10;
+      const baseRotY = -rotation.y / 10;
+      const baseRotZ = -rotation.z / 10;
+      parts['Spine2'].rotation.set(
+        baseRotX + breathCycle * breathIntensity,
+        baseRotY,
+        baseRotZ
+      );
+    }
+
+    // Face tracking rotations
+    if (rotation) {
+      if (parts['Head']) parts['Head'].rotation.set(rotation.x, -rotation.y, -rotation.z);
+      if (parts['Neck']) parts['Neck'].rotation.set(rotation.x / 5 + 0.3, -rotation.y / 5, -rotation.z / 5);
+    }
+    
+    this.avatar1BreathingTime += 0.016;
+  }
+
+  // === Avatar Management Methods ===
+
+  toggleAvatarPanel() {
+    this.isAvatarPanelOpen = !this.isAvatarPanelOpen;
+  }
+
+  selectAvatar(avatar: AvatarOption) {
+    this.currentAvatar = avatar;
+    this.avatarUrl = this.normalizeAvatarUrl(avatar.url);
+    
+    // Reset avatar scale when changing avatar
+    this.avatarCalculatedScale = null;
+    
+    // Reload avatar if currently active
+    if (this.avatarEnabled) {
+      this.loadAvatar();
+    }
+    
+    void this.storageService.saveCustomAvatars(this.avatars);
+  }
+
+  private async loadStoredAvatars() {
+    try {
+      const [customAvatars, hiddenIds] = await Promise.all([
+        this.storageService.loadCustomAvatars(),
+        this.storageService.loadHiddenAvatarIds()
+      ]);
+
+      this.hiddenAvatarIds = new Set(hiddenIds);
+      const visibleCustomAvatars = customAvatars.filter(avatar => !this.hiddenAvatarIds.has(avatar.id));
+
+      this.avatars = [...this.defaultAvatars, ...visibleCustomAvatars];
+
+      // Select first avatar by default
+      if (this.avatars.length > 0 && !this.currentAvatar) {
+        this.currentAvatar = this.avatars[0];
+        this.avatarUrl = this.normalizeAvatarUrl(this.currentAvatar.url);
+      }
+
+      this.cdr.detectChanges();
+    } catch (error) {
+      console.error('Error loading stored avatars:', error);
+    }
+  }
+
+  async loadCustomAvatar(request: CustomAvatarRequest) {
+    if (!request?.url || !request.url.trim()) {
+      return;
+    }
+
+    try {
+      const avatarName = this.resolveAvatarName(request.name);
+      if (!avatarName) {
+        alert('Avatar name is required.');
+        return;
+      }
+
+      const email = await this.resolveUserEmail();
+      if (!email) {
+        alert('Necesitas iniciar sesión para guardar el avatar en Firebase Storage.');
+        return;
+      }
+
+      const normalizedUrl = this.normalizeAvatarUrl(request.url);
+      const expectedStoragePath = this.firebaseAvatarStorage.buildAvatarPath(email, avatarName);
+      const customAvatarId = this.createAvatarIdFromUrl(expectedStoragePath);
+
+      if (this.hiddenAvatarIds.has(customAvatarId)) {
+        this.hiddenAvatarIds.delete(customAvatarId);
+        await this.storageService.saveHiddenAvatarIds(Array.from(this.hiddenAvatarIds));
+      }
+
+      const avatarBuffer = await this.preloadAvatarModel(normalizedUrl);
+      const uploadResult = await this.firebaseAvatarStorage.uploadAvatar(email, avatarName, avatarBuffer);
+
+      let customAvatar = this.avatars.find(avatar => avatar.storagePath === uploadResult.path);
+
+      if (!customAvatar) {
+        customAvatar = this.createCustomAvatar(normalizedUrl, avatarName, email, uploadResult.path, normalizedUrl);
+        this.avatars = [...this.avatars, customAvatar];
+      } else {
+        customAvatar.id = this.createAvatarIdFromUrl(uploadResult.path);
+        customAvatar.name = avatarName;
+        customAvatar.url = normalizedUrl;
+        customAvatar.storagePath = uploadResult.path;
+        customAvatar.ownerEmail = email;
+        customAvatar.sourceUrl = normalizedUrl;
+      }
+
+      this.selectAvatar(customAvatar);
+      await this.storageService.saveCustomAvatars(this.avatars);
+      this.cdr.detectChanges();
+    } catch (error) {
+      console.error('Error loading custom avatar:', error);
+      const message = error instanceof Error ? error.message : 'Unknown error';
+      alert('Error loading custom avatar: ' + message);
+    }
+  }
+
+  async deleteAvatar(avatar: AvatarOption) {
+    if (this.avatars.length <= 1) {
+      alert('At least one avatar must remain available.');
+      return;
+    }
+
+    if (!confirm(`Delete avatar "${avatar.name}"?`)) {
+      return;
+    }
+
+    if (avatar.storagePath) {
+      try {
+        await this.firebaseAvatarStorage.deleteAvatar(avatar.storagePath);
+      } catch (error) {
+        console.error('Error deleting avatar from Firebase Storage:', error);
+        alert('Could not delete avatar from Firebase Storage. Try again.');
+        return;
+      }
+    }
+
+    this.avatars = this.avatars.filter(item => item.id !== avatar.id);
+    this.hiddenAvatarIds.add(avatar.id);
+
+    await this.storageService.saveHiddenAvatarIds(Array.from(this.hiddenAvatarIds));
+    await this.storageService.saveCustomAvatars(this.avatars);
+
+    if (this.currentAvatar?.id === avatar.id) {
+      const nextAvatar = this.avatars[0] ?? null;
+      if (nextAvatar) {
+        this.selectAvatar(nextAvatar);
+      } else {
+        this.currentAvatar = null;
+        this.avatarUrl = this.defaultAvatars[0]?.url || '';
+      }
+    }
+
+    this.cdr.detectChanges();
+  }
+
+  // === Helper Methods for Avatar Management ===
+
+  private async resolveUserEmail(): Promise<string | null> {
+    const savedEmail = await this.storageService.loadUserEmail();
+    if (savedEmail) return savedEmail;
+
+    const email = this.firebaseAvatarStorage.getAuthenticatedEmail();
+    if (email) return email;
+
+    return null;
+  }
+
+  private resolveAvatarName(name: string): string | null {
+    const trimmedName = name?.trim() ?? '';
+    if (trimmedName) {
+      return trimmedName;
+    }
+
+    const promptedName = prompt('Name for the avatar:', '');
+    const normalizedName = promptedName?.trim() ?? '';
+    return normalizedName || null;
+  }
+
+  private async preloadAvatarModel(url: string): Promise<ArrayBuffer> {
+    const cachedData = await this.modelCache.getCachedModel(url);
+    if (cachedData) {
+      return cachedData;
+    }
+
+    const response = await fetch(url);
+    const arrayBuffer = await response.arrayBuffer();
+    await this.modelCache.cacheModel(url, arrayBuffer);
+    return arrayBuffer;
+  }
+
+  private createCustomAvatar(url: string, name: string, ownerEmail: string, storagePath: string, sourceUrl: string): AvatarOption {
+    const customCount = this.avatars.filter(avatar => avatar.isCustom).length + 1;
+
+    return {
+      id: this.createAvatarIdFromUrl(storagePath),
+      name: name || `Custom ${customCount}`,
+      url,
+      thumbnail: this.buildAvatarThumbnail(url),
+      isCustom: true,
+      storagePath,
+      ownerEmail,
+      sourceUrl
+    };
+  }
+
+  private createAvatarIdFromUrl(url: string): string {
+    let hash = 0;
+    for (let i = 0; i < url.length; i++) {
+      hash = ((hash << 5) - hash) + url.charCodeAt(i);
+      hash |= 0;
+    }
+    return `custom-${Math.abs(hash)}`;
+  }
+
+  private buildAvatarThumbnail(url: string): string {
+    const baseUrl = url.split('?')[0];
+    if (baseUrl.toLowerCase().endsWith('.glb')) {
+      return `${baseUrl.slice(0, -4)}.png`;
+    }
+    return baseUrl;
+  }
+
+  private normalizeAvatarUrl(url: string): string {
+    let normalizedUrl = url.trim();
+
+    if (!/\.glb(\?|$)/i.test(normalizedUrl)) {
+      const queryStart = normalizedUrl.indexOf('?');
+      if (queryStart >= 0) {
+        const base = normalizedUrl.slice(0, queryStart);
+        const query = normalizedUrl.slice(queryStart);
+        normalizedUrl = `${base}.glb${query}`;
+      } else {
+        normalizedUrl = `${normalizedUrl}.glb`;
+      }
+    }
+
+    if (!normalizedUrl.includes('morphTargets')) {
+      normalizedUrl += (normalizedUrl.includes('?') ? '&' : '?') + 'morphTargets=ARKit&textureAtlas=1024';
+    }
+
+    return normalizedUrl;
+  }
 }

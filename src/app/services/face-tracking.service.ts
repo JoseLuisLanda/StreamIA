@@ -12,6 +12,7 @@ export class FaceTrackingService {
     public landmarks: WritableSignal<any[] | null> = signal(null);
     public isTracking: WritableSignal<boolean> = signal(false);
     public hideVideo: WritableSignal<boolean> = signal(false);
+    public hideVideoBlack: WritableSignal<boolean> = signal(false);
     public hidePersonWithGreen: WritableSignal<boolean> = signal(false);
 
     private faceLandmarker: FaceLandmarker | null = null;
@@ -189,6 +190,11 @@ export class FaceTrackingService {
     toggleVideoVisibility(hide: boolean): void {
         this.hideVideo.set(hide);
         console.log(`Video ${hide ? 'hidden' : 'visible'}`);
+    }
+
+    toggleVideoVisibilityBlack(hide: boolean): void {
+        this.hideVideoBlack.set(hide);
+        console.log(`Video Black ${hide ? 'hidden' : 'visible'}`);
     }
 
     togglePersonMask(hide: boolean): void {

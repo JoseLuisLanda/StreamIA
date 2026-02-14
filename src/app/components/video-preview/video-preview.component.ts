@@ -7,14 +7,14 @@ import { FaceTrackingService } from '../../services/face-tracking.service';
   standalone: true,
   imports: [CommonModule],
   template: `
-    <div class="video-container">
+    <div class="video-container" [style.background]="getBackgroundColor()">
       <video #videoElement 
         class="input_video" 
         autoplay 
         playsinline
         muted
         [style.transform]="'scaleX(-1)'"
-        [style.opacity]="faceTrackingService.hideVideo() ? '0' : '1'"
+        [style.opacity]="faceTrackingService.hideVideo() || faceTrackingService.hideVideoBlack() ? '0' : '1'"
       ></video>
       <canvas #maskCanvas 
         class="mask-canvas"
@@ -29,7 +29,7 @@ import { FaceTrackingService } from '../../services/face-tracking.service';
       height: 100%;
       border-radius: 12px;
       overflow: hidden;
-      background: #00ff00;
+      transition: background 0.3s ease;
       box-shadow: 0 4px 6px -1px rgb(0 0 0 / 0.1);
     }
     
@@ -57,6 +57,16 @@ export class VideoPreviewComponent implements AfterViewInit, OnDestroy {
 
   public faceTrackingService = inject(FaceTrackingService);
   private renderLoopId: number | null = null;
+
+  getBackgroundColor(): string {
+    if (this.faceTrackingService.hideVideo()) {
+      return '#00ff00'; // Verde
+    } else if (this.faceTrackingService.hideVideoBlack()) {
+      return '#000000'; // Negro
+    } else {
+      return '#00ff00'; // Default verde
+    }
+  }
 
   constructor() {
     effect(() => {
