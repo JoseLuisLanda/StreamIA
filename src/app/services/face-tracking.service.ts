@@ -11,6 +11,8 @@ export class FaceTrackingService {
     public transformationMatrix: WritableSignal<Matrix4 | null> = signal(null);
     public landmarks: WritableSignal<any[] | null> = signal(null);
     public isTracking: WritableSignal<boolean> = signal(false);
+    public hideVideo: WritableSignal<boolean> = signal(false);
+    public hidePersonWithGreen: WritableSignal<boolean> = signal(false);
 
     private faceLandmarker: FaceLandmarker | null = null;
     private videoElement: HTMLVideoElement | null = null;
@@ -182,5 +184,15 @@ export class FaceTrackingService {
 
     getCurrentFacingMode(): 'user' | 'environment' {
         return this.currentFacingMode;
+    }
+
+    toggleVideoVisibility(hide: boolean): void {
+        this.hideVideo.set(hide);
+        console.log(`Video ${hide ? 'hidden' : 'visible'}`);
+    }
+
+    togglePersonMask(hide: boolean): void {
+        this.hidePersonWithGreen.set(hide);
+        console.log(`Person mask ${hide ? 'enabled' : 'disabled'}`);
     }
 }
