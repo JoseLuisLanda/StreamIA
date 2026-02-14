@@ -148,4 +148,15 @@ export class FaceTrackingService {
 
         this.isTracking.set(false);
     }
+
+    getVideoDimensions(): { width: number; height: number } {
+        if (!this.videoElement) {
+            return { width: 1280, height: 720 };
+        }
+
+        return {
+            width: this.videoElement.videoWidth || 1280,
+            height: this.videoElement.videoHeight || 720,
+        };
+    }
 }

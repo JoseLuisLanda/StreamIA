@@ -8,6 +8,10 @@ interface MaskOption {
   id: string;
   name: string;
   imagePath: string;
+  uvScaleX?: number;
+  uvScaleY?: number;
+  uvOffsetX?: number;
+  uvOffsetY?: number;
   texture?: THREE.Texture;
 }
 
@@ -147,15 +151,51 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
   private faceMesh!: THREE.Mesh;
   private geometry!: THREE.BufferGeometry;
   private textureLoader = new THREE.TextureLoader();
+  private uvReferenceByMask = new Map<string, Float32Array>();
+  private noFaceFrameCount = 0;
 
   public faceDetected = false;
   public selectedMaskId = 'cat';
 
   public masks: MaskOption[] = [
-    { id: 'cat', name: 'Gato', imagePath: 'assets/masks/cat.png' },
-    { id: 'monster', name: 'Monstruo', imagePath: 'assets/masks/monster.png' },
-    { id: 'robot', name: 'Robot', imagePath: 'assets/masks/robot.png' }
+    {
+      id: 'cat',
+      name: 'Gato',
+      imagePath: 'assets/masks/cat.png',
+      uvScaleX: 0.58,
+      uvScaleY: 0.60,
+      uvOffsetX: 0,
+      uvOffsetY: 0.02,
+    },
+    {
+      id: 'monster',
+      name: 'Monstruo',
+      imagePath: 'assets/masks/monster.png',
+      uvScaleX: 0.60,
+      uvScaleY: 0.62,
+      uvOffsetX: 0,
+      uvOffsetY: 0.01,
+    },
+    {
+      id: 'robot',
+      name: 'Robot',
+      imagePath: 'assets/masks/robot.png',
+      uvScaleX: 0.62,
+      uvScaleY: 0.64,
+      uvOffsetX: 0,
+      uvOffsetY: 0.01,
+    }
   ];
+
+  private getActiveUvConfig(): { scaleX: number; scaleY: number; offsetX: number; offsetY: number } {
+    const selectedMask = this.masks.find((mask) => mask.id === this.selectedMaskId);
+    return {
+      scaleX: selectedMask?.uvScaleX ?? 0.60,
+      scaleY: selectedMask?.uvScaleY ?? 0.62,
+      offsetX: selectedMask?.uvOffsetX ?? 0,
+      offsetY: selectedMask?.uvOffsetY ?? 0,
+    };
+  }
 
   ngAfterViewInit() {
     this.initThreeJS();
@@ -263,6 +303,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     console.log('Selecting mask:', maskId);
     this.ngZone.run(() => {
       this.selectedMaskId = maskId;
+      this.uvReferenceByMask.delete(maskId);
       this.updateMaterial();
     });
   }
@@ -298,10 +339,15 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     }
 
     if (landmarks && landmarks.length >= 468) {
+      this.noFaceFrameCount = 0;
       this.faceDetected = true;
       this.updateFaceMesh(landmarks, rect.width, rect.height);
       this.faceMesh.visible = this.selectedMaskId !== 'none';
     } else {
+      this.noFaceFrameCount += 1;
+      if (this.noFaceFrameCount > 15) {
+        this.uvReferenceByMask.delete(this.selectedMaskId);
+      }
       this.faceDetected = false;
       this.faceMesh.visible = false;
     }
@@ -313,47 +359,94 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     const positions = this.geometry.attributes['position'] as THREE.BufferAttribute;
     const uvs = this.geometry.attributes['uv'] as THREE.BufferAttribute;
 
+    const { width: videoWidth, height: videoHeight } = this.trackService.getVideoDimensions();
+    const videoAspect = videoWidth / videoHeight;
+    const containerAspect = width / height;
+
+    let renderedVideoWidth = width;
+    let renderedVideoHeight = height;
+    let cropOffsetX = 0;
+    let cropOffsetY = 0;
+
+    if (videoAspect > containerAspect) {
+      renderedVideoHeight = height;
+      renderedVideoWidth = height * videoAspect;
+      cropOffsetX = (renderedVideoWidth - width) / 2;
+    } else {
+      renderedVideoWidth = width;
+      renderedVideoHeight = width / videoAspect;
+      cropOffsetY = (renderedVideoHeight - height) / 2;
+    }
+
+    const projected = new Array<{ x: number; y: number; z: number }>(landmarks.length);
+
+    for (let i = 0; i < landmarks.length; i++) {
+      const lm = landmarks[i];
+      projected[i] = {
+        x: (lm.x * renderedVideoWidth - cropOffsetX) / width,
+        y: (lm.y * renderedVideoHeight - cropOffsetY) / height,
+        z: lm.z ?? 0,
+      };
+    }
+
     // Calculate face bounding box
     let minX = Infinity, maxX = -Infinity;
     let minY = Infinity, maxY = -Infinity;
 
-    for (let i = 0; i < landmarks.length; i++) {
-      const lm = landmarks[i];
-      minX = Math.min(minX, lm.x);
-      maxX = Math.max(maxX, lm.x);
-      minY = Math.min(minY, lm.y);
-      maxY = Math.max(maxY, lm.y);
+    for (let i = 0; i < projected.length; i++) {
+      minX = Math.min(minX, projected[i].x);
+      maxX = Math.max(maxX, projected[i].x);
+      minY = Math.min(minY, projected[i].y);
+      maxY = Math.max(maxY, projected[i].y);
     }
 
-    const faceWidth = maxX - minX;
-    const faceHeight = maxY - minY;
+    const faceWidth = Math.max(maxX - minX, 0.001);
+    const faceHeight = Math.max(maxY - minY, 0.001);
     const faceCenterX = (minX + maxX) / 2;
     const faceCenterY = (minY + maxY) / 2;
 
-    // UV mapping: map the face region to cover most of the texture
-    const uvScale = 0.85; // How much of the texture the face covers
+    const uvConfig = this.getActiveUvConfig();
+    const currentMaskKey = this.selectedMaskId;
+    let referenceUv = this.uvReferenceByMask.get(currentMaskKey);
+
+    if (!referenceUv || referenceUv.length !== landmarks.length * 2) {
+      referenceUv = new Float32Array(landmarks.length * 2);
+      for (let i = 0; i < projected.length; i++) {
+        const normalizedX = (projected[i].x - faceCenterX) / faceWidth;
+        const normalizedY = (projected[i].y - faceCenterY) / faceHeight;
+
+        const u = THREE.MathUtils.clamp(
+          0.5 + uvConfig.offsetX + normalizedX * uvConfig.scaleX,
+          0.06,
+          0.94
+        );
+        const v = THREE.MathUtils.clamp(
+          0.5 + uvConfig.offsetY + normalizedY * uvConfig.scaleY,
+          0.06,
+          0.94
+        );
+
+        referenceUv[i * 2] = u;
+        referenceUv[i * 2 + 1] = v;
+      }
+      this.uvReferenceByMask.set(currentMaskKey, referenceUv);
+    }
 
     // Update vertex positions and UVs
     for (let i = 0; i < landmarks.length; i++) {
-      const lm = landmarks[i];
+      const projectedX = projected[i].x;
+      const projectedY = projected[i].y;
+      const projectedZ = projected[i].z;
 
       // Position in normalized screen space (0-1)
       // Mirror X for selfie view, invert Y for Three.js (Y up vs Y down)
-      const x = 1 - lm.x;
-      const y = 1 - lm.y;
-      const z = 0;
+      const x = 1 - THREE.MathUtils.clamp(projectedX, 0, 1);
+      const y = 1 - THREE.MathUtils.clamp(projectedY, 0, 1);
+      const z = THREE.MathUtils.clamp(-projectedZ * 0.35, -0.25, 0.25);
 
       positions.setXYZ(i, x, y, z);
 
-      // UV coordinates: normalize to face bounding box, then center in texture
-      const normalizedX = (lm.x - faceCenterX) / faceWidth; // -0.5 to 0.5
-      const normalizedY = (lm.y - faceCenterY) / faceHeight; // -0.5 to 0.5
-
-      // Scale and center in texture space
-      const u = 0.5 + normalizedX * uvScale;
-      const v = 0.5 + normalizedY * uvScale;
-
-      uvs.setXY(i, u, v);
+      uvs.setXY(i, referenceUv[i * 2], referenceUv[i * 2 + 1]);
     }
 
     positions.needsUpdate = true;
