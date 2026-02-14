@@ -1426,20 +1426,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
             console.log('Bone found:', node.name);
           }
           
-          // Set initial arm rotations to lower arms naturally
-          if (node.name === 'LeftArm') {
-            node.rotation.set(-0.4, 0, 0.6); // X: hacia atrás, Z: hacia abajo
-          }
-          if (node.name === 'RightArm') {
-            node.rotation.set(-0.4, 0, -0.6); // X: hacia atrás, Z: hacia abajo
-          }
-          if (node.name === 'LeftForeArm') {
-            node.rotation.set(0, 0, 0);
-          }
-          if (node.name === 'RightForeArm') {
-            node.rotation.set(0, 0, 0);
-          }
-          
+         
           // Identify head meshes for facial expressions
           if (node.name === 'Wolf3D_Head' ||
               node.name === 'Wolf3D_Teeth' ||
@@ -1510,8 +1497,8 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     // Spine2 with face tracking lean
     if (parts['Spine2'] && rotation) {
       const baseRotX = rotation.x / 10;
-      const baseRotY = rotation.y / 10;
-      const baseRotZ = rotation.z / 10;
+      const baseRotY = -rotation.y / 10;
+      const baseRotZ = -rotation.z / 10;
       parts['Spine2'].rotation.set(
         baseRotX + breathCycle * breathIntensity,
         baseRotY,
@@ -1521,19 +1508,11 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
 
     // Face tracking rotations
     if (rotation) {
-      if (parts['Head']) parts['Head'].rotation.set(rotation.x, rotation.y, rotation.z);
-      if (parts['Neck']) parts['Neck'].rotation.set(rotation.x / 5 + 0.3, rotation.y / 5, rotation.z / 5);
+      if (parts['Head']) parts['Head'].rotation.set(rotation.x, -rotation.y, -rotation.z);
+      if (parts['Neck']) parts['Neck'].rotation.set(rotation.x / 5 + 0.3, -rotation.y / 5, -rotation.z / 5);
       
-      // Shoulders
-      if (parts['LeftShoulder']) parts['LeftShoulder'].rotation.set(rotation.x / 15, rotation.y / 15, rotation.z / 15);
-      if (parts['RightShoulder']) parts['RightShoulder'].rotation.set(rotation.x / 15, rotation.y / 15, rotation.z / 15);
-    }
+         }
     
-    // Keep arms in natural downward position (not T-pose)
-    // X rotation: pulls arms back, Z rotation: brings arms down to sides
-    if (parts['LeftArm']) parts['LeftArm'].rotation.set(-0.4, 0, 0.6);
-    if (parts['RightArm']) parts['RightArm'].rotation.set(-0.4, 0, -0.6);
-    if (parts['LeftForeArm']) parts['LeftForeArm'].rotation.set(0, 0, 0);
-    if (parts['RightForeArm']) parts['RightForeArm'].rotation.set(0, 0, 0);
+ 
   }
 }
