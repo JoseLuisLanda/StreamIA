@@ -47,8 +47,16 @@ interface AvatarOption {
       <canvas #maskCanvas class="ar-canvas" [class.panel-open]="isAvatarPanelOpen"></canvas>
     </div>
     
+    <!-- Toggle Button Flotante -->
+    <button 
+      (click)="toggleSelector()"
+      class="toggle-selector-btn"
+      title="Mostrar/Ocultar controles">
+      <span class="icon">{{ isSelectorCollapsed ? '▲' : '▼' }}</span>
+    </button>
+
     <!-- Accessory Selector UI -->
-    <div class="mask-selector">
+    <div class="mask-selector" [class.collapsed]="isSelectorCollapsed">
       <div class="mask-btn-wrapper">
         <button 
           (click)="toggleMask('glasses')"
@@ -378,6 +386,40 @@ interface AvatarOption {
       cursor: grabbing;
     }
     
+    /* Toggle Button - Flotante y discreto */
+    .toggle-selector-btn {
+      position: absolute;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      z-index: 301;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(0, 255, 0, 0.15);
+      border: 1px solid rgba(0, 255, 0, 0.3);
+      border-radius: 50%;
+      width: 44px;
+      height: 44px;
+      cursor: pointer;
+      transition: all 0.3s ease;
+      color: rgba(255, 255, 255, 0.7);
+      backdrop-filter: blur(5px);
+      pointer-events: auto;
+    }
+    
+    .toggle-selector-btn .icon {
+      font-size: 18px;
+      line-height: 1;
+    }
+    
+    .toggle-selector-btn:hover {
+      background: rgba(0, 255, 0, 0.25);
+      border-color: rgba(0, 255, 0, 0.5);
+      color: rgba(255, 255, 255, 0.9);
+      transform: translateX(-50%) scale(1.05);
+    }
+    
     .mask-selector {
       position: absolute;
       bottom: 20px;
@@ -396,6 +438,13 @@ interface AvatarOption {
       overflow-y: hidden;
       scrollbar-width: thin;
       scrollbar-color: rgba(255,255,255,0.3) transparent;
+      max-height: 200px;
+      transition: all 0.3s ease;
+    }
+    
+    .mask-selector.collapsed {
+      transform: translate(-50%, calc(100% + 20px));
+      pointer-events: none;
     }
     
     .mask-selector::-webkit-scrollbar {
@@ -534,20 +583,7 @@ interface AvatarOption {
     }
     
     .debug-info {
-      position: absolute;
-      top: 10px;
-      left: 10px;
-      color: lime;
-      font-family: monospace;
-      font-size: 12px;
-      z-index: 200;
-      background: rgba(0,0,0,0.6);
-      padding: 6px 10px;
-      border-radius: 4px;
-    }
-    
-    .debug-info p {
-      margin: 2px 0;
+      display: none;
     }
 
     /* Avatar Panel Styles */
@@ -659,6 +695,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
   avatars: AvatarOption[] = [...this.defaultAvatars];
   currentAvatar: AvatarOption | null = null;
   isAvatarPanelOpen = false;
+  isSelectorCollapsed = false;
   private hiddenAvatarIds = new Set<string>();
 
   sizeOptions = [
@@ -2181,6 +2218,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
 
   toggleAvatarPanel() {
     this.isAvatarPanelOpen = !this.isAvatarPanelOpen;
+  }
+
+  toggleSelector() {
+    this.isSelectorCollapsed = !this.isSelectorCollapsed;
   }
 
   selectAvatar(avatar: AvatarOption) {
