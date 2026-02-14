@@ -400,8 +400,8 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
         // Spine2 (Breathing + Face Tracking Lean)
         if (parts['Spine2']) {
             const baseRotX = rotation ? rotation.x / 10 : 0;
-            const baseRotY = rotation ? rotation.y / 10 : 0;
-            const baseRotZ = rotation ? rotation.z / 10 : 0;
+            const baseRotY = rotation ? -rotation.y / 10 : 0;
+            const baseRotZ = rotation ? -rotation.z / 10 : 0;
             parts['Spine2'].rotation.set(
                 baseRotX + breathCycle * breathIntensity,
                 baseRotY,
@@ -411,13 +411,14 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
 
         // --- Face Tracking Rotations ---
         if (rotation) {
-            if (parts['Head']) parts['Head'].rotation.set(rotation.x, rotation.y, rotation.z);
-            if (parts['Neck']) parts['Neck'].rotation.set(rotation.x / 5 + 0.3, rotation.y / 5, rotation.z / 5);
+            if (parts['Head']) parts['Head'].rotation.set(rotation.x, -rotation.y, -rotation.z);
+            if (parts['Neck']) parts['Neck'].rotation.set(rotation.x / 5 + 0.3, -rotation.y / 5, -rotation.z / 5);
 
             // Shoulders (Face tracking influence)
-            if (parts['Wolf3D_Shoulder_L']) parts['Wolf3D_Shoulder_L'].rotation.set(rotation.x / 15, rotation.y / 15, rotation.z / 15);
-            if (parts['Wolf3D_Shoulder_R']) parts['Wolf3D_Shoulder_R'].rotation.set(rotation.x / 15, rotation.y / 15, rotation.z / 15);
+            if (parts['Wolf3D_Shoulder_L']) parts['Wolf3D_Shoulder_L'].rotation.set(rotation.x / 15, -rotation.y / 15, -rotation.z / 15);
+            if (parts['Wolf3D_Shoulder_R']) parts['Wolf3D_Shoulder_R'].rotation.set(rotation.x / 15, -rotation.y / 15, -rotation.z / 15);
         }
+        
         this.renderer.render(this.scene, this.camera);
     }
 }
