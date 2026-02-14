@@ -221,6 +221,22 @@ interface MaskOption {
         <span class="icon">🔄</span>
         <span>Cámara</span>
       </button>
+      <button 
+        (click)="toggleVideoHide()"
+        [class.active]="isVideoHidden()"
+        class="mask-btn hide-btn"
+        title="Ocultar video (fondo verde)">
+        <span class="icon">🟢</span>
+        <span>F.Verde</span>
+      </button>
+      <button 
+        (click)="toggleSegmentation()"
+        [class.active]="isSegmentationActive()"
+        class="mask-btn segmentation-btn"
+        title="Ocultar persona (mantiene fondo)">
+        <span class="icon">👤</span>
+        <span>Seg</span>
+      </button>
       <div class="mask-btn-wrapper">
         <button 
           (click)="toggleMask('avatar')"
@@ -1400,6 +1416,38 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     });
   }
 
+  toggleVideoHide() {
+    this.ngZone.run(() => {
+      const currentState = this.trackService.hideVideo();
+      this.trackService.toggleVideoVisibility(!currentState);
+      
+      // Si se activa hide video, desactivar segmentación
+      if (!currentState) {
+        this.trackService.togglePersonMask(false);
+      }
+    });
+  }
+
+  isVideoHidden(): boolean {
+    return this.trackService.hideVideo();
+  }
+
+  toggleSegmentation() {
+    this.ngZone.run(() => {
+      const currentState = this.trackService.hidePersonWithGreen();
+      this.trackService.togglePersonMask(!currentState);
+      
+      // Si se activa mask persona, desactivar hide video
+      if (!currentState) {
+        this.trackService.toggleVideoVisibility(false);
+      }
+    });
+  }
+
+  isSegmentationActive(): boolean {
+    return this.trackService.hidePersonWithGreen();
+  }
+
   // Avatar is now handled through toggleMask('avatar')
 
   private loadAvatar() {
@@ -1483,7 +1531,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
         
         // Scale avatar based on eye distance (calculated once)
         // Multiplier adjusted to match face size (roughly 2.0-2.2)
-        this.avatarCalculatedScale = eyeDistance * 30.0;
+        this.avatarCalculatedScale = eyeDistance * 32.0;
       }
     }
     
@@ -1494,7 +1542,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     
     // Keep position fixed (only use user offsets)
     this.avatarModel.position.x = 0 + (avatarMask.positionOffsetX || 0);
-    this.avatarModel.position.y = -3.75 + (avatarMask.positionOffsetY || 0);
+    this.avatarModel.position.y = -4.3 + (avatarMask.positionOffsetY || 0);
     this.avatarModel.position.z = 0 + (avatarMask.positionOffsetZ || 0);
 
     // Apply Face Blendshapes (ARKit morphTargets)
