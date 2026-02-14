@@ -8,7 +8,7 @@ interface MaskOption {
   id: string;
   name: string;
   modelPath: string;
-  type: 'glasses' | 'facial-hair' | 'hair' | 'mask' | 'hat' | 'clothing';
+  type: 'glasses' | 'facial-hair' | 'hair' | 'mask' | 'hat' | 'clothing' | 'avatar';
   model?: THREE.Group;
   loaded?: boolean;
   // State
@@ -221,14 +221,21 @@ interface MaskOption {
         <span class="icon">🔄</span>
         <span>Cámara</span>
       </button>
-      <button 
-        (click)="toggleAvatar()"
-        [class.active]="avatarEnabled"
-        class="mask-btn avatar-btn"
-        title="Avatar sincronizado">
-        <span class="icon">🧑</span>
-        <span>Avatar</span>
-      </button>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('avatar')"
+          [class.active]="isMaskActive('avatar')"
+          [class.selected]="selectedMaskId === 'avatar'"
+          class="mask-btn avatar-btn"
+          title="Avatar sincronizado">
+          <span class="icon">🧑</span>
+          <span>Avatar</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'avatar'"
+              [class.active]="isMaskActive('avatar')"
+              (click)="selectForEditing($event, 'avatar')">✏️</span>
+      </div>
     </div>
     
     <div class="debug-info">
@@ -645,6 +652,19 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       positionOffsetX: 0,
       positionOffsetY: 0,
       positionOffsetZ: 0
+    },
+    {
+      id: 'avatar',
+      name: 'Avatar RPM',
+      modelPath: 'https://models.readyplayer.me/67a8d1a1f5f0c1d5a6993bc1.glb',
+      type: 'avatar',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0,
+      positionOffsetZ: 0
     }
   ];
 
@@ -872,13 +892,19 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
 
   clearAll() {
     this.ngZone.run(() => {
+      // Clear all accessories and avatar
       this.masks.forEach(m => {
         m.isActive = false;
         m.isSelected = false;
+        m.scaleOffset = 1.0;
+        m.positionOffsetX = 0;
+        m.positionOffsetY = 0;
+        m.positionOffsetZ = 0;
       });
       this.selectedMaskId = 'none';
+      
       this.updateVisibility();
-      console.log('Cleared all accessories');
+      console.log('Cleared all accessories and avatar');
     });
   }
 
@@ -887,14 +913,16 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
   }
 
   resetAdjustments() {
-    const activeMask = this.masks.find(m => m.id === this.selectedMaskId);
-    if (activeMask) {
-      activeMask.scaleOffset = 1.0;
-      activeMask.positionOffsetX = 0;
-      activeMask.positionOffsetY = 0;
-      activeMask.positionOffsetZ = 0;
-      console.log(`Reset adjustments for ${this.selectedMaskId}`);
-    }
+    this.ngZone.run(() => {
+      const activeMask = this.masks.find(m => m.id === this.selectedMaskId);
+      if (activeMask) {
+        activeMask.scaleOffset = 1.0;
+        activeMask.positionOffsetX = 0;
+        activeMask.positionOffsetY = 0;
+        activeMask.positionOffsetZ = 0;
+        console.log(`Reset adjustments for ${this.selectedMaskId}`);
+      }
+    });
   }
 
   getLoadedModelsCount(): number {
@@ -1042,6 +1070,17 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
   }
 
   private updateVisibility() {
+    // Handle avatar separately with loading
+    const avatarMask = this.masks.find(m => m.id === 'avatar');
+    if (avatarMask) {
+      this.avatarEnabled = avatarMask.isActive || false;
+      if (this.avatarEnabled && !this.avatarModel) {
+        this.loadAvatar();
+      } else if (this.avatarModel) {
+        this.avatarModel.visible = this.avatarEnabled && this.faceDetected;
+      }
+    }
+    
     // Update visibility based on active state, not selected
     this.glassesModel.visible = this.isMaskActive('glasses') && this.faceDetected;
     this.glasses1Model.visible = this.isMaskActive('glasses1') && this.faceDetected;
@@ -1355,21 +1394,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     });
   }
 
-  toggleAvatar() {
-    this.ngZone.run(() => {
-      this.avatarEnabled = !this.avatarEnabled;
-      
-      if (this.avatarEnabled && !this.avatarModel) {
-        // Load avatar on first enable
-        this.loadAvatar();
-      } else if (this.avatarModel) {
-        // Just toggle visibility
-        this.avatarModel.visible = this.avatarEnabled;
-      }
-      
-      console.log(`Avatar ${this.avatarEnabled ? 'enabled' : 'disabled'}`);
-    });
-  }
+  // Avatar is now handled through toggleMask('avatar')
 
   private loadAvatar() {
     console.log('Loading avatar:', this.avatarUrl);
@@ -1384,9 +1409,9 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
 
         const model = gltf.scene;
         
-        // Position avatar to overlay on person
-        model.position.set(0, -1.0, 0);
-        model.scale.set(0.8, 0.8, 0.8);
+        // Base position (will be modified by offsets in updateAvatar)
+        model.position.set(0, -1.5, 0);
+        model.scale.set(1.2, 1.2, 1.2);
         
         this.avatarModel = model;
         this.avatarNodes = {};
@@ -1395,6 +1420,25 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
         // Build nodes map and find head meshes for blendshapes
         model.traverse((node: THREE.Object3D) => {
           this.avatarNodes[node.name] = node;
+          
+          // Log bone names to debug arm structure  
+          if (node.name.includes('Arm') || node.name.includes('Shoulder') || node.name.includes('Hand')) {
+            console.log('Bone found:', node.name);
+          }
+          
+          // Set initial arm rotations to lower arms naturally
+          if (node.name === 'LeftArm') {
+            node.rotation.set(-0.4, 0, 0.6); // X: hacia atrás, Z: hacia abajo
+          }
+          if (node.name === 'RightArm') {
+            node.rotation.set(-0.4, 0, -0.6); // X: hacia atrás, Z: hacia abajo
+          }
+          if (node.name === 'LeftForeArm') {
+            node.rotation.set(0, 0, 0);
+          }
+          if (node.name === 'RightForeArm') {
+            node.rotation.set(0, 0, 0);
+          }
           
           // Identify head meshes for facial expressions
           if (node.name === 'Wolf3D_Head' ||
@@ -1422,12 +1466,22 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
   }
 
   private updateAvatar() {
-    if (!this.avatarModel || !this.avatarEnabled || !this.avatarModel.visible) return;
+    const avatarMask = this.masks.find(m => m.id === 'avatar');
+    if (!this.avatarModel || !avatarMask || !avatarMask.isActive || !this.avatarModel.visible) return;
 
     this.breathingTime += 0.02;
 
     const blendshapes = this.trackService.blendshapes();
     const rotation = this.trackService.rotation();
+    
+    // Apply position and scale offsets from mask
+    const baseScale = 1.2;
+    const finalScale = baseScale * (avatarMask.scaleOffset || 1.0);
+    this.avatarModel.scale.set(finalScale, finalScale, finalScale);
+    
+    this.avatarModel.position.x = 0 + (avatarMask.positionOffsetX || 0);
+    this.avatarModel.position.y = -1.5 + (avatarMask.positionOffsetY || 0);
+    this.avatarModel.position.z = 0 + (avatarMask.positionOffsetZ || 0);
 
     // Apply Face Blendshapes (ARKit morphTargets)
     if (blendshapes.length > 0 && this.avatarHeadMeshes.length > 0) {
@@ -1474,13 +1528,12 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       if (parts['LeftShoulder']) parts['LeftShoulder'].rotation.set(rotation.x / 15, rotation.y / 15, rotation.z / 15);
       if (parts['RightShoulder']) parts['RightShoulder'].rotation.set(rotation.x / 15, rotation.y / 15, rotation.z / 15);
     }
+    
+    // Keep arms in natural downward position (not T-pose)
+    // X rotation: pulls arms back, Z rotation: brings arms down to sides
+    if (parts['LeftArm']) parts['LeftArm'].rotation.set(-0.4, 0, 0.6);
+    if (parts['RightArm']) parts['RightArm'].rotation.set(-0.4, 0, -0.6);
+    if (parts['LeftForeArm']) parts['LeftForeArm'].rotation.set(0, 0, 0);
+    if (parts['RightForeArm']) parts['RightForeArm'].rotation.set(0, 0, 0);
   }
 }
-
-
-
-
-
-
-
-
