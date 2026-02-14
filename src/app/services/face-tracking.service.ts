@@ -16,6 +16,7 @@ export class FaceTrackingService {
     private videoElement: HTMLVideoElement | null = null;
     private lastVideoTime = -1;
     private animationFrameId: number | null = null;
+    private currentFacingMode: 'user' | 'environment' = 'user';
 
     constructor() { }
 
@@ -51,7 +52,11 @@ export class FaceTrackingService {
 
         try {
             const stream = await navigator.mediaDevices.getUserMedia({
-                video: { width: 1280, height: 720 },
+                video: { 
+                    width: 1280, 
+                    height: 720,
+                    facingMode: this.currentFacingMode
+                },
                 audio: false,
             });
 
@@ -158,5 +163,24 @@ export class FaceTrackingService {
             width: this.videoElement.videoWidth || 1280,
             height: this.videoElement.videoHeight || 720,
         };
+    }
+
+    async switchCamera(): Promise<void> {
+        // Toggle between front and back camera
+        this.currentFacingMode = this.currentFacingMode === 'user' ? 'environment' : 'user';
+        
+        // Stop current stream
+        if (this.videoElement && this.videoElement.srcObject) {
+            const stream = this.videoElement.srcObject as MediaStream;
+            stream.getTracks().forEach(track => track.stop());
+        }
+        
+        // Start new stream with new facing mode
+        await this.startCamera();
+        console.log(`Switched to ${this.currentFacingMode} camera`);
+    }
+
+    getCurrentFacingMode(): 'user' | 'environment' {
+        return this.currentFacingMode;
     }
 }

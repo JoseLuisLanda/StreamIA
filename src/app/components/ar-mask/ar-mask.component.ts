@@ -1,18 +1,23 @@
 import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, inject, NgZone } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FaceTrackingService } from '../../services/face-tracking.service';
-import { FACE_MESH_TRIANGULATION } from '../../data/face-mesh-triangulation';
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
 
 interface MaskOption {
   id: string;
   name: string;
-  imagePath: string;
-  uvScaleX?: number;
-  uvScaleY?: number;
-  uvOffsetX?: number;
-  uvOffsetY?: number;
-  texture?: THREE.Texture;
+  modelPath: string;
+  type: 'glasses' | 'facial-hair' | 'hair';
+  model?: THREE.Group;
+  loaded?: boolean;
+  // State
+  isActive?: boolean;
+  isSelected?: boolean;  // Para saber cuál se está editando con gestures
+  // Gesture adjustments
+  scaleOffset?: number;
+  positionOffsetX?: number;
+  positionOffsetY?: number;
 }
 
 @Component({
@@ -24,29 +29,70 @@ interface MaskOption {
       <canvas #maskCanvas class="ar-canvas"></canvas>
     </div>
     
-    <!-- Mask Selector UI -->
+    <!-- Accessory Selector UI -->
     <div class="mask-selector">
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('glasses')"
+          [class.active]="isMaskActive('glasses')"
+          [class.selected]="selectedMaskId === 'glasses'"
+          class="mask-btn">
+          <span class="icon">👓</span>
+          <span>Lentes</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'glasses'"
+              [class.active]="isMaskActive('glasses')"
+              (click)="selectForEditing($event, 'glasses')">✏️</span>
+      </div>
+      <div class="mask-btn-wrapper">
+        <button 
+          (click)="toggleMask('mustache')"
+          [class.active]="isMaskActive('mustache')"
+          [class.selected]="selectedMaskId === 'mustache'"
+          class="mask-btn">
+          <span class="icon">👨</span>
+          <span>Bigote</span>
+        </button>
+        <span class="edit-indicator" 
+              [class.editing]="selectedMaskId === 'mustache'"
+              [class.active]="isMaskActive('mustache')"
+              (click)="selectForEditing($event, 'mustache')">✏️</span>
+      </div>
       <button 
-        *ngFor="let mask of masks" 
-        (click)="selectMask(mask.id)"
-        [class.active]="selectedMaskId === mask.id"
-        class="mask-btn">
-        <img [src]="mask.imagePath" [alt]="mask.name" />
-        <span>{{ mask.name }}</span>
+        (click)="clearAll()"
+        class="mask-btn clear-btn">
+        <span class="icon">🗑️</span>
+        <span>Limpiar</span>
       </button>
       <button 
-        (click)="selectMask('none')"
-        [class.active]="selectedMaskId === 'none'"
-        class="mask-btn none-btn">
-        <span>🚫</span>
-        <span>Sin Máscara</span>
+        (click)="resetAdjustments()"
+        [disabled]="selectedMaskId === 'none'"
+        class="mask-btn reset-btn"
+        title="Restablecer posición y tamaño del seleccionado">
+        <span class="icon">↺</span>
+        <span>Reset</span>
+      </button>
+      <button 
+        (click)="switchCamera()"
+        class="mask-btn camera-switch-btn"
+        title="Cambiar cámara">
+        <span class="icon">🔄</span>
+        <span>Cámara</span>
       </button>
     </div>
     
     <div class="debug-info">
       <p>Face: {{ faceDetected ? '✅' : '❌' }}</p>
-      <p>Mask: {{ selectedMaskId }}</p>
-      <p>Mode: Three.js Mesh</p>
+      <p>Activos: {{ getActiveCount() }}</p>
+      <p>Editando: <span style="color: #ffaa00">✏️ {{ selectedMaskId }}</span></p>
+      <p>Mode: Multi-Accesorio</p>
+      <p style="font-size: 10px; margin-top: 8px; color: #aaa;">
+        Botón: Activar/Desactivar<br>
+        ✏️ Click en lápiz: Seleccionar para editar<br>
+        📱 Pinch: Zoom | Drag: Mover<br>
+        🖱️ Scroll: Zoom | Drag: Mover
+      </p>
     </div>
   `,
   styles: [`
@@ -63,6 +109,13 @@ interface MaskOption {
     .ar-canvas {
       width: 100%;
       height: 100%;
+      pointer-events: auto;
+      touch-action: none;
+      cursor: grab;
+    }
+    
+    .ar-canvas:active {
+      cursor: grabbing;
     }
     
     .mask-selector {
@@ -80,6 +133,13 @@ interface MaskOption {
       pointer-events: auto;
     }
     
+    .mask-btn-wrapper {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+    
     .mask-btn {
       display: flex;
       flex-direction: column;
@@ -88,11 +148,68 @@ interface MaskOption {
       background: rgba(255, 255, 255, 0.1);
       border: 2px solid transparent;
       border-radius: 12px;
-      padding: 8px;
+      padding: 8px 12px;
       cursor: pointer;
       transition: all 0.3s ease;
       color: white;
       font-size: 11px;
+      min-width: 70px;
+      position: relative;
+    }
+    
+    .mask-btn .icon {
+      font-size: 32px;
+      line-height: 1;
+    }
+    
+    .edit-indicator {
+      position: absolute;
+      top: -2px;
+      right: -2px;
+      font-size: 14px;
+      opacity: 0;
+      transition: all 0.3s ease;
+      filter: grayscale(100%);
+      cursor: pointer;
+      padding: 4px;
+      z-index: 10;
+      background: rgba(0, 0, 0, 0.3);
+      border-radius: 50%;
+      width: 24px;
+      height: 24px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    
+    .edit-indicator.active {
+      opacity: 0.5;
+    }
+    
+    .mask-btn-wrapper:hover .edit-indicator.active {
+      opacity: 0.8;
+      background: rgba(0, 0, 0, 0.5);
+      transform: scale(1.1);
+    }
+    
+    .edit-indicator.editing {
+      opacity: 1 !important;
+      filter: grayscale(0%);
+      color: #ffaa00;
+      background: rgba(255, 170, 0, 0.3);
+      border: 2px solid #ffaa00;
+      animation: pulse 1.5s ease-in-out infinite;
+    }
+    
+    @keyframes pulse {
+      0%, 100% { 
+        transform: scale(1);
+        box-shadow: 0 0 0 0 rgba(255, 170, 0, 0.7);
+      }
+      50% { 
+        transform: scale(1.15);
+        box-shadow: 0 0 8px 4px rgba(255, 170, 0, 0.3);
+      }
     }
     
     .mask-btn:hover {
@@ -106,16 +223,32 @@ interface MaskOption {
       box-shadow: 0 0 15px rgba(0, 255, 255, 0.5);
     }
     
-    .mask-btn img {
-      width: 50px;
-      height: 50px;
-      object-fit: contain;
-      border-radius: 8px;
+    .mask-btn.selected {
+      border-color: #ffaa00;
+      box-shadow: 0 0 20px rgba(255, 170, 0, 0.8);
     }
     
-    .none-btn span:first-child {
-      font-size: 30px;
-      line-height: 50px;
+    .clear-btn {
+      min-width: 70px;
+      background: rgba(255, 50, 50, 0.2) !important;
+    }
+    
+    .clear-btn:hover {
+      background: rgba(255, 50, 50, 0.3) !important;
+    }
+    
+    .reset-btn {
+      min-width: 70px;
+      background: rgba(255, 100, 100, 0.2) !important;
+    }
+    
+    .reset-btn:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    
+    .reset-btn:not(:disabled):hover {
+      background: rgba(255, 100, 100, 0.3) !important;
     }
     
     .debug-info {
@@ -147,60 +280,58 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
   // Three.js objects
   private renderer!: THREE.WebGLRenderer;
   private scene!: THREE.Scene;
-  private camera!: THREE.OrthographicCamera;
-  private faceMesh!: THREE.Mesh;
-  private geometry!: THREE.BufferGeometry;
-  private textureLoader = new THREE.TextureLoader();
-  private uvReferenceByMask = new Map<string, Float32Array>();
-  private noFaceFrameCount = 0;
+  private camera!: THREE.PerspectiveCamera;
+  private gltfLoader = new GLTFLoader();
+  
+  // 3D model objects for each accessory
+  private glassesModel!: THREE.Group;
+  private mustacheModel!: THREE.Group;
+  
+  // Lights
+  private ambientLight!: THREE.AmbientLight;
+  private directionalLight!: THREE.DirectionalLight;
 
   public faceDetected = false;
-  public selectedMaskId = 'cat';
+  public selectedMaskId = 'none';  // Para UI, último clickeado para gestures
+
+  // Gesture control state
+  private isDragging = false;
+  private lastTouchDistance = 0;
+  private lastMouseX = 0;
+  private lastMouseY = 0;
+  private canvasRect!: DOMRect;
 
   public masks: MaskOption[] = [
     {
-      id: 'cat',
-      name: 'Gato',
-      imagePath: 'assets/masks/cat.png',
-      uvScaleX: 0.58,
-      uvScaleY: 0.60,
-      uvOffsetX: 0,
-      uvOffsetY: 0.02,
+      id: 'glasses',
+      name: 'Lentes',
+      modelPath: 'assets/models/glasses.glb',
+      type: 'glasses',
+      loaded: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0
     },
     {
-      id: 'monster',
-      name: 'Monstruo',
-      imagePath: 'assets/masks/monster.png',
-      uvScaleX: 0.60,
-      uvScaleY: 0.62,
-      uvOffsetX: 0,
-      uvOffsetY: 0.01,
-    },
-    {
-      id: 'robot',
-      name: 'Robot',
-      imagePath: 'assets/masks/robot.png',
-      uvScaleX: 0.62,
-      uvScaleY: 0.64,
-      uvOffsetX: 0,
-      uvOffsetY: 0.01,
+      id: 'mustache',
+      name: 'Bigote',
+      modelPath: 'assets/models/mustache.glb',
+      type: 'facial-hair',
+      loaded: false,
+      isActive: false,
+      isSelected: false,
+      scaleOffset: 1.0,
+      positionOffsetX: 0,
+      positionOffsetY: 0
     }
   ];
 
-  private getActiveUvConfig(): { scaleX: number; scaleY: number; offsetX: number; offsetY: number } {
-    const selectedMask = this.masks.find((mask) => mask.id === this.selectedMaskId);
-    return {
-      scaleX: selectedMask?.uvScaleX ?? 0.60,
-      scaleY: selectedMask?.uvScaleY ?? 0.62,
-      offsetX: selectedMask?.uvOffsetX ?? 0,
-      offsetY: selectedMask?.uvOffsetY ?? 0,
-    };
-  }
-
   ngAfterViewInit() {
     this.initThreeJS();
-    this.loadTextures();
-    this.updateMaterial();
+    this.setupLighting();
+    this.create3DModels();
+    this.load3DModels();
+    this.setupGestureControls();
 
     this.ngZone.runOutsideAngular(() => {
       this.animate();
@@ -209,6 +340,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
 
   ngOnDestroy() {
     cancelAnimationFrame(this.requestID);
+    this.removeGestureControls();
     this.renderer?.dispose();
   }
 
@@ -226,103 +358,302 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     this.renderer.setSize(rect.width, rect.height);
     this.renderer.setPixelRatio(window.devicePixelRatio);
     this.renderer.setClearColor(0x000000, 0);
+    
+    // Enable depth testing for 3D models
+    this.renderer.sortObjects = true;
 
     // Create scene
     this.scene = new THREE.Scene();
 
-    // Create orthographic camera for 2D overlay
-    // Standard Three.js: left, right, top, bottom, near, far
-    this.camera = new THREE.OrthographicCamera(0, 1, 1, 0, -1, 1);
-    this.camera.position.z = 0.5;
-
-    // Create initial geometry (will be updated with face data)
-    this.createFaceMeshGeometry();
+    // Create perspective camera for 3D depth
+    this.camera = new THREE.PerspectiveCamera(45, rect.width / rect.height, 0.1, 100);
+    this.camera.position.set(0, 0, 2);
+    this.camera.lookAt(0, 0, 0);
   }
 
-  private createFaceMeshGeometry() {
-    this.geometry = new THREE.BufferGeometry();
+  private setupLighting() {
+    // Ambient light for overall illumination
+    this.ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+    this.scene.add(this.ambientLight);
 
-    // Initialize with 468 vertices (will be updated each frame)
-    const positions = new Float32Array(468 * 3);
-    const uvs = new Float32Array(468 * 2);
-
-    this.geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-    this.geometry.setAttribute('uv', new THREE.BufferAttribute(uvs, 2));
-
-    // Filter triangulation to only include valid indices (0-467)
-    const validIndices: number[] = [];
-    for (let i = 0; i < FACE_MESH_TRIANGULATION.length; i += 3) {
-      const a = FACE_MESH_TRIANGULATION[i];
-      const b = FACE_MESH_TRIANGULATION[i + 1];
-      const c = FACE_MESH_TRIANGULATION[i + 2];
-
-      // Only include triangle if all indices are valid (0-467)
-      if (a < 468 && b < 468 && c < 468 && a >= 0 && b >= 0 && c >= 0) {
-        validIndices.push(a, b, c);
-      }
-    }
-
-
-    // Set indices from validated triangulation
-    const indices = new Uint16Array(validIndices);
-    this.geometry.setIndex(new THREE.BufferAttribute(indices, 1));
-
-    // Create material
-    const material = new THREE.MeshBasicMaterial({
-      color: 0xffffff,
-      transparent: true,
-      opacity: 0.9,
-      side: THREE.DoubleSide,
-      depthTest: false,
-      wireframe: false // Set to true to see triangle edges
-    });
-
-    this.faceMesh = new THREE.Mesh(this.geometry, material);
-    this.scene.add(this.faceMesh);
+    // Directional light for highlights and shadows
+    this.directionalLight = new THREE.DirectionalLight(0xffffff, 0.8);
+    this.directionalLight.position.set(0, 0, 1);
+    this.scene.add(this.directionalLight);
   }
 
-  private loadTextures() {
+  private create3DModels() {
+    // Create empty groups for each accessory
+    this.glassesModel = new THREE.Group();
+    this.glassesModel.visible = false;
+    this.scene.add(this.glassesModel);
+
+    this.mustacheModel = new THREE.Group();
+    this.mustacheModel.visible = false;
+    this.scene.add(this.mustacheModel);
+  }
+
+  private load3DModels() {
     this.masks.forEach(mask => {
-      this.textureLoader.load(mask.imagePath, (texture) => {
-        // Don't flip - we handle orientation in UV calculation
-        texture.flipY = false;
-        texture.colorSpace = THREE.SRGBColorSpace;
-        texture.wrapS = THREE.ClampToEdgeWrapping;
-        texture.wrapT = THREE.ClampToEdgeWrapping;
-        texture.minFilter = THREE.LinearFilter;
-        texture.magFilter = THREE.LinearFilter;
-        mask.texture = texture;
-        if (mask.id === this.selectedMaskId) {
-          this.updateMaterial();
+      this.gltfLoader.load(
+        mask.modelPath,
+        (gltf) => {
+          mask.model = gltf.scene;
+          mask.loaded = true;
+          console.log(`✅ Loaded 3D model: ${mask.name}`);
+          
+          // Assign model to appropriate group
+          if (mask.id === 'glasses') {
+            this.glassesModel.add(gltf.scene);
+          } else if (mask.id === 'mustache') {
+            this.mustacheModel.add(gltf.scene);
+          }
+        },
+        (progress) => {
+          const percent = (progress.loaded / progress.total) * 100;
+          console.log(`Loading ${mask.name}: ${percent.toFixed(0)}%`);
+        },
+        (error) => {
+          console.error(`❌ Error loading ${mask.name}:`, error);
         }
-      });
+      );
     });
   }
 
   selectMask(maskId: string) {
-    console.log('Selecting mask:', maskId);
+    console.log('Selecting accessory:', maskId);
     this.ngZone.run(() => {
       this.selectedMaskId = maskId;
-      this.uvReferenceByMask.delete(maskId);
-      this.updateMaterial();
+      this.updateVisibility();
     });
   }
 
-  private updateMaterial() {
-    if (!this.faceMesh) return;
-
-    const material = this.faceMesh.material as THREE.MeshBasicMaterial;
-
-    if (this.selectedMaskId === 'none') {
-      material.visible = false;
-    } else {
-      const selectedMask = this.masks.find(m => m.id === this.selectedMaskId);
-      if (selectedMask?.texture) {
-        material.map = selectedMask.texture;
-        material.needsUpdate = true;
-        material.visible = true;
+  toggleMask(maskId: string) {
+    const mask = this.masks.find(m => m.id === maskId);
+    if (!mask) return;
+    
+    this.ngZone.run(() => {
+      // Toggle active state
+      mask.isActive = !mask.isActive;
+      
+      // Si se activa, se convierte en el seleccionado para gestures
+      if (mask.isActive) {
+        this.selectedMaskId = maskId;
+        // Deseleccionar otros
+        this.masks.forEach(m => m.isSelected = false);
+        mask.isSelected = true;
+      } else {
+        // Si se desactiva y era el seleccionado, seleccionar otro activo
+        if (this.selectedMaskId === maskId) {
+          const otherActive = this.masks.find(m => m.isActive && m.id !== maskId);
+          this.selectedMaskId = otherActive?.id || 'none';
+          if (otherActive) {
+            this.masks.forEach(m => m.isSelected = false);
+            otherActive.isSelected = true;
+          }
+        }
+        mask.isSelected = false;
       }
+      
+      this.updateVisibility();
+      console.log(`Toggled ${maskId}: ${mask.isActive ? 'ON' : 'OFF'}, isSelected: ${mask.isSelected}`);
+    });
+  }
+
+  selectForEditing(event: Event, maskId: string) {
+    event.stopPropagation(); // Prevenir que se dispare el toggle
+    event.preventDefault();  // Prevenir comportamiento default
+    
+    const mask = this.masks.find(m => m.id === maskId);
+    if (!mask) return;
+    
+    this.ngZone.run(() => {
+      // SIEMPRE asegurar que esté activo antes de editar
+      if (!mask.isActive) {
+        mask.isActive = true;
+      }
+      
+      // Seleccionar para edición (sin tocar isActive de nuevo)
+      this.selectedMaskId = maskId;
+      this.masks.forEach(m => m.isSelected = (m.id === maskId));
+      
+      // Asegurar visibilidad
+      this.updateVisibility();
+      
+      console.log(`Selected for editing: ${maskId}, isActive: ${mask.isActive}, isSelected: ${mask.isSelected}`);
+    });
+  }
+
+  isMaskActive(maskId: string): boolean {
+    return this.masks.find(m => m.id === maskId)?.isActive || false;
+  }
+
+  clearAll() {
+    this.ngZone.run(() => {
+      this.masks.forEach(m => {
+        m.isActive = false;
+        m.isSelected = false;
+      });
+      this.selectedMaskId = 'none';
+      this.updateVisibility();
+      console.log('Cleared all accessories');
+    });
+  }
+
+  getActiveCount(): number {
+    return this.masks.filter(m => m.isActive).length;
+  }
+
+  resetAdjustments() {
+    const activeMask = this.masks.find(m => m.id === this.selectedMaskId);
+    if (activeMask) {
+      activeMask.scaleOffset = 1.0;
+      activeMask.positionOffsetX = 0;
+      activeMask.positionOffsetY = 0;
+      console.log(`Reset adjustments for ${this.selectedMaskId}`);
     }
+  }
+
+  getLoadedModelsCount(): number {
+    return this.masks.filter(m => m.loaded).length;
+  }
+
+  private setupGestureControls() {
+    const canvas = this.canvasRef.nativeElement;
+    this.canvasRect = canvas.getBoundingClientRect();
+
+    // Touch events (móvil)
+    canvas.addEventListener('touchstart', this.onTouchStart.bind(this));
+    canvas.addEventListener('touchmove', this.onTouchMove.bind(this));
+    canvas.addEventListener('touchend', this.onTouchEnd.bind(this));
+
+    // Mouse events (desktop)
+    canvas.addEventListener('mousedown', this.onMouseDown.bind(this));
+    canvas.addEventListener('mousemove', this.onMouseMove.bind(this));
+    canvas.addEventListener('mouseup', this.onMouseUp.bind(this));
+    canvas.addEventListener('wheel', this.onWheel.bind(this), { passive: false });
+
+    // Update canvas rect on resize
+    window.addEventListener('resize', () => {
+      this.canvasRect = canvas.getBoundingClientRect();
+    });
+  }
+
+  private removeGestureControls() {
+    const canvas = this.canvasRef.nativeElement;
+    if (!canvas) return;
+
+    canvas.removeEventListener('touchstart', this.onTouchStart.bind(this));
+    canvas.removeEventListener('touchmove', this.onTouchMove.bind(this));
+    canvas.removeEventListener('touchend', this.onTouchEnd.bind(this));
+    canvas.removeEventListener('mousedown', this.onMouseDown.bind(this));
+    canvas.removeEventListener('mousemove', this.onMouseMove.bind(this));
+    canvas.removeEventListener('mouseup', this.onMouseUp.bind(this));
+    canvas.removeEventListener('wheel', this.onWheel.bind(this));
+  }
+
+  // Touch gesture handlers
+  private onTouchStart(event: TouchEvent) {
+    if (this.selectedMaskId === 'none' || !this.faceDetected) return;
+
+    if (event.touches.length === 2) {
+      // Pinch to zoom
+      const touch1 = event.touches[0];
+      const touch2 = event.touches[1];
+      this.lastTouchDistance = Math.hypot(
+        touch2.clientX - touch1.clientX,
+        touch2.clientY - touch1.clientY
+      );
+    } else if (event.touches.length === 1) {
+      // Single touch drag
+      this.isDragging = true;
+      this.lastMouseX = event.touches[0].clientX;
+      this.lastMouseY = event.touches[0].clientY;
+    }
+  }
+
+  private onTouchMove(event: TouchEvent) {
+    if (this.selectedMaskId === 'none' || !this.faceDetected) return;
+    event.preventDefault();
+
+    const activeMask = this.masks.find(m => m.id === this.selectedMaskId);
+    if (!activeMask) return;
+
+    if (event.touches.length === 2 && this.lastTouchDistance > 0) {
+      // Pinch to zoom
+      const touch1 = event.touches[0];
+      const touch2 = event.touches[1];
+      const distance = Math.hypot(
+        touch2.clientX - touch1.clientX,
+        touch2.clientY - touch1.clientY
+      );
+      
+      const scaleDelta = (distance - this.lastTouchDistance) * 0.002;
+      activeMask.scaleOffset = Math.max(0.3, Math.min(3.0, (activeMask.scaleOffset || 1.0) + scaleDelta));
+      
+      this.lastTouchDistance = distance;
+    } else if (event.touches.length === 1 && this.isDragging) {
+      // Drag to move
+      const deltaX = event.touches[0].clientX - this.lastMouseX;
+      const deltaY = event.touches[0].clientY - this.lastMouseY;
+      
+      activeMask.positionOffsetX = (activeMask.positionOffsetX || 0) + deltaX * 0.001;
+      activeMask.positionOffsetY = (activeMask.positionOffsetY || 0) - deltaY * 0.001;
+      
+      this.lastMouseX = event.touches[0].clientX;
+      this.lastMouseY = event.touches[0].clientY;
+    }
+  }
+
+  private onTouchEnd(event: TouchEvent) {
+    this.isDragging = false;
+    this.lastTouchDistance = 0;
+  }
+
+  // Mouse gesture handlers (desktop)
+  private onMouseDown(event: MouseEvent) {
+    if (this.selectedMaskId === 'none' || !this.faceDetected) return;
+    
+    this.isDragging = true;
+    this.lastMouseX = event.clientX;
+    this.lastMouseY = event.clientY;
+  }
+
+  private onMouseMove(event: MouseEvent) {
+    if (!this.isDragging || this.selectedMaskId === 'none' || !this.faceDetected) return;
+
+    const activeMask = this.masks.find(m => m.id === this.selectedMaskId);
+    if (!activeMask) return;
+
+    const deltaX = event.clientX - this.lastMouseX;
+    const deltaY = event.clientY - this.lastMouseY;
+    
+    activeMask.positionOffsetX = (activeMask.positionOffsetX || 0) + deltaX * 0.001;
+    activeMask.positionOffsetY = (activeMask.positionOffsetY || 0) - deltaY * 0.001;
+    
+    this.lastMouseX = event.clientX;
+    this.lastMouseY = event.clientY;
+  }
+
+  private onMouseUp(event: MouseEvent) {
+    this.isDragging = false;
+  }
+
+  private onWheel(event: WheelEvent) {
+    if (this.selectedMaskId === 'none' || !this.faceDetected) return;
+    event.preventDefault();
+
+    const activeMask = this.masks.find(m => m.id === this.selectedMaskId);
+    if (!activeMask) return;
+
+    const scaleDelta = -event.deltaY * 0.0005;
+    activeMask.scaleOffset = Math.max(0.3, Math.min(3.0, (activeMask.scaleOffset || 1.0) + scaleDelta));
+  }
+
+  private updateVisibility() {
+    // Update visibility based on active state, not selected
+    this.glassesModel.visible = this.isMaskActive('glasses') && this.faceDetected;
+    this.mustacheModel.visible = this.isMaskActive('mustache') && this.faceDetected;
   }
 
   private animate() {
@@ -336,29 +667,23 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     if (this.renderer.domElement.width !== rect.width ||
       this.renderer.domElement.height !== rect.height) {
       this.renderer.setSize(rect.width, rect.height);
+      this.camera.aspect = rect.width / rect.height;
+      this.camera.updateProjectionMatrix();
     }
 
     if (landmarks && landmarks.length >= 468) {
-      this.noFaceFrameCount = 0;
       this.faceDetected = true;
-      this.updateFaceMesh(landmarks, rect.width, rect.height);
-      this.faceMesh.visible = this.selectedMaskId !== 'none';
+      this.updateAccessories(landmarks, rect.width, rect.height);
+      this.updateVisibility();
     } else {
-      this.noFaceFrameCount += 1;
-      if (this.noFaceFrameCount > 15) {
-        this.uvReferenceByMask.delete(this.selectedMaskId);
-      }
       this.faceDetected = false;
-      this.faceMesh.visible = false;
+      this.updateVisibility();
     }
 
     this.renderer.render(this.scene, this.camera);
   }
 
-  private updateFaceMesh(landmarks: any[], width: number, height: number) {
-    const positions = this.geometry.attributes['position'] as THREE.BufferAttribute;
-    const uvs = this.geometry.attributes['uv'] as THREE.BufferAttribute;
-
+  private updateAccessories(landmarks: any[], width: number, height: number) {
     const { width: videoWidth, height: videoHeight } = this.trackService.getVideoDimensions();
     const videoAspect = videoWidth / videoHeight;
     const containerAspect = width / height;
@@ -378,80 +703,93 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       cropOffsetY = (renderedVideoHeight - height) / 2;
     }
 
-    const projected = new Array<{ x: number; y: number; z: number }>(landmarks.length);
+    // Helper to project landmark to normalized coordinates
+    const project = (lm: any) => ({
+      x: (lm.x * renderedVideoWidth - cropOffsetX) / width,
+      y: (lm.y * renderedVideoHeight - cropOffsetY) / height,
+      z: lm.z ?? 0,
+    });
 
-    for (let i = 0; i < landmarks.length; i++) {
-      const lm = landmarks[i];
-      projected[i] = {
-        x: (lm.x * renderedVideoWidth - cropOffsetX) / width,
-        y: (lm.y * renderedVideoHeight - cropOffsetY) / height,
-        z: lm.z ?? 0,
-      };
+    // Key landmarks
+    const leftEye = project(landmarks[33]);
+    const rightEye = project(landmarks[263]);
+    const nose = project(landmarks[1]);
+    const upperLip = project(landmarks[13]);
+    const lowerLip = project(landmarks[14]);
+    const chin = project(landmarks[152]);
+    const forehead = project(landmarks[10]); // Top of forehead
+
+    // Calculate eye center and distance
+    const eyeCenterX = (leftEye.x + rightEye.x) / 2;
+    const eyeCenterY = (leftEye.y + rightEye.y) / 2;
+    const eyeDistance = Math.abs(rightEye.x - leftEye.x);
+    const eyeAngle = Math.atan2(rightEye.y - leftEye.y, rightEye.x - leftEye.x);
+
+    // Calculate mouth center
+    const mouthCenterX = (upperLip.x + lowerLip.x) / 2;
+    const mouthCenterY = (upperLip.y + lowerLip.y) / 2;
+
+    // Convert normalized coordinates (0-1) to 3D world coordinates
+    // For perspective camera, we need to calculate position in 3D space
+    const aspect = this.camera.aspect;
+    const fov = THREE.MathUtils.degToRad(this.camera.fov);
+    const distance = 2; // Distance from camera (matches camera.position.z)
+    const vFOV = 2 * Math.tan(fov / 2) * distance;
+    const hFOV = vFOV * aspect;
+
+    const toWorld3D = (x: number, y: number, z: number) => ({
+      x: (0.5 - x) * hFOV,  // Inverted for mirrored video
+      y: (0.5 - y) * vFOV,
+      z: (z * 0.3),  // Small depth variation from face tracking
+    });
+
+    // Update glasses model (always update if active)
+    if (this.isMaskActive('glasses') && this.glassesModel) {
+      const mask = this.masks.find(m => m.id === 'glasses');
+      const worldPos = toWorld3D(eyeCenterX, eyeCenterY, nose.z);
+      
+      // Apply position offsets from gestures
+      const offsetX = mask?.positionOffsetX || 0;
+      const offsetY = mask?.positionOffsetY || 0;
+      this.glassesModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z);
+      
+      // Scale based on eye distance + gesture scale offset
+      const baseScale = eyeDistance * 1.5;
+      const scaleMultiplier = mask?.scaleOffset || 1.0;
+      const finalScale = baseScale * scaleMultiplier;
+      this.glassesModel.scale.set(finalScale, finalScale, finalScale);
+      
+      // Rotation (reduced to 30% to avoid over-rotation)
+      this.glassesModel.rotation.z = eyeAngle * 0.5;
     }
 
-    // Calculate face bounding box
-    let minX = Infinity, maxX = -Infinity;
-    let minY = Infinity, maxY = -Infinity;
-
-    for (let i = 0; i < projected.length; i++) {
-      minX = Math.min(minX, projected[i].x);
-      maxX = Math.max(maxX, projected[i].x);
-      minY = Math.min(minY, projected[i].y);
-      maxY = Math.max(maxY, projected[i].y);
+    // Update mustache model (always update if active)
+    if (this.isMaskActive('mustache') && this.mustacheModel) {
+      const mask = this.masks.find(m => m.id === 'mustache');
+      const mustacheY = upperLip.y - (eyeDistance * 0.05); // Ajustado para subir
+      const worldPos = toWorld3D(mouthCenterX, mustacheY, nose.z);
+      
+      // Apply position offsets from gestures
+      const offsetX = mask?.positionOffsetX || 0;
+      const offsetY = mask?.positionOffsetY || 0;
+      this.mustacheModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z);
+      
+      // Scale + gesture offset
+      const baseScale = eyeDistance * 1.0;
+      const scaleMultiplier = mask?.scaleOffset || 1.0;
+      const finalScale = baseScale * scaleMultiplier;
+      this.mustacheModel.scale.set(finalScale, finalScale, finalScale);
+      
+// Rotation (reduced to 50%)
+      this.mustacheModel.rotation.z = eyeAngle * 0.5;
     }
+  }
 
-    const faceWidth = Math.max(maxX - minX, 0.001);
-    const faceHeight = Math.max(maxY - minY, 0.001);
-    const faceCenterX = (minX + maxX) / 2;
-    const faceCenterY = (minY + maxY) / 2;
-
-    const uvConfig = this.getActiveUvConfig();
-    const currentMaskKey = this.selectedMaskId;
-    let referenceUv = this.uvReferenceByMask.get(currentMaskKey);
-
-    if (!referenceUv || referenceUv.length !== landmarks.length * 2) {
-      referenceUv = new Float32Array(landmarks.length * 2);
-      for (let i = 0; i < projected.length; i++) {
-        const normalizedX = (projected[i].x - faceCenterX) / faceWidth;
-        const normalizedY = (projected[i].y - faceCenterY) / faceHeight;
-
-        const u = THREE.MathUtils.clamp(
-          0.5 + uvConfig.offsetX + normalizedX * uvConfig.scaleX,
-          0.06,
-          0.94
-        );
-        const v = THREE.MathUtils.clamp(
-          0.5 + uvConfig.offsetY + normalizedY * uvConfig.scaleY,
-          0.06,
-          0.94
-        );
-
-        referenceUv[i * 2] = u;
-        referenceUv[i * 2 + 1] = v;
-      }
-      this.uvReferenceByMask.set(currentMaskKey, referenceUv);
-    }
-
-    // Update vertex positions and UVs
-    for (let i = 0; i < landmarks.length; i++) {
-      const projectedX = projected[i].x;
-      const projectedY = projected[i].y;
-      const projectedZ = projected[i].z;
-
-      // Position in normalized screen space (0-1)
-      // Mirror X for selfie view, invert Y for Three.js (Y up vs Y down)
-      const x = 1 - THREE.MathUtils.clamp(projectedX, 0, 1);
-      const y = 1 - THREE.MathUtils.clamp(projectedY, 0, 1);
-      const z = THREE.MathUtils.clamp(-projectedZ * 0.35, -0.25, 0.25);
-
-      positions.setXYZ(i, x, y, z);
-
-      uvs.setXY(i, referenceUv[i * 2], referenceUv[i * 2 + 1]);
-    }
-
-    positions.needsUpdate = true;
-    uvs.needsUpdate = true;
-    this.geometry.computeVertexNormals();
+  switchCamera() {
+    this.ngZone.run(async () => {
+      await this.trackService.switchCamera();
+      console.log('Camera switched');
+    });
   }
 }
 
