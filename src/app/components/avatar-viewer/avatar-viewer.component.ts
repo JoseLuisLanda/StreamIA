@@ -418,7 +418,7 @@ export class AvatarViewerComponent implements AfterViewInit, OnDestroy, OnChange
             if (parts['Wolf3D_Shoulder_L']) parts['Wolf3D_Shoulder_L'].rotation.set(rotation.x / 15, -rotation.y / 15, -rotation.z / 15);
             if (parts['Wolf3D_Shoulder_R']) parts['Wolf3D_Shoulder_R'].rotation.set(rotation.x / 15, -rotation.y / 15, -rotation.z / 15);
         }
-        
+     
         this.renderer.render(this.scene, this.camera);
     }
 }
