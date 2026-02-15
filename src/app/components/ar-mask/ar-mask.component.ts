@@ -24,6 +24,10 @@ interface MaskOption {
   positionOffsetX?: number;
   positionOffsetY?: number;
   positionOffsetZ?: number;
+  // Manual rotation adjustments
+  rotationOffsetX?: number;
+  rotationOffsetY?: number;
+  rotationOffsetZ?: number;
 }
 
 interface AvatarOption {
@@ -344,6 +348,66 @@ interface AvatarOption {
         (onDelete)="deleteAvatar($event)">
       </app-avatar-selector>
     </div>
+
+    <!-- Rotation Controls -->
+    <div class="rotation-container" *ngIf="selectedMaskId !== 'none' && faceDetected">
+      <div class="rotation-title">🔄 Rotación</div>
+      
+      <!-- Botones Y (horizontal) -->
+      <div class="axis-control">
+        <label class="axis-label">Horizontal (Y)</label>
+        <div class="button-group">
+          <button class="rotation-btn" 
+                  (click)="rotateY(-1)"
+                  title="Rotar izquierda">
+            ←
+          </button>
+          <button class="rotation-btn" 
+                  (click)="rotateY(1)"
+                  title="Rotar derecha">
+            →
+          </button>
+        </div>
+      </div>
+      
+      <!-- Botones X (vertical) -->
+      <div class="axis-control">
+        <label class="axis-label">Vertical (X)</label>
+        <div class="button-group">
+          <button class="rotation-btn" 
+                  (click)="rotateX(-1)"
+                  title="Rotar arriba">
+            ↑
+          </button>
+          <button class="rotation-btn" 
+                  (click)="rotateX(1)"
+                  title="Rotar abajo">
+            ↓
+          </button>
+        </div>
+      </div>
+      
+      <!-- Botones Z rotación -->
+      <div class="axis-control">
+        <label class="axis-label">Rotación (Z)</label>
+        <div class="button-group">
+          <button class="rotation-btn" 
+                  (click)="rotateZ(-1)"
+                  title="Rotar antihorario">
+            ↺
+          </button>
+          <button class="rotation-btn" 
+                  (click)="rotateZ(1)"
+                  title="Rotar horario">
+            ↻
+          </button>
+        </div>
+      </div>
+      
+      <button class="reset-rotation-btn" (click)="resetRotation()" title="Restablecer rotación">
+        ↺ Reset
+      </button>
+    </div>
     
     <div class="debug-info">
       <p>Face: {{ faceDetected ? '✅' : '❌' }}</p>
@@ -354,7 +418,8 @@ interface AvatarOption {
         Botón: Activar/Desactivar<br>
         ✏️ Click en lápiz: Seleccionar para editar<br>
         📱 Pinch: Zoom | Drag: Mover<br>
-        🖱️ Scroll: Zoom | Shift+Scroll: Profundidad | Drag: Mover
+        🖱️ Scroll: Zoom | Shift+Scroll: Profundidad | Drag: Mover<br>
+        🔄 Joystick: Rotar objeto
       </p>
     </div>
   `,
@@ -662,6 +727,99 @@ interface AvatarOption {
     .config-btn:hover {
       background: rgba(92, 36, 255, 0.3) !important;
     }
+
+    /* Joystick Controls */
+    .rotation-container {
+      position: absolute;
+      bottom: 200px;
+      right: 20px;
+      z-index: 310;
+      background: rgba(0, 0, 0, 0.7);
+      padding: 16px;
+      border-radius: 16px;
+      backdrop-filter: blur(10px);
+      pointer-events: auto;
+      min-width: 220px;
+    }
+
+    .rotation-title {
+      color: white;
+      font-size: 14px;
+      font-weight: bold;
+      margin-bottom: 16px;
+      text-align: center;
+    }
+
+    .axis-control {
+      margin-bottom: 12px;
+    }
+
+    .axis-label {
+      display: block;
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 11px;
+      font-weight: 600;
+      margin-bottom: 6px;
+      text-align: center;
+    }
+
+    .button-group {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+    }
+
+    .rotation-btn {
+      width: 50px;
+      height: 50px;
+      border-radius: 8px;
+      background: rgba(92, 36, 255, 0.3);
+      border: 2px solid rgba(92, 36, 255, 0.5);
+      color: white;
+      font-size: 24px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      user-select: none;
+      pointer-events: auto;
+    }
+
+    .rotation-btn:active {
+      background: rgba(92, 36, 255, 0.6);
+      transform: scale(0.95);
+    }
+
+    .rotation-btn:hover {
+      background: rgba(92, 36, 255, 0.5);
+      border-color: #A855F7;
+    }
+
+    .reset-rotation-btn {
+      width: 100%;
+      padding: 10px;
+      background: rgba(255, 100, 100, 0.2);
+      border: 1px solid rgba(255, 100, 100, 0.5);
+      border-radius: 8px;
+      color: white;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+      pointer-events: auto;
+      margin-top: 8px;
+    }
+
+    .reset-rotation-btn:hover {
+      background: rgba(255, 100, 100, 0.3);
+      border-color: rgba(255, 100, 100, 0.7);
+      transform: scale(1.02);
+    }
+
+    .reset-rotation-btn:active {
+      transform: scale(0.98);
+    }
   `]
 })
 export class ArMaskComponent implements AfterViewInit, OnDestroy {
@@ -675,6 +833,9 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
   private modelCache = inject(ModelCacheService);
   private cdr = inject(ChangeDetectorRef);
   private requestID: number = 0;
+
+  // Rotation controls
+  private readonly rotationStep = 0.25; // Incremento pequeño por click
 
   // Avatar management
   private readonly defaultAvatars: AvatarOption[] = [
@@ -781,7 +942,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'glasses1',
@@ -794,7 +958,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'mustache',
@@ -807,7 +974,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'mustache1',
@@ -820,7 +990,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'beard',
@@ -833,7 +1006,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'mask',
@@ -846,7 +1022,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'mask1',
@@ -859,7 +1038,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'gorra',
@@ -872,7 +1054,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'gorra1',
@@ -885,7 +1070,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'hair',
@@ -898,7 +1086,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'hair1',
@@ -910,7 +1101,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       isSelected: false,
       scaleOffset: 1.0,
       positionOffsetX: 0,
-      positionOffsetY: 0
+      positionOffsetY: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'tshirt',
@@ -923,7 +1117,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'avatar',
@@ -936,7 +1133,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'header',
@@ -949,7 +1149,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     },
     {
       id: 'avatar1',
@@ -962,7 +1165,10 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       scaleOffset: 1.0,
       positionOffsetX: 0,
       positionOffsetY: 0,
-      positionOffsetZ: 0
+      positionOffsetZ: 0,
+      rotationOffsetX: 0,
+      rotationOffsetY: 0,
+      rotationOffsetZ: 0
     }
   ];
 
@@ -1216,6 +1422,9 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
         m.positionOffsetX = 0;
         m.positionOffsetY = 0;
         m.positionOffsetZ = 0;
+        m.rotationOffsetX = 0;
+        m.rotationOffsetY = 0;
+        m.rotationOffsetZ = 0;
       });
       this.selectedMaskId = 'none';
       
@@ -1236,6 +1445,9 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
         activeMask.positionOffsetX = 0;
         activeMask.positionOffsetY = 0;
         activeMask.positionOffsetZ = 0;
+        activeMask.rotationOffsetX = 0;
+        activeMask.rotationOffsetY = 0;
+        activeMask.rotationOffsetZ = 0;
         console.log(`Reset adjustments for ${this.selectedMaskId}`);
       }
     });
@@ -1277,6 +1489,46 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     canvas.removeEventListener('mousemove', this.onMouseMove.bind(this));
     canvas.removeEventListener('mouseup', this.onMouseUp.bind(this));
     canvas.removeEventListener('wheel', this.onWheel.bind(this));
+  }
+
+  // Joystick controls setup
+  rotateX(direction: number) {
+    if (this.selectedMaskId === 'none') return;
+    
+    const activeMask = this.masks.find(m => m.id === this.selectedMaskId);
+    if (!activeMask) return;
+    
+    activeMask.rotationOffsetX = (activeMask.rotationOffsetX || 0) + (direction * this.rotationStep);
+  }
+
+  rotateY(direction: number) {
+    if (this.selectedMaskId === 'none') return;
+    
+    const activeMask = this.masks.find(m => m.id === this.selectedMaskId);
+    if (!activeMask) return;
+    
+    activeMask.rotationOffsetY = (activeMask.rotationOffsetY || 0) + (direction * this.rotationStep);
+  }
+
+  rotateZ(direction: number) {
+    if (this.selectedMaskId === 'none') return;
+    
+    const activeMask = this.masks.find(m => m.id === this.selectedMaskId);
+    if (!activeMask) return;
+    
+    activeMask.rotationOffsetZ = (activeMask.rotationOffsetZ || 0) + (direction * this.rotationStep);
+  }
+
+  resetRotation() {
+    if (this.selectedMaskId === 'none') return;
+    
+    const activeMask = this.masks.find(m => m.id === this.selectedMaskId);
+    if (activeMask) {
+      activeMask.rotationOffsetX = 0;
+      activeMask.rotationOffsetY = 0;
+      activeMask.rotationOffsetZ = 0;
+      console.log(`Reset rotation for ${this.selectedMaskId}`);
+    }
   }
 
   // Touch gesture handlers
@@ -1554,7 +1806,12 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       this.glassesModel.scale.set(finalScale, finalScale, finalScale);
       
       // Rotation (reduced to 30% to avoid over-rotation)
-      this.glassesModel.rotation.z = eyeAngle * 0.5;
+      const rotX = mask?.rotationOffsetX || 0;
+      const rotY = mask?.rotationOffsetY || 0;
+      const rotZ = mask?.rotationOffsetZ || 0;
+      this.glassesModel.rotation.x = rotX;
+      this.glassesModel.rotation.y = rotY;
+      this.glassesModel.rotation.z = eyeAngle * 0.5 + rotZ;
     }
 
     // Update mustache model (always update if active)
@@ -1577,6 +1834,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       
 // Rotation (reduced to 50%)
       this.mustacheModel.rotation.z = eyeAngle * 0.5;
+      
+      // Apply manual rotation offsets
+      const rotX = mask?.rotationOffsetX || 0;
+      const rotY = mask?.rotationOffsetY || 0;
+      const rotZ = mask?.rotationOffsetZ || 0;
+      this.mustacheModel.rotation.x = rotX;
+      this.mustacheModel.rotation.y = rotY;
+      this.mustacheModel.rotation.z = eyeAngle * 0.5 + rotZ;
     }
 
     // Update glasses1 model
@@ -1592,6 +1857,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const finalScale = baseScale * scaleMultiplier;
       this.glasses1Model.scale.set(finalScale, finalScale, finalScale);
       this.glasses1Model.rotation.z = eyeAngle * 0.5;
+      
+      // Apply manual rotation offsets
+      const rotX = mask?.rotationOffsetX || 0;
+      const rotY = mask?.rotationOffsetY || 0;
+      const rotZ = mask?.rotationOffsetZ || 0;
+      this.glasses1Model.rotation.x = rotX;
+      this.glasses1Model.rotation.y = rotY;
+      this.glasses1Model.rotation.z = eyeAngle * 0.5 + rotZ;
     }
 
     // Update mustache1 model
@@ -1608,6 +1881,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const finalScale = baseScale * scaleMultiplier;
       this.mustache1Model.scale.set(finalScale, finalScale, finalScale);
       this.mustache1Model.rotation.z = eyeAngle * 0.5;
+      
+      // Apply manual rotation offsets
+      const rotX = mask?.rotationOffsetX || 0;
+      const rotY = mask?.rotationOffsetY || 0;
+      const rotZ = mask?.rotationOffsetZ || 0;
+      this.mustache1Model.rotation.x = rotX;
+      this.mustache1Model.rotation.y = rotY;
+      this.mustache1Model.rotation.z = eyeAngle * 0.5 + rotZ;
     }
 
     // Update beard model
@@ -1624,6 +1905,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const finalScale = baseScale * scaleMultiplier;
       this.beardModel.scale.set(finalScale, finalScale, finalScale);
       this.beardModel.rotation.z = eyeAngle * 0.5;
+      
+      // Apply manual rotation offsets
+      const rotX = mask?.rotationOffsetX || 0;
+      const rotY = mask?.rotationOffsetY || 0;
+      const rotZ = mask?.rotationOffsetZ || 0;
+      this.beardModel.rotation.x = rotX;
+      this.beardModel.rotation.y = rotY;
+      this.beardModel.rotation.z = eyeAngle * 0.5 + rotZ;
     }
 
     // Update mask model (cubre toda la cara)
@@ -1640,6 +1929,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const finalScale = baseScale * scaleMultiplier;
       this.maskModel.scale.set(finalScale, finalScale, finalScale);
       this.maskModel.rotation.z = eyeAngle * 0.5;
+      
+      // Apply manual rotation offsets
+      const rotX = mask?.rotationOffsetX || 0;
+      const rotY = mask?.rotationOffsetY || 0;
+      const rotZ = mask?.rotationOffsetZ || 0;
+      this.maskModel.rotation.x = rotX;
+      this.maskModel.rotation.y = rotY;
+      this.maskModel.rotation.z = eyeAngle * 0.5 + rotZ;
     }
 
     // Update mask1 model
@@ -1656,6 +1953,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const finalScale = baseScale * scaleMultiplier;
       this.mask1Model.scale.set(finalScale, finalScale, finalScale);
       this.mask1Model.rotation.z = eyeAngle * 0.5;
+      
+      // Apply manual rotation offsets
+      const rotX = mask?.rotationOffsetX || 0;
+      const rotY = mask?.rotationOffsetY || 0;
+      const rotZ = mask?.rotationOffsetZ || 0;
+      this.mask1Model.rotation.x = rotX;
+      this.mask1Model.rotation.y = rotY;
+      this.mask1Model.rotation.z = eyeAngle * 0.5 + rotZ;
     }
 
     // Update gorra model (sobre la cabeza)
@@ -1672,6 +1977,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const finalScale = baseScale * scaleMultiplier;
       this.gorraModel.scale.set(finalScale, finalScale, finalScale);
       this.gorraModel.rotation.z = eyeAngle * 0.5;
+      
+      // Apply manual rotation offsets
+      const rotX = mask?.rotationOffsetX || 0;
+      const rotY = mask?.rotationOffsetY || 0;
+      const rotZ = mask?.rotationOffsetZ || 0;
+      this.gorraModel.rotation.x = rotX;
+      this.gorraModel.rotation.y = rotY;
+      this.gorraModel.rotation.z = eyeAngle * 0.5 + rotZ;
     }
 
     // Update gorra1 model
@@ -1688,6 +2001,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const finalScale = baseScale * scaleMultiplier;
       this.gorra1Model.scale.set(finalScale, finalScale, finalScale);
       this.gorra1Model.rotation.z = eyeAngle * 0.5;
+      
+      // Apply manual rotation offsets
+      const rotX = mask?.rotationOffsetX || 0;
+      const rotY = mask?.rotationOffsetY || 0;
+      const rotZ = mask?.rotationOffsetZ || 0;
+      this.gorra1Model.rotation.x = rotX;
+      this.gorra1Model.rotation.y = rotY;
+      this.gorra1Model.rotation.z = eyeAngle * 0.5 + rotZ;
     }
 
     // Update hair model
@@ -1704,6 +2025,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const finalScale = baseScale * scaleMultiplier;
       this.hairModel.scale.set(finalScale, finalScale, finalScale);
       this.hairModel.rotation.z = eyeAngle * 0.5;
+      
+      // Apply manual rotation offsets
+      const rotX = mask?.rotationOffsetX || 0;
+      const rotY = mask?.rotationOffsetY || 0;
+      const rotZ = mask?.rotationOffsetZ || 0;
+      this.hairModel.rotation.x = rotX;
+      this.hairModel.rotation.y = rotY;
+      this.hairModel.rotation.z = eyeAngle * 0.5 + rotZ;
     }
 
     // Update hair1 model
@@ -1720,6 +2049,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const finalScale = baseScale * scaleMultiplier;
       this.hair1Model.scale.set(finalScale, finalScale, finalScale);
       this.hair1Model.rotation.z = eyeAngle * 0.5;
+      
+      // Apply manual rotation offsets
+      const rotX = mask?.rotationOffsetX || 0;
+      const rotY = mask?.rotationOffsetY || 0;
+      const rotZ = mask?.rotationOffsetZ || 0;
+      this.hair1Model.rotation.x = rotX;
+      this.hair1Model.rotation.y = rotY;
+      this.hair1Model.rotation.z = eyeAngle * 0.5 + rotZ;
     }
 
     // Update tshirt model (abajo en el torso)
@@ -1736,6 +2073,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const finalScale = baseScale * scaleMultiplier;
       this.tshirtModel.scale.set(finalScale, finalScale, finalScale);
       this.tshirtModel.rotation.z = eyeAngle * 0.5;
+      
+      // Apply manual rotation offsets
+      const rotX = mask?.rotationOffsetX || 0;
+      const rotY = mask?.rotationOffsetY || 0;
+      const rotZ = mask?.rotationOffsetZ || 0;
+      this.tshirtModel.rotation.x = rotX;
+      this.tshirtModel.rotation.y = rotY;
+      this.tshirtModel.rotation.z = eyeAngle * 0.5 + rotZ;
     }
   }
 
@@ -1946,6 +2291,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     this.avatarModel.position.x = 0 + (avatarMask.positionOffsetX || 0);
     this.avatarModel.position.y = -4.3 + (avatarMask.positionOffsetY || 0);
     this.avatarModel.position.z = 0 + (avatarMask.positionOffsetZ || 0);
+    
+    // Apply manual rotation offsets from sliders
+    const rotX = avatarMask?.rotationOffsetX || 0;
+    const rotY = avatarMask?.rotationOffsetY || 0;
+    const rotZ = avatarMask?.rotationOffsetZ || 0;
+    this.avatarModel.rotation.x = rotX;
+    this.avatarModel.rotation.y = rotY;
+    this.avatarModel.rotation.z = rotZ;
 
     // Apply Face Blendshapes (ARKit morphTargets)
     if (blendshapes.length > 0 && this.avatarHeadMeshes.length > 0) {
@@ -2031,6 +2384,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     this.headerModel.position.x = 0 + (headerMask.positionOffsetX || 0);
     this.headerModel.position.y = -4.3 + (headerMask.positionOffsetY || 0);
     this.headerModel.position.z = 0 + (headerMask.positionOffsetZ || 0);
+    
+    // Apply manual rotation offsets from sliders
+    const rotX = headerMask?.rotationOffsetX || 0;
+    const rotY = headerMask?.rotationOffsetY || 0;
+    const rotZ = headerMask?.rotationOffsetZ || 0;
+    this.headerModel.rotation.x = rotX;
+    this.headerModel.rotation.y = rotY;
+    this.headerModel.rotation.z = rotZ;
 
     // Apply Face Blendshapes (ARKit morphTargets)
     if (blendshapes.length > 0 && this.headerHeadMeshes.length > 0) {
@@ -2168,6 +2529,14 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     this.avatar1Model.position.x = 0 + (avatar1Mask.positionOffsetX || 0);
     this.avatar1Model.position.y = -4.3 + (avatar1Mask.positionOffsetY || 0);
     this.avatar1Model.position.z = 0 + (avatar1Mask.positionOffsetZ || 0);
+    
+    // Apply manual rotation offsets from sliders
+    const rotX = avatar1Mask?.rotationOffsetX || 0;
+    const rotY = avatar1Mask?.rotationOffsetY || 0;
+    const rotZ = avatar1Mask?.rotationOffsetZ || 0;
+    this.avatar1Model.rotation.x = rotX;
+    this.avatar1Model.rotation.y = rotY;
+    this.avatar1Model.rotation.z = rotZ;
 
     // Apply Face Blendshapes (ARKit morphTargets)
     if (blendshapes.length > 0 && this.avatar1HeadMeshes.length > 0) {
