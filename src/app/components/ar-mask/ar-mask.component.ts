@@ -1,6 +1,7 @@
-import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, inject, NgZone, ChangeDetectorRef } from '@angular/core';
+import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, OnInit, inject, NgZone, ChangeDetectorRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { HttpClient, HttpClientModule } from '@angular/common/http';
 import { FaceTrackingService } from '../../services/face-tracking.service';
 import { LiveStorageService } from '../../pages/live/live-storage.service';
 import { FirebaseAvatarStorageService } from '../../services/firebase-avatar-storage.service';
@@ -16,6 +17,7 @@ interface MaskOption {
   type: 'glasses' | 'facial-hair' | 'hair' | 'mask' | 'hat' | 'clothing' | 'avatar';
   model?: THREE.Group;
   loaded?: boolean;
+  available?: boolean;
   // State
   isActive?: boolean;
   isSelected?: boolean;  // Para saber cuál se está editando con gestures
@@ -45,7 +47,7 @@ interface AvatarOption {
 @Component({
   selector: 'app-ar-mask',
   standalone: true,
-  imports: [CommonModule, FormsModule, AvatarSelectorComponent],
+  imports: [CommonModule, FormsModule, AvatarSelectorComponent, HttpClientModule],
   template: `
     <div #container class="ar-container">
       <canvas #maskCanvas class="ar-canvas" [class.panel-open]="isAvatarPanelOpen"></canvas>
@@ -59,183 +61,32 @@ interface AvatarOption {
       <span class="icon">{{ isSelectorCollapsed ? '▲' : '▼' }}</span>
     </button>
 
-    <!-- Accessory Selector UI -->
+    <!-- Accessory Selector UI (dinámico según archivos en assets/models) -->
     <div class="mask-selector" [class.collapsed]="isSelectorCollapsed">
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('glasses')"
-          [class.active]="isMaskActive('glasses')"
-          [class.selected]="selectedMaskId === 'glasses'"
-          class="mask-btn">
-          <span class="icon">👓</span>
-          <span>Lentes</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'glasses'"
-              [class.active]="isMaskActive('glasses')"
-              (click)="selectForEditing($event, 'glasses')">✏️</span>
-      </div>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('glasses1')"
-          [class.active]="isMaskActive('glasses1')"
-          [class.selected]="selectedMaskId === 'glasses1'"
-          class="mask-btn">
-          <span class="icon">🕶️</span>
-          <span>Lentes 2</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'glasses1'"
-              [class.active]="isMaskActive('glasses1')"
-              (click)="selectForEditing($event, 'glasses1')">✏️</span>
-      </div>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('mustache')"
-          [class.active]="isMaskActive('mustache')"
-          [class.selected]="selectedMaskId === 'mustache'"
-          class="mask-btn">
-          <span class="icon">👨</span>
-          <span>Bigote</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'mustache'"
-              [class.active]="isMaskActive('mustache')"
-              (click)="selectForEditing($event, 'mustache')">✏️</span>
-      </div>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('mustache1')"
-          [class.active]="isMaskActive('mustache1')"
-          [class.selected]="selectedMaskId === 'mustache1'"
-          class="mask-btn">
-          <span class="icon">🧔</span>
-          <span>Bigote 2</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'mustache1'"
-              [class.active]="isMaskActive('mustache1')"
-              (click)="selectForEditing($event, 'mustache1')">✏️</span>
-      </div>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('beard')"
-          [class.active]="isMaskActive('beard')"
-          [class.selected]="selectedMaskId === 'beard'"
-          class="mask-btn">
-          <span class="icon">🧔‍♂️</span>
-          <span>Barba</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'beard'"
-              [class.active]="isMaskActive('beard')"
-              (click)="selectForEditing($event, 'beard')">✏️</span>
-      </div>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('mask')"
-          [class.active]="isMaskActive('mask')"
-          [class.selected]="selectedMaskId === 'mask'"
-          class="mask-btn">
-          <span class="icon">🎭</span>
-          <span>Máscara</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'mask'"
-              [class.active]="isMaskActive('mask')"
-              (click)="selectForEditing($event, 'mask')">✏️</span>
-      </div>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('mask1')"
-          [class.active]="isMaskActive('mask1')"
-          [class.selected]="selectedMaskId === 'mask1'"
-          class="mask-btn">
-          <span class="icon">😷</span>
-          <span>Máscara 2</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'mask1'"
-              [class.active]="isMaskActive('mask1')"
-              (click)="selectForEditing($event, 'mask1')">✏️</span>
-      </div>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('gorra')"
-          [class.active]="isMaskActive('gorra')"
-          [class.selected]="selectedMaskId === 'gorra'"
-          class="mask-btn">
-          <span class="icon">🧢</span>
-          <span>Gorra</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'gorra'"
-              [class.active]="isMaskActive('gorra')"
-              (click)="selectForEditing($event, 'gorra')">✏️</span>
-      </div>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('gorra1')"
-          [class.active]="isMaskActive('gorra1')"
-          [class.selected]="selectedMaskId === 'gorra1'"
-          class="mask-btn">
-          <span class="icon">🎩</span>
-          <span>Gorra 2</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'gorra1'"
-              [class.active]="isMaskActive('gorra1')"
-              (click)="selectForEditing($event, 'gorra1')">✏️</span>
-      </div>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('hair')"
-          [class.active]="isMaskActive('hair')"
-          [class.selected]="selectedMaskId === 'hair'"
-          class="mask-btn">
-          <span class="icon">💇</span>
-          <span>Cabello</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'hair'"
-              [class.active]="isMaskActive('hair')"
-              (click)="selectForEditing($event, 'hair')">✏️</span>
-      </div>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('hair1')"
-          [class.active]="isMaskActive('hair1')"
-          [class.selected]="selectedMaskId === 'hair1'"
-          class="mask-btn">
-          <span class="icon">💁</span>
-          <span>Cabello 2</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'hair1'"
-              [class.active]="isMaskActive('hair1')"
-              (click)="selectForEditing($event, 'hair1')">✏️</span>
-      </div>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('tshirt')"
-          [class.active]="isMaskActive('tshirt')"
-          [class.selected]="selectedMaskId === 'tshirt'"
-          class="mask-btn">
-          <span class="icon">👕</span>
-          <span>Playera</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'tshirt'"
-              [class.active]="isMaskActive('tshirt')"
-              (click)="selectForEditing($event, 'tshirt')">✏️</span>
-      </div>
-      <button 
+      <ng-container *ngFor="let mask of masks">
+        <div class="mask-btn-wrapper" *ngIf="mask.available">
+          <button
+            (click)="toggleMask(mask.id)"
+            [class.active]="isMaskActive(mask.id)"
+            [class.selected]="selectedMaskId === mask.id"
+            class="mask-btn">
+            <span class="icon">{{ getIconForType(mask.type) }}</span>
+            <span>{{ mask.name }}</span>
+          </button>
+          <span class="edit-indicator"
+                [class.editing]="selectedMaskId === mask.id"
+                [class.active]="isMaskActive(mask.id)"
+                (click)="selectForEditing($event, mask.id)">✏️</span>
+        </div>
+      </ng-container>
+
+      <button
         (click)="clearAll()"
         class="mask-btn clear-btn">
         <span class="icon">🗑️</span>
         <span>Limpiar</span>
       </button>
-      <button 
+      <button
         (click)="resetAdjustments()"
         [disabled]="selectedMaskId === 'none'"
         class="mask-btn reset-btn"
@@ -243,14 +94,14 @@ interface AvatarOption {
         <span class="icon">↺</span>
         <span>Reset</span>
       </button>
-      <button 
+      <button
         (click)="switchCamera()"
         class="mask-btn camera-switch-btn"
         title="Cambiar cámara">
         <span class="icon">🔄</span>
         <span>Cámara</span>
       </button>
-      <button 
+      <button
         (click)="toggleVideoHide()"
         [class.active]="isVideoHidden()"
         class="mask-btn hide-btn"
@@ -258,7 +109,7 @@ interface AvatarOption {
         <span class="icon">🟢</span>
         <span>F.Verde</span>
       </button>
-      <button 
+      <button
         (click)="toggleVideoHideBlack()"
         [class.active]="isVideoHiddenBlack()"
         class="mask-btn hide-black-btn"
@@ -266,7 +117,7 @@ interface AvatarOption {
         <span class="icon">⚫</span>
         <span>F.Negro</span>
       </button>
-      <button 
+      <button
         (click)="toggleSegmentation()"
         [class.active]="isSegmentationActive()"
         class="mask-btn segmentation-btn"
@@ -274,22 +125,7 @@ interface AvatarOption {
         <span class="icon">👤</span>
         <span>Seg</span>
       </button>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('avatar')"
-          [class.active]="isMaskActive('avatar')"
-          [class.selected]="selectedMaskId === 'avatar'"
-          class="mask-btn avatar-btn"
-          title="Avatar sincronizado">
-          <span class="icon">🧑</span>
-          <span>Avatar</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'avatar'"
-              [class.active]="isMaskActive('avatar')"
-              (click)="selectForEditing($event, 'avatar')">✏️</span>
-      </div>
-      <button 
+      <button
         (click)="toggleAvatarPanel()"
         [class.active]="isAvatarPanelOpen"
         class="mask-btn config-btn"
@@ -297,36 +133,6 @@ interface AvatarOption {
         <span class="icon">⚙️</span>
         <span>Config</span>
       </button>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('header')"
-          [class.active]="isMaskActive('header')"
-          [class.selected]="selectedMaskId === 'header'"
-          class="mask-btn header-btn"
-          title="Header (solo cabeza)">
-          <span class="icon">🗣️</span>
-          <span>Header</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'header'"
-              [class.active]="isMaskActive('header')"
-              (click)="selectForEditing($event, 'header')">✏️</span>
-      </div>
-      <div class="mask-btn-wrapper">
-        <button 
-          (click)="toggleMask('avatar1')"
-          [class.active]="isMaskActive('avatar1')"
-          [class.selected]="selectedMaskId === 'avatar1'"
-          class="mask-btn avatar1-btn"
-          title="Avatar1 (local)">
-          <span class="icon">👤</span>
-          <span>Avatar1</span>
-        </button>
-        <span class="edit-indicator" 
-              [class.editing]="selectedMaskId === 'avatar1'"
-              [class.active]="isMaskActive('avatar1')"
-              (click)="selectForEditing($event, 'avatar1')">✏️</span>
-      </div>
     </div>
 
     <!-- Avatar Configuration Panel -->
@@ -822,7 +628,7 @@ interface AvatarOption {
     }
   `]
 })
-export class ArMaskComponent implements AfterViewInit, OnDestroy {
+export class ArMaskComponent implements AfterViewInit, OnDestroy, OnInit {
   @ViewChild('container') containerRef!: ElementRef<HTMLDivElement>;
   @ViewChild('maskCanvas') canvasRef!: ElementRef<HTMLCanvasElement>;
 
@@ -833,6 +639,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
   private modelCache = inject(ModelCacheService);
   private cdr = inject(ChangeDetectorRef);
   private requestID: number = 0;
+  private http = inject(HttpClient);
 
   // Rotation controls
   private readonly rotationStep = 0.25; // Incremento pequeño por click
@@ -852,6 +659,11 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       thumbnail: 'https://models.readyplayer.me/6984ad1a0b547ce9ae29d70d.png'
     }
   ];
+
+  ngOnInit() {
+    // Verificar existencia de archivos en assets/models y ocultar entradas sin archivo
+    this.checkAvailableModels();
+  }
 
   avatars: AvatarOption[] = [...this.defaultAvatars];
   currentAvatar: AvatarOption | null = null;
@@ -1191,6 +1003,37 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     cancelAnimationFrame(this.requestID);
     this.removeGestureControls();
     this.renderer?.dispose();
+  }
+
+  private checkAvailableModels() {
+    this.masks.forEach(mask => {
+      // inicialmente undefined; intentamos HEAD para comprobar si existe
+      this.http.head(mask.modelPath, { observe: 'response' }).subscribe({
+        next: () => {
+          mask.available = true;
+          this.cdr.markForCheck();
+        },
+        error: () => {
+          // archivo no encontrado o error -> ocultar opción
+          mask.available = false;
+          this.cdr.markForCheck();
+        }
+      });
+    });
+  }
+
+  // Helper para iconos simples según tipo
+  getIconForType(type: MaskOption['type']): string {
+    switch (type) {
+      case 'glasses': return '👓';
+      case 'facial-hair': return '🧔';
+      case 'hair': return '💇';
+      case 'mask': return '🎭';
+      case 'hat': return '🧢';
+      case 'clothing': return '👕';
+      case 'avatar': return '👤';
+      default: return '🔸';
+    }
   }
 
   private initThreeJS() {
@@ -2063,7 +1906,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
     if (this.isMaskActive('tshirt') && this.tshirtModel) {
       const mask = this.masks.find(m => m.id === 'tshirt');
       const tshirtY = chin.y + (eyeDistance * 0.8);
-      const worldPos = toWorld3D(eyeCenterX, tshirtY, nose.z);
+      const worldPos = toWorld3D(0.5, tshirtY, nose.z);
       const offsetX = mask?.positionOffsetX || 0;
       const offsetY = mask?.positionOffsetY || 0;
       const offsetZ = mask?.positionOffsetZ || 0;
@@ -2072,7 +1915,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const scaleMultiplier = mask?.scaleOffset || 1.0;
       const finalScale = baseScale * scaleMultiplier;
       this.tshirtModel.scale.set(finalScale, finalScale, finalScale);
-      this.tshirtModel.rotation.z = eyeAngle * 0.5;
+      this.tshirtModel.rotation.z = 0;
       
       // Apply manual rotation offsets
       const rotX = mask?.rotationOffsetX || 0;
@@ -2080,7 +1923,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy {
       const rotZ = mask?.rotationOffsetZ || 0;
       this.tshirtModel.rotation.x = rotX;
       this.tshirtModel.rotation.y = rotY;
-      this.tshirtModel.rotation.z = eyeAngle * 0.5 + rotZ;
+      this.tshirtModel.rotation.z = rotZ;
     }
   }
 

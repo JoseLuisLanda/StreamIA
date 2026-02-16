@@ -150,10 +150,10 @@ export class VideoPreviewComponent implements AfterViewInit, OnDestroy {
     const centerX = (minX + maxX) / 2;
     const centerY = (minY + maxY) / 2;
     
-    // Expand area to cover shoulders and body
+    // Expand area to cover shoulders and body, starting below the chin
     const bodyWidth = faceWidth * 3.5;
-    const bodyHeight = faceHeight * 4.5;
-    const bodyTop = minY - faceHeight * 0.3;
+    const bodyHeight = faceHeight * 3.2;
+    const bodyTop = maxY + faceHeight * 0.05;
     
     // Draw green ellipse over person
     ctx.fillStyle = '#00ff00';
