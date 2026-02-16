@@ -1,6 +1,7 @@
 import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, inject, effect } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FaceTrackingService } from '../../services/face-tracking.service';
+import { BodyTrackingService } from '../../services/body-tracking.service';
 
 @Component({
   selector: 'app-video-preview',
@@ -56,6 +57,7 @@ export class VideoPreviewComponent implements AfterViewInit, OnDestroy {
   @ViewChild('maskCanvas') maskCanvas!: ElementRef<HTMLCanvasElement>;
 
   public faceTrackingService = inject(FaceTrackingService);
+  public bodyTrackingService = inject(BodyTrackingService);
   private renderLoopId: number | null = null;
 
   getBackgroundColor(): string {
@@ -96,6 +98,7 @@ export class VideoPreviewComponent implements AfterViewInit, OnDestroy {
 
   ngAfterViewInit() {
     this.faceTrackingService.initialize(this.videoElement.nativeElement);
+    this.bodyTrackingService.initialize(this.videoElement.nativeElement);
     this.setupCanvas();
   }
 
@@ -103,6 +106,7 @@ export class VideoPreviewComponent implements AfterViewInit, OnDestroy {
     if (this.renderLoopId) {
       cancelAnimationFrame(this.renderLoopId);
     }
+    this.bodyTrackingService.stop();
   }
 
   private startRenderLoop() {

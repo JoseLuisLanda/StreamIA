@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { HttpClient, HttpClientModule } from '@angular/common/http';
 import { FaceTrackingService } from '../../services/face-tracking.service';
+import { BodyTrackingService } from '../../services/body-tracking.service';
 import { LiveStorageService } from '../../pages/live/live-storage.service';
 import { FirebaseAvatarStorageService } from '../../services/firebase-avatar-storage.service';
 import { ModelCacheService } from '../../services/model-cache.service';
@@ -633,6 +634,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy, OnInit {
   @ViewChild('maskCanvas') canvasRef!: ElementRef<HTMLCanvasElement>;
 
   private trackService = inject(FaceTrackingService);
+  private bodyTrackService = inject(BodyTrackingService);
   private ngZone = inject(NgZone);
   private storageService = inject(LiveStorageService);
   private firebaseAvatarStorage = inject(FirebaseAvatarStorageService);
@@ -1556,6 +1558,9 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy, OnInit {
       this.camera.updateProjectionMatrix();
     }
 
+    // Actualizar tshirt con body tracking (independiente del face tracking)
+    this.updateTshirtPosition();
+
     if (landmarks && landmarks.length >= 468) {
       this.faceDetected = true;
       this.updateAccessories(landmarks, rect.width, rect.height);
@@ -1902,29 +1907,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy, OnInit {
       this.hair1Model.rotation.z = eyeAngle * 0.5 + rotZ;
     }
 
-    // Update tshirt model (abajo en el torso)
-    if (this.isMaskActive('tshirt') && this.tshirtModel) {
-      const mask = this.masks.find(m => m.id === 'tshirt');
-      const tshirtY = chin.y + (eyeDistance * 0.8);
-      const worldPos = toWorld3D(0.5, tshirtY, nose.z);
-      const offsetX = mask?.positionOffsetX || 0;
-      const offsetY = mask?.positionOffsetY || 0;
-      const offsetZ = mask?.positionOffsetZ || 0;
-      this.tshirtModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
-      const baseScale = eyeDistance * 2.5;
-      const scaleMultiplier = mask?.scaleOffset || 1.0;
-      const finalScale = baseScale * scaleMultiplier;
-      this.tshirtModel.scale.set(finalScale, finalScale, finalScale);
-      this.tshirtModel.rotation.z = 0;
-      
-      // Apply manual rotation offsets
-      const rotX = mask?.rotationOffsetX || 0;
-      const rotY = mask?.rotationOffsetY || 0;
-      const rotZ = mask?.rotationOffsetZ || 0;
-      this.tshirtModel.rotation.x = rotX;
-      this.tshirtModel.rotation.y = rotY;
-      this.tshirtModel.rotation.z = rotZ;
-    }
+    // Tshirt ya no se actualiza aquí - se mueve a updateTshirtPosition()
   }
 
   switchCamera() {
@@ -1932,6 +1915,80 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy, OnInit {
       await this.trackService.switchCamera();
       console.log('Camera switched');
     });
+  }
+
+  // Método independiente para actualizar tshirt usando SOLO body tracking
+  private updateTshirtPosition() {
+    if (!this.isMaskActive('tshirt') || !this.tshirtModel) {
+      return;
+    }
+
+    const mask = this.masks.find(m => m.id === 'tshirt');
+    
+    // Verificar si body tracking está disponible y detecta el cuerpo
+    if (!this.bodyTrackService.isBodyVisible()) {
+      // Si no hay body tracking, ocultar o mantener posición anterior
+      return;
+    }
+
+    // Obtener landmarks de hombros del body tracking
+    const leftShoulder = this.bodyTrackService.getLandmark(this.bodyTrackService.POSE_LANDMARKS.LEFT_SHOULDER);
+    const rightShoulder = this.bodyTrackService.getLandmark(this.bodyTrackService.POSE_LANDMARKS.RIGHT_SHOULDER);
+    
+    if (!leftShoulder || !rightShoulder) {
+      return;
+    }
+
+    // Calcular centro de hombros
+    const shoulderCenterX = (leftShoulder.x + rightShoulder.x) / 2;
+    const shoulderCenterY = (leftShoulder.y + rightShoulder.y) / 2;
+    const shoulderCenterZ = (leftShoulder.z + rightShoulder.z) / 2;
+    
+    // Calcular ancho de hombros
+    const dx = rightShoulder.x - leftShoulder.x;
+    const dy = rightShoulder.y - leftShoulder.y;
+    const shoulderWidth = Math.sqrt(dx * dx + dy * dy);
+    
+    // Calcular hFOV y vFOV de la cámara (independiente del face tracking)
+    const aspect = this.camera.aspect;
+    const fov = THREE.MathUtils.degToRad(this.camera.fov);
+    const distance = 2; // Distance from camera
+    const vFOV = 2 * Math.tan(fov / 2) * distance;
+    const hFOV = vFOV * aspect;
+    
+    // Convertir coordenadas normalizadas del cuerpo a espacio 3D
+    const bodyToWorld3D = (x: number, y: number, z: number) => ({
+      x: (0.5 - x) * hFOV,  // Inverted for mirrored video
+      y: (0.5 - y) * vFOV,
+      z: z * 0.3  // Profundidad del body tracking
+    });
+    
+    // Bajar la playera desde el centro de hombros
+    const tshirtY = shoulderCenterY + (shoulderWidth * 0.4);
+    const worldPos = bodyToWorld3D(shoulderCenterX, tshirtY, shoulderCenterZ);
+    
+    // Aplicar offsets manuales
+    const offsetX = mask?.positionOffsetX || 0;
+    const offsetY = mask?.positionOffsetY || 0;
+    const offsetZ = mask?.positionOffsetZ || 0;
+    this.tshirtModel.position.set(worldPos.x + offsetX, worldPos.y + offsetY, worldPos.z + offsetZ);
+    
+    // Escalar basado SOLO en el ancho de los hombros
+    const baseScale = shoulderWidth * 3.8;
+    const scaleMultiplier = mask?.scaleOffset || 1.0;
+    const finalScale = baseScale * scaleMultiplier;
+    this.tshirtModel.scale.set(finalScale, finalScale, finalScale);
+    
+    // Sin rotación automática - mantener fijo
+    this.tshirtModel.rotation.z = 0;
+    
+    // Aplicar rotaciones manuales
+    const rotX = mask?.rotationOffsetX || 0;
+    const rotY = mask?.rotationOffsetY || 0;
+    const rotZ = mask?.rotationOffsetZ || 0;
+    this.tshirtModel.rotation.x = rotX;
+    this.tshirtModel.rotation.y = rotY;
+    this.tshirtModel.rotation.z = rotZ;
   }
 
   toggleVideoHide() {
