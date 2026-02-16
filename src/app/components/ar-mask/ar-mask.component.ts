@@ -15,7 +15,7 @@ interface MaskOption {
   id: string;
   name: string;
   modelPath: string;
-  type: 'glasses' | 'facial-hair' | 'hair' | 'mask' | 'hat' | 'clothing' | 'avatar';
+  type: 'glasses' | 'facial-hair' | 'hair' | 'mask' | 'hat' | 'clothing' | 'avatar' | 'header';
   model?: THREE.Group;
   loaded?: boolean;
   available?: boolean;
@@ -956,7 +956,7 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy, OnInit {
       id: 'header',
       name: 'Header (Solo cabeza)',
       modelPath: 'assets/models/header.glb',
-      type: 'avatar',
+      type: 'header',
       loaded: false,
       isActive: false,
       isSelected: false,
@@ -2215,33 +2215,44 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy, OnInit {
       });
     }
 
-    // Breathing animation
-    const breathCycle = Math.sin(this.breathingTime * 0.5);
-    const breathIntensity = 0.05;
+    // Breathing animation (deshabilitado si hay una máscara o header activo)
+    const shouldDisableBreathing = this.masks.some(m => (m.type === 'mask' || m.type === 'header') && m.isActive);
     const parts = this.avatarNodes;
+    
+    if (!shouldDisableBreathing) {
+      const breathCycle = Math.sin(this.breathingTime * 0.5);
+      const breathIntensity = 0.05;
 
-    // Spine breathing
-    if (parts['Spine']) parts['Spine'].rotation.x = breathCycle * breathIntensity * 0.2;
-    if (parts['Spine1']) parts['Spine1'].rotation.x = breathCycle * breathIntensity * 0.2;
+      // Spine breathing
+      if (parts['Spine']) parts['Spine'].rotation.x = breathCycle * breathIntensity * 0.2;
+      if (parts['Spine1']) parts['Spine1'].rotation.x = breathCycle * breathIntensity * 0.2;
 
-    // Spine2 with face tracking lean
-    if (parts['Spine2'] && rotation) {
-      const baseRotX = rotation.x / 10;
-      const baseRotY = -rotation.y / 10;
-      const baseRotZ = -rotation.z / 10;
-      parts['Spine2'].rotation.set(
-        baseRotX + breathCycle * breathIntensity,
-        baseRotY,
-        baseRotZ
-      );
+      // Spine2 with face tracking lean
+      if (parts['Spine2'] && rotation) {
+        const baseRotX = rotation.x / 10;
+        const baseRotY = -rotation.y / 10;
+        const baseRotZ = -rotation.z / 10;
+        parts['Spine2'].rotation.set(
+          baseRotX + breathCycle * breathIntensity,
+          baseRotY,
+          baseRotZ
+        );
+      }
+    } else if (rotation) {
+      // Si hay máscara activa, aplicar solo la inclinación del face tracking sin respiración
+      if (parts['Spine2']) {
+        const baseRotX = rotation.x / 10;
+        const baseRotY = -rotation.y / 10;
+        const baseRotZ = -rotation.z / 10;
+        parts['Spine2'].rotation.set(baseRotX, baseRotY, baseRotZ);
+      }
     }
 
     // Face tracking rotations
     if (rotation) {
       if (parts['Head']) parts['Head'].rotation.set(rotation.x, -rotation.y, -rotation.z);
       if (parts['Neck']) parts['Neck'].rotation.set(rotation.x / 5 + 0.3, -rotation.y / 5, -rotation.z / 5);
-      
-      }
+    }
     
     this.breathingTime += 0.016;
   }
@@ -2308,25 +2319,37 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy, OnInit {
       });
     }
 
-    // Breathing animation
-    const breathCycle = Math.sin(this.headerBreathingTime * 0.5);
-    const breathIntensity = 0.05;
+    // Breathing animation (deshabilitado si hay una máscara o header activo)
+    const shouldDisableBreathing = this.masks.some(m => (m.type === 'mask' || m.type === 'header') && m.isActive);
     const parts = this.headerNodes;
+    
+    if (!shouldDisableBreathing) {
+      const breathCycle = Math.sin(this.headerBreathingTime * 0.5);
+      const breathIntensity = 0.05;
 
-    // Spine breathing (si tiene huesos de spine)
-    if (parts['Spine']) parts['Spine'].rotation.x = breathCycle * breathIntensity * 0.2;
-    if (parts['Spine1']) parts['Spine1'].rotation.x = breathCycle * breathIntensity * 0.2;
+      // Spine breathing (si tiene huesos de spine)
+      if (parts['Spine']) parts['Spine'].rotation.x = breathCycle * breathIntensity * 0.2;
+      if (parts['Spine1']) parts['Spine1'].rotation.x = breathCycle * breathIntensity * 0.2;
 
-    // Spine2 with face tracking lean
-    if (parts['Spine2'] && rotation) {
-      const baseRotX = rotation.x / 10;
-      const baseRotY = -rotation.y / 10;
-      const baseRotZ = -rotation.z / 10;
-      parts['Spine2'].rotation.set(
-        baseRotX + breathCycle * breathIntensity,
-        baseRotY,
-        baseRotZ
-      );
+      // Spine2 with face tracking lean
+      if (parts['Spine2'] && rotation) {
+        const baseRotX = rotation.x / 10;
+        const baseRotY = -rotation.y / 10;
+        const baseRotZ = -rotation.z / 10;
+        parts['Spine2'].rotation.set(
+          baseRotX + breathCycle * breathIntensity,
+          baseRotY,
+          baseRotZ
+        );
+      }
+    } else if (rotation) {
+      // Si hay máscara activa, aplicar solo la inclinación del face tracking sin respiración
+      if (parts['Spine2']) {
+        const baseRotX = rotation.x / 10;
+        const baseRotY = -rotation.y / 10;
+        const baseRotZ = -rotation.z / 10;
+        parts['Spine2'].rotation.set(baseRotX, baseRotY, baseRotZ);
+      }
     }
 
     // Face tracking rotations
@@ -2453,25 +2476,37 @@ export class ArMaskComponent implements AfterViewInit, OnDestroy, OnInit {
       });
     }
 
-    // Breathing animation
-    const breathCycle = Math.sin(this.avatar1BreathingTime * 0.5);
-    const breathIntensity = 0.05;
+    // Breathing animation (deshabilitado si hay una máscara o header activo)
+    const shouldDisableBreathing = this.masks.some(m => (m.type === 'mask' || m.type === 'header') && m.isActive);
     const parts = this.avatar1Nodes;
+    
+    if (!shouldDisableBreathing) {
+      const breathCycle = Math.sin(this.avatar1BreathingTime * 0.5);
+      const breathIntensity = 0.05;
 
-    // Spine breathing
-    if (parts['Spine']) parts['Spine'].rotation.x = breathCycle * breathIntensity * 0.2;
-    if (parts['Spine1']) parts['Spine1'].rotation.x = breathCycle * breathIntensity * 0.2;
+      // Spine breathing
+      if (parts['Spine']) parts['Spine'].rotation.x = breathCycle * breathIntensity * 0.2;
+      if (parts['Spine1']) parts['Spine1'].rotation.x = breathCycle * breathIntensity * 0.2;
 
-    // Spine2 with face tracking lean
-    if (parts['Spine2'] && rotation) {
-      const baseRotX = rotation.x / 10;
-      const baseRotY = -rotation.y / 10;
-      const baseRotZ = -rotation.z / 10;
-      parts['Spine2'].rotation.set(
-        baseRotX + breathCycle * breathIntensity,
-        baseRotY,
-        baseRotZ
-      );
+      // Spine2 with face tracking lean
+      if (parts['Spine2'] && rotation) {
+        const baseRotX = rotation.x / 10;
+        const baseRotY = -rotation.y / 10;
+        const baseRotZ = -rotation.z / 10;
+        parts['Spine2'].rotation.set(
+          baseRotX + breathCycle * breathIntensity,
+          baseRotY,
+          baseRotZ
+        );
+      }
+    } else if (rotation) {
+      // Si hay máscara activa, aplicar solo la inclinación del face tracking sin respiración
+      if (parts['Spine2']) {
+        const baseRotX = rotation.x / 10;
+        const baseRotY = -rotation.y / 10;
+        const baseRotZ = -rotation.z / 10;
+        parts['Spine2'].rotation.set(baseRotX, baseRotY, baseRotZ);
+      }
     }
 
     // Face tracking rotations
