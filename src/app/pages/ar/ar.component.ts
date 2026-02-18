@@ -592,11 +592,12 @@ export class ArPageComponent implements AfterViewInit, OnDestroy {
           : 0;
         console.log(`Loading progress: ${percent.toFixed(2)}%`);
       },
-      (error) => {
+      (error: unknown) => {
         console.error('Error loading model:', path, error);
+        const errorObj = error instanceof Error ? error : new Error(String(error));
         console.error('Full error details:', {
-          message: error.message,
-          stack: error.stack,
+          message: errorObj.message,
+          stack: errorObj.stack,
           path: path
         });
       }
