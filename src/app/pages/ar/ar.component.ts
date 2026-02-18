@@ -1,15 +1,9 @@
-import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, inject } from '@angular/core';
+import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, inject, ChangeDetectorRef, NgZone } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { RouterLink } from '@angular/router';
-import { HttpClient } from '@angular/common/http';
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/examples/jsm/loaders/GLTFLoader.js';
-
-interface ModelInfo {
-  name: string;
-  path: string;
-  displayName: string;
-}
+import { ModelCacheService, ModelInfo } from '../../services/model-cache.service';
 
 @Component({
     selector: 'app-ar-page',
@@ -25,23 +19,49 @@ interface ModelInfo {
       <a routerLink="/" class="back-btn">← Volver</a>
 
       <!-- Model Selector Toolbar -->
-      <div class="model-toolbar">
-        <h3>Seleccionar Modelo</h3>
-        <div class="model-buttons">
-          <button 
-            *ngFor="let model of models" 
-            (click)="loadModel(model.path)"
-            [class.active]="currentModelPath === model.path"
-            class="model-btn">
-            {{ model.displayName }}
-          </button>
+      <div class="model-toolbar" [class.collapsed]="isPanelCollapsed">
+        <button class="toggle-panel-btn" (click)="togglePanel()" title="Expandir/Colapsar">
+          <span *ngIf="isPanelCollapsed">◀</span>
+          <span *ngIf="!isPanelCollapsed">▶</span>
+        </button>
+        
+        <div class="toolbar-content">
+          <h3>Modelos Disponibles</h3>
+          
+          <!-- Loading state -->
+          <div *ngIf="isLoadingModels" class="loading-state">
+            <div class="spinner"></div>
+            <p>Cargando modelos...</p>
+          </div>
+          
+          <!-- Model list -->
+          <div class="model-buttons" *ngIf="!isLoadingModels">
+            <button 
+              *ngFor="let model of models" 
+              (click)="loadModel(model.storagePath)"
+              [class.active]="currentModelPath === model.storagePath"
+              [disabled]="isLoadingModel"
+              class="model-btn">
+              {{ model.displayName }}
+            </button>
+            
+            <div *ngIf="models.length === 0" class="no-models">
+              No hay modelos disponibles
+            </div>
+          </div>
         </div>
       </div>
 
       <!-- Rotation Controls -->
-      <div class="rotation-controls" *ngIf="currentModelPath">
-        <h3>Rotación Automática</h3>
-        <div class="rotation-buttons">
+      <div class="rotation-controls" [class.collapsed]="isControlsCollapsed" *ngIf="currentModelPath">
+        <button class="toggle-controls-btn" (click)="toggleControls()" title="Expandir/Colapsar controles">
+          <span *ngIf="isControlsCollapsed">⬆</span>
+          <span *ngIf="!isControlsCollapsed">⬇</span>
+        </button>
+        
+        <div class="controls-content">
+          <h3>Rotación Automática</h3>
+          <div class="rotation-buttons">
           <button 
             (click)="toggleRotation('left')"
             [class.active]="isRotating && rotationDirection === 'left'"
@@ -60,8 +80,9 @@ interface ModelInfo {
             class="rotation-btn">
             Rotar Derecha →
           </button>
+          </div>
+          <p class="drag-hint">💡 Arrastra para rotar | 🖱️ Rueda/📱 Pinch para zoom</p>
         </div>
-        <p class="drag-hint">💡 Arrastra para rotar | 🖱️ Rueda/📱 Pinch para zoom</p>
       </div>
     </div>
   `,
@@ -130,6 +151,62 @@ interface ModelInfo {
       overflow-y: auto;
       scrollbar-width: thin;
       scrollbar-color: rgba(255,255,255,0.3) transparent;
+      transition: all 0.3s ease;
+    }
+
+    .model-toolbar.collapsed {
+      max-width: 60px;
+      min-width: 60px;
+      max-height: 60px;
+      min-height: 60px;
+      padding: 0;
+      overflow: visible;
+      background: transparent;
+      backdrop-filter: none;
+    }
+
+    .model-toolbar.collapsed .toolbar-content {
+      display: none;
+    }
+
+    .toggle-panel-btn {
+      position: absolute;
+      top: 0.5rem;
+      right: 0.5rem;
+      width: 40px;
+      height: 40px;
+      background: rgba(0, 0, 0, 0.9);
+      border: 2px solid rgba(103, 126, 234, 1);
+      border-radius: 50%;
+      color: white;
+      font-size: 1.2rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s ease;
+      z-index: 10;
+      box-shadow: 0 4px 15px rgba(103, 126, 234, 0.5);
+    }
+      justify-content: center;
+      transition: all 0.3s ease;
+      z-index: 10;
+      box-shadow: 0 4px 15px rgba(103, 126, 234, 0.5);
+    }
+
+    .toggle-panel-btn:hover {
+      background: rgba(103, 126, 234, 0.9);
+      transform: scale(1.15);
+      box-shadow: 0 6px 20px rgba(103, 126, 234, 0.8);
+    }
+
+    .toggle-panel-btn span {
+      display: block;
+      line-height: 1;
+    }
+
+    .toolbar-content {
+      margin-top: 2rem;
     }
 
     .model-toolbar::-webkit-scrollbar {
@@ -188,6 +265,40 @@ interface ModelInfo {
       border-color: rgba(103, 126, 234, 1);
     }
 
+    .model-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
+    .loading-state {
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 1rem;
+      padding: 2rem;
+      color: rgba(255, 255, 255, 0.8);
+    }
+
+    .spinner {
+      width: 40px;
+      height: 40px;
+      border: 4px solid rgba(255, 255, 255, 0.2);
+      border-top-color: white;
+      border-radius: 50%;
+      animation: spin 1s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    .no-models {
+      padding: 1rem;
+      text-align: center;
+      color: rgba(255, 255, 255, 0.6);
+      font-size: 0.85rem;
+    }
+
     .rotation-controls {
       position: absolute;
       bottom: 1rem;
@@ -198,6 +309,51 @@ interface ModelInfo {
       border-radius: 15px;
       backdrop-filter: blur(10px);
       z-index: 1000;
+      transition: all 0.3s ease;
+    }
+
+    .rotation-controls.collapsed {
+      padding: 0.5rem;
+    }
+
+    .rotation-controls.collapsed .controls-content {
+      display: none;
+    }
+
+    .toggle-controls-btn {
+      position: absolute;
+      top: -15px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 40px;
+      height: 30px;
+      background: rgba(0, 0, 0, 0.9);
+      border: 2px solid rgba(103, 126, 234, 1);
+      border-radius: 8px 8px 0 0;
+      color: white;
+      font-size: 1.3rem;
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      transition: all 0.3s ease;
+      z-index: 10;
+      box-shadow: 0 -4px 15px rgba(103, 126, 234, 0.5);
+    }
+
+    .toggle-controls-btn:hover {
+      background: rgba(103, 126, 234, 0.9);
+      transform: translateX(-50%) scale(1.1);
+      box-shadow: 0 -6px 20px rgba(103, 126, 234, 0.8);
+    }
+
+    .toggle-controls-btn span {
+      display: block;
+      line-height: 1;
+    }
+
+    .controls-content {
+      transition: all 0.3s ease;
     }
 
     .rotation-controls h3 {
@@ -271,7 +427,9 @@ export class ArPageComponent implements AfterViewInit, OnDestroy {
   @ViewChild('canvas') canvasRef!: ElementRef<HTMLCanvasElement>;
   @ViewChild('canvasContainer') containerRef!: ElementRef<HTMLDivElement>;
 
-  private http = inject(HttpClient);
+  private modelCache = inject(ModelCacheService);
+  private cdr = inject(ChangeDetectorRef);
+  private ngZone = inject(NgZone);
   
   // Three.js elements
   private scene!: THREE.Scene;
@@ -281,20 +439,12 @@ export class ArPageComponent implements AfterViewInit, OnDestroy {
   private animationId: number = 0;
   private currentModel: THREE.Group | null = null;
 
-  // Models list
-  models: ModelInfo[] = [
-    { name: 'glasses', path: 'assets/models/glasses.glb', displayName: '👓 Lentes' },
-    { name: 'hair', path: 'assets/models/hair.glb', displayName: '💇 Cabello' },
-    { name: 'header', path: 'assets/models/header.glb', displayName: '👤 Cabeza' },
-    { name: 'imagen', path: 'assets/models/imagen.glb', displayName: '🖼️ Imagen' },
-    { name: 'mask', path: 'assets/models/mask.glb', displayName: '🎭 Máscara' },
-    { name: 'menu', path: 'assets/models/menu.glb', displayName: '📋 Menú' },
-    { name: 'mustache', path: 'assets/models/mustache.glb', displayName: '🧔 Bigote' },
-    { name: 'pineapple', path: 'assets/models/pineapple.glb', displayName: '🍍 Piña' },
-    { name: 'shirt-normal', path: 'assets/models/shirt normal.glb', displayName: '👕 Camisa' },
-    { name: 'strawberry', path: 'assets/models/strawberry.glb', displayName: '🍓 Fresa' },
-    { name: 'tshirt', path: 'assets/models/tshirt.glb', displayName: '👕 Playera' }
-  ];
+  // Models list (loaded from Firebase Storage)
+  models: ModelInfo[] = [];
+  isLoadingModels: boolean = true;
+  isLoadingModel: boolean = false;
+  isPanelCollapsed: boolean = false;
+  isControlsCollapsed: boolean = false;
 
   currentModelPath: string = '';
   
@@ -316,6 +466,30 @@ export class ArPageComponent implements AfterViewInit, OnDestroy {
     this.initThreeJS();
     this.setupDragControls();
     this.animate();
+    this.loadModelsFromStorage();
+  }
+
+  async loadModelsFromStorage(): Promise<void> {
+    try {
+      this.isLoadingModels = true;
+      this.cdr.detectChanges(); // Forzar detección de cambios
+      console.log('📦 Loading models from Firebase Storage...');
+      this.models = await this.modelCache.listModelsFromStorage();
+      console.log(`✅ Loaded ${this.models.length} models`, this.models);
+    } catch (error) {
+      console.error('Error loading models from storage:', error);
+    } finally {
+      this.isLoadingModels = false;
+      this.cdr.detectChanges(); // Forzar detección de cambios
+    }
+  }
+
+  togglePanel(): void {
+    this.isPanelCollapsed = !this.isPanelCollapsed;
+  }
+
+  toggleControls(): void {
+    this.isControlsCollapsed = !this.isControlsCollapsed;
   }
 
   ngOnDestroy(): void {
@@ -547,61 +721,106 @@ export class ArPageComponent implements AfterViewInit, OnDestroy {
     this.renderer.setSize(container.clientWidth, container.clientHeight);
   }
 
-  loadModel(path: string): void {
-    this.currentModelPath = path;
-
-    // Remove current model
-    if (this.currentModel) {
-      this.scene.remove(this.currentModel);
-      this.currentModel = null;
+  async loadModel(storagePath: string): Promise<void> {
+    if (this.isLoadingModel) {
+      console.log('⏳ Already loading a model, please wait...');
+      return;
     }
 
-    // Reset scale
-    this.modelScale = 1;
+    try {
+      this.isLoadingModel = true;
+      this.currentModelPath = storagePath;
+      this.cdr.detectChanges();
 
-    console.log('Loading model from:', path);
-
-    // Load new model
-    this.loader.load(
-      path,
-      (gltf) => {
-        console.log('Model loaded successfully:', path);
-        this.currentModel = gltf.scene;
-        
-        // Center and scale model
-        const box = new THREE.Box3().setFromObject(this.currentModel);
-        const center = box.getCenter(new THREE.Vector3());
-        const size = box.getSize(new THREE.Vector3());
-        
-        const maxDim = Math.max(size.x, size.y, size.z);
-        const scale = 2 / maxDim;
-        
-        this.currentModel.scale.multiplyScalar(scale);
-        
-        // Center the model
-        this.currentModel.position.sub(center.multiplyScalar(scale));
-        
-        // Store the base scale for later modifications
-        this.modelScale = scale;
-        
-        this.scene.add(this.currentModel);
-      },
-      (progress) => {
-        const percent = progress.loaded && progress.total 
-          ? (progress.loaded / progress.total) * 100 
-          : 0;
-        console.log(`Loading progress: ${percent.toFixed(2)}%`);
-      },
-      (error: unknown) => {
-        console.error('Error loading model:', path, error);
-        const errorObj = error instanceof Error ? error : new Error(String(error));
-        console.error('Full error details:', {
-          message: errorObj.message,
-          stack: errorObj.stack,
-          path: path
-        });
+      // Remove current model
+      if (this.currentModel) {
+        this.scene.remove(this.currentModel);
+        this.currentModel = null;
       }
-    );
+
+      // Reset scale
+      this.modelScale = 1;
+
+      console.log('📥 Loading model from Firebase Storage:', storagePath);
+
+      // Get URL from cache or Firebase Storage
+      const modelUrl = await this.modelCache.getModelBlob(storagePath);
+      
+      console.log('🔄 Loading model into scene from URL...');
+
+      // Load model directly (may be blob URL from cache or Firebase download URL)
+      this.loader.load(
+        modelUrl,
+        (gltf) => {
+          this.ngZone.run(() => {
+            console.log('✅ Model loaded successfully into scene');
+            this.currentModel = gltf.scene;
+            
+            // Center and scale model
+            const box = new THREE.Box3().setFromObject(this.currentModel);
+            const center = box.getCenter(new THREE.Vector3());
+            const size = box.getSize(new THREE.Vector3());
+            
+            const maxDim = Math.max(size.x, size.y, size.z);
+            const scale = 2 / maxDim;
+            
+            this.currentModel.scale.multiplyScalar(scale);
+            
+            // Center the model
+            this.currentModel.position.sub(center.multiplyScalar(scale));
+            
+            // Store the base scale for later modifications
+            this.modelScale = scale;
+            
+            this.scene.add(this.currentModel);
+            
+            // If it's a blob URL, revoke it to free memory
+            if (modelUrl.startsWith('blob:')) {
+              URL.revokeObjectURL(modelUrl);
+            } else {
+              // If it's a Firebase URL, try to cache it for next time
+              this.modelCache.cacheModelFromUrl(storagePath, modelUrl).catch(err => {
+                console.warn('Could not cache model:', err);
+              });
+            }
+            
+            this.isLoadingModel = false;
+            this.cdr.detectChanges();
+          });
+        },
+        (progress) => {
+          const percent = progress.loaded && progress.total 
+            ? (progress.loaded / progress.total) * 100 
+            : 0;
+          if (percent > 0) {
+            console.log(`Loading into scene: ${percent.toFixed(2)}%`);
+          }
+        },
+        (error: unknown) => {
+          this.ngZone.run(() => {
+            console.error('❌ Error loading model into scene:', error);
+            const errorObj = error instanceof Error ? error : new Error(String(error));
+            console.error('Full error details:', {
+              message: errorObj.message,
+              stack: errorObj.stack,
+              storagePath: storagePath,
+              modelUrl: modelUrl
+            });
+            
+            // If it's a blob URL, revoke it even on error
+            if (modelUrl.startsWith('blob:')) {
+              URL.revokeObjectURL(modelUrl);
+            }
+            
+            this.isLoadingModel = false;
+            this.cdr.detectChanges();
+          });
+        }
+      );
+    } catch (error) {
+      console.error('❌ Error getting model blob:', error);
+      this.isLoadingModel = false;
+    }
   }
 
   toggleRotation(direction: 'left' | 'right'): void {
