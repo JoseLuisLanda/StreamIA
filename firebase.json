@@ -6,6 +6,30 @@
       "**/.*",
       "**/node_modules/**"
     ],
+    "headers": [
+      {
+        "source": "**/*.@(glb|gltf)",
+        "headers": [
+          {
+            "key": "Content-Type",
+            "value": "model/gltf-binary"
+          },
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=31536000"
+          }
+        ]
+      },
+      {
+        "source": "**/*.@(jpg|jpeg|gif|png|webp)",
+        "headers": [
+          {
+            "key": "Cache-Control",
+            "value": "public, max-age=31536000"
+          }
+        ]
+      }
+    ],
     "rewrites": [
       {
         "source": "**",
