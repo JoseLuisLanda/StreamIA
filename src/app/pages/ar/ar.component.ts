@@ -26,12 +26,12 @@ import { ModelCacheService, ModelInfo } from '../../services/model-cache.service
         </button>
         
         <div class="toolbar-content">
-          <h3>Modelos Disponibles</h3>
+          <h3>Modelos 3D</h3>
           
           <!-- Loading state -->
           <div *ngIf="isLoadingModels" class="loading-state">
             <div class="spinner"></div>
-            <p>Cargando modelos...</p>
+            <p class="loading-text">Cargando...</p>
           </div>
           
           <!-- Model list -->
@@ -55,33 +55,33 @@ import { ModelCacheService, ModelInfo } from '../../services/model-cache.service
       <!-- Rotation Controls -->
       <div class="rotation-controls" [class.collapsed]="isControlsCollapsed" *ngIf="currentModelPath">
         <button class="toggle-controls-btn" (click)="toggleControls()" title="Expandir/Colapsar controles">
-          <span *ngIf="isControlsCollapsed">⬆</span>
-          <span *ngIf="!isControlsCollapsed">⬇</span>
+          <span *ngIf="isControlsCollapsed">⬇</span>
+          <span *ngIf="!isControlsCollapsed">⬆</span>
         </button>
         
         <div class="controls-content">
-          <h3>Rotación Automática</h3>
+          <h3>Auto-Rotación</h3>
           <div class="rotation-buttons">
           <button 
             (click)="toggleRotation('left')"
             [class.active]="isRotating && rotationDirection === 'left'"
             class="rotation-btn">
-            ← Rotar Izquierda
+            ← Izq
           </button>
           <button 
             (click)="stopRotation()"
             [class.active]="!isRotating"
             class="rotation-btn stop-btn">
-            ⏸ Detener
+            ⏸ Stop
           </button>
           <button 
             (click)="toggleRotation('right')"
             [class.active]="isRotating && rotationDirection === 'right'"
             class="rotation-btn">
-            Rotar Derecha →
+            Der →
           </button>
           </div>
-          <p class="drag-hint">💡 Arrastra para rotar | 🖱️ Rueda/📱 Pinch para zoom</p>
+          <p class="drag-hint">💡 Arrastra | 🖱️ Rueda/📱 Pinch zoom</p>
         </div>
       </div>
     </div>
@@ -119,17 +119,19 @@ import { ModelCacheService, ModelInfo } from '../../services/model-cache.service
 
     .back-btn {
       position: absolute;
-      top: 1rem;
-      left: 1rem;
+      top: 0.75rem;
+      left: 0.75rem;
       z-index: 2000;
       color: white;
       text-decoration: none;
-      background: rgba(0,0,0,0.7);
-      padding: 0.75rem 1.5rem;
-      border-radius: 25px;
+      background: rgba(0,0,0,0.75);
+      padding: 0.5rem 1rem;
+      border-radius: 20px;
       font-family: sans-serif;
+      font-size: 0.85rem;
       font-weight: 600;
       transition: all 0.3s ease;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.3);
     }
 
     .back-btn:hover {
@@ -139,26 +141,27 @@ import { ModelCacheService, ModelInfo } from '../../services/model-cache.service
 
     .model-toolbar {
       position: absolute;
-      top: 1rem;
-      right: 1rem;
-      background: rgba(0,0,0,0.8);
-      padding: 1rem;
-      border-radius: 15px;
+      top: 0.75rem;
+      right: 0.75rem;
+      background: rgba(0,0,0,0.85);
+      padding: 0.5rem;
+      border-radius: 12px;
       backdrop-filter: blur(10px);
       z-index: 1000;
-      max-width: 300px;
-      max-height: calc(100vh - 2rem);
+      max-width: 200px;
+      max-height: calc(100vh - 10rem);
       overflow-y: auto;
       scrollbar-width: thin;
       scrollbar-color: rgba(255,255,255,0.3) transparent;
       transition: all 0.3s ease;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
     }
 
     .model-toolbar.collapsed {
-      max-width: 60px;
-      min-width: 60px;
-      max-height: 60px;
-      min-height: 60px;
+      max-width: 45px;
+      min-width: 45px;
+      max-height: 45px;
+      min-height: 45px;
       padding: 0;
       overflow: visible;
       background: transparent;
@@ -171,27 +174,22 @@ import { ModelCacheService, ModelInfo } from '../../services/model-cache.service
 
     .toggle-panel-btn {
       position: absolute;
-      top: 0.5rem;
-      right: 0.5rem;
-      width: 40px;
-      height: 40px;
+      top: 0.25rem;
+      right: 0.25rem;
+      width: 35px;
+      height: 35px;
       background: rgba(0, 0, 0, 0.9);
       border: 2px solid rgba(103, 126, 234, 1);
       border-radius: 50%;
       color: white;
-      font-size: 1.2rem;
+      font-size: 1rem;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
       transition: all 0.3s ease;
       z-index: 10;
-      box-shadow: 0 4px 15px rgba(103, 126, 234, 0.5);
-    }
-      justify-content: center;
-      transition: all 0.3s ease;
-      z-index: 10;
-      box-shadow: 0 4px 15px rgba(103, 126, 234, 0.5);
+      box-shadow: 0 3px 10px rgba(103, 126, 234, 0.4);
     }
 
     .toggle-panel-btn:hover {
@@ -206,7 +204,8 @@ import { ModelCacheService, ModelInfo } from '../../services/model-cache.service
     }
 
     .toolbar-content {
-      margin-top: 2rem;
+      margin-top: 2.5rem;
+      padding: 0.25rem;
     }
 
     .model-toolbar::-webkit-scrollbar {
@@ -228,30 +227,34 @@ import { ModelCacheService, ModelInfo } from '../../services/model-cache.service
 
     .model-toolbar h3 {
       color: white;
-      margin: 0 0 0.75rem 0;
-      font-size: 0.9rem;
+      margin: 0 0 0.5rem 0;
+      font-size: 0.7rem;
       font-family: sans-serif;
       text-transform: uppercase;
-      letter-spacing: 1px;
+      letter-spacing: 0.5px;
+      opacity: 0.9;
     }
 
     .model-buttons {
       display: flex;
       flex-direction: column;
-      gap: 0.5rem;
+      gap: 0.35rem;
     }
 
     .model-btn {
-      padding: 0.6rem 1rem;
-      background: rgba(255,255,255,0.1);
+      padding: 0.4rem 0.65rem;
+      background: rgba(255,255,255,0.08);
       color: white;
-      border: 2px solid rgba(255,255,255,0.2);
-      border-radius: 10px;
+      border: 1.5px solid rgba(255,255,255,0.2);
+      border-radius: 8px;
       cursor: pointer;
       font-family: sans-serif;
-      font-size: 0.85rem;
-      transition: all 0.3s ease;
+      font-size: 0.75rem;
+      transition: all 0.2s ease;
       text-align: left;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
     }
 
     .model-btn:hover {
@@ -274,15 +277,21 @@ import { ModelCacheService, ModelInfo } from '../../services/model-cache.service
       display: flex;
       flex-direction: column;
       align-items: center;
-      gap: 1rem;
-      padding: 2rem;
+      gap: 0.5rem;
+      padding: 1rem;
       color: rgba(255, 255, 255, 0.8);
     }
 
+    .loading-text {
+      margin: 0;
+      font-size: 0.7rem;
+      font-family: sans-serif;
+    }
+
     .spinner {
-      width: 40px;
-      height: 40px;
-      border: 4px solid rgba(255, 255, 255, 0.2);
+      width: 25px;
+      height: 25px;
+      border: 3px solid rgba(255, 255, 255, 0.2);
       border-top-color: white;
       border-radius: 50%;
       animation: spin 1s linear infinite;
@@ -293,27 +302,32 @@ import { ModelCacheService, ModelInfo } from '../../services/model-cache.service
     }
 
     .no-models {
-      padding: 1rem;
+      padding: 0.5rem;
       text-align: center;
       color: rgba(255, 255, 255, 0.6);
-      font-size: 0.85rem;
+      font-size: 0.7rem;
     }
 
     .rotation-controls {
       position: absolute;
-      bottom: 1rem;
+      top: 0.75rem;
       left: 50%;
       transform: translateX(-50%);
-      background: rgba(0,0,0,0.8);
-      padding: 1rem 1.5rem;
-      border-radius: 15px;
+      background: rgba(0,0,0,0.85);
+      padding: 0.5rem 0.75rem;
+      border-radius: 12px;
       backdrop-filter: blur(10px);
-      z-index: 1000;
+      z-index: 999;
       transition: all 0.3s ease;
+      box-shadow: 0 4px 12px rgba(0,0,0,0.4);
+      max-width: 90%;
     }
 
     .rotation-controls.collapsed {
-      padding: 0.5rem;
+      padding: 0;
+      background: transparent;
+      backdrop-filter: none;
+      box-shadow: none;
     }
 
     .rotation-controls.collapsed .controls-content {
@@ -322,29 +336,29 @@ import { ModelCacheService, ModelInfo } from '../../services/model-cache.service
 
     .toggle-controls-btn {
       position: absolute;
-      top: -15px;
+      bottom: -12px;
       left: 50%;
       transform: translateX(-50%);
-      width: 40px;
-      height: 30px;
+      width: 35px;
+      height: 25px;
       background: rgba(0, 0, 0, 0.9);
       border: 2px solid rgba(103, 126, 234, 1);
-      border-radius: 8px 8px 0 0;
+      border-radius: 0 0 8px 8px;
       color: white;
-      font-size: 1.3rem;
+      font-size: 1.1rem;
       cursor: pointer;
       display: flex;
       align-items: center;
       justify-content: center;
       transition: all 0.3s ease;
       z-index: 10;
-      box-shadow: 0 -4px 15px rgba(103, 126, 234, 0.5);
+      box-shadow: 0 3px 10px rgba(103, 126, 234, 0.4);
     }
 
     .toggle-controls-btn:hover {
       background: rgba(103, 126, 234, 0.9);
       transform: translateX(-50%) scale(1.1);
-      box-shadow: 0 -6px 20px rgba(103, 126, 234, 0.8);
+      box-shadow: 0 6px 20px rgba(103, 126, 234, 0.8);
     }
 
     .toggle-controls-btn span {
@@ -358,40 +372,44 @@ import { ModelCacheService, ModelInfo } from '../../services/model-cache.service
 
     .rotation-controls h3 {
       color: white;
-      margin: 0 0 0.75rem 0;
-      font-size: 0.9rem;
+      margin: 0 0 0.4rem 0;
+      font-size: 0.7rem;
       font-family: sans-serif;
       text-align: center;
       text-transform: uppercase;
-      letter-spacing: 1px;
+      letter-spacing: 0.5px;
+      opacity: 0.9;
     }
 
     .rotation-buttons {
       display: flex;
-      gap: 0.75rem;
+      gap: 0.4rem;
       align-items: center;
+      justify-content: center;
+      flex-wrap: wrap;
     }
 
     .drag-hint {
-      margin: 0.75rem 0 0 0;
+      margin: 0.4rem 0 0 0;
       padding: 0;
-      font-size: 0.8rem;
-      color: rgba(255, 255, 255, 0.6);
+      font-size: 0.65rem;
+      color: rgba(255, 255, 255, 0.5);
       text-align: center;
       font-style: italic;
+      line-height: 1.3;
     }
 
     .rotation-btn {
-      padding: 0.75rem 1.25rem;
-      background: rgba(255,255,255,0.1);
+      padding: 0.4rem 0.75rem;
+      background: rgba(255,255,255,0.08);
       color: white;
-      border: 2px solid rgba(255,255,255,0.2);
-      border-radius: 10px;
+      border: 1.5px solid rgba(255,255,255,0.2);
+      border-radius: 8px;
       cursor: pointer;
       font-family: sans-serif;
-      font-size: 0.9rem;
+      font-size: 0.7rem;
       font-weight: 600;
-      transition: all 0.3s ease;
+      transition: all 0.2s ease;
       white-space: nowrap;
     }
 
