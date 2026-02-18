@@ -559,10 +559,13 @@ export class ArPageComponent implements AfterViewInit, OnDestroy {
     // Reset scale
     this.modelScale = 1;
 
+    console.log('Loading model from:', path);
+
     // Load new model
     this.loader.load(
       path,
       (gltf) => {
+        console.log('Model loaded successfully:', path);
         this.currentModel = gltf.scene;
         
         // Center and scale model
@@ -583,9 +586,19 @@ export class ArPageComponent implements AfterViewInit, OnDestroy {
         
         this.scene.add(this.currentModel);
       },
-      undefined,
+      (progress) => {
+        const percent = progress.loaded && progress.total 
+          ? (progress.loaded / progress.total) * 100 
+          : 0;
+        console.log(`Loading progress: ${percent.toFixed(2)}%`);
+      },
       (error) => {
-        console.error('Error loading model:', error);
+        console.error('Error loading model:', path, error);
+        console.error('Full error details:', {
+          message: error.message,
+          stack: error.stack,
+          path: path
+        });
       }
     );
   }
