@@ -61,10 +61,14 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
     private breathingTime = 0;
     private lastFrameTime = performance.now();
 
-    // smoothed morph state (decays to 0 -> neutral mouth when idle)
-    private morphState: Record<string, number> = {};
+    // smoothed mouth state, owned exclusively by lipsync (MOUTH_KEYS only)
+    private mouthState: Record<string, number> = {};
+    // smoothed gesture morph state, owned by the gesture player (brows/eyes/etc.)
+    private gestureMorphState: Record<string, number> = {};
     // gesture morph keys ever touched (so released channels decay to 0)
     private gestureKeys = new Set<string>();
+    // final combined influences written to the mesh each frame
+    private morphState: Record<string, number> = {};
 
     // blinking
     private nextBlinkAt = performance.now() + 2000;
@@ -99,7 +103,7 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
 
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(25, width / height, 0.1, 1000);
-        this.camera.position.set(0, 0.1, 2.5); // same framing as avatar-viewer (chest-up)
+        this.camera.position.set(0, -.15, 1.25); // moved closer (~2x larger framing, head-and-shoulders)
 
         this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         this.renderer.setSize(width, height);
@@ -215,24 +219,24 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
         this.lastFrameTime = now;
         this.breathingTime += dt;
 
-        // --- mouth: targets from TTS service, exponential smoothing ---
+        // --- mouth: targets from TTS service, exponential smoothing (lipsync owns these) ---
         const targets = this.tts.getMouthWeights();
         // snappy attack, slightly slower release feels more natural
         const sUp = 1 - Math.exp(-dt * 30);
         const sDown = 1 - Math.exp(-dt * 18);
         for (const key of MOUTH_KEYS) {
             const target = targets[key] ?? 0;
-            const cur = this.morphState[key] ?? 0;
-            this.morphState[key] = cur + (target - cur) * (target > cur ? sUp : sDown);
+            const cur = this.mouthState[key] ?? 0;
+            this.mouthState[key] = cur + (target - cur) * (target > cur ? sUp : sDown);
         }
 
-        // --- gestures (brows/eyes + head offsets), additive with lipsync ---
+        // --- gestures (brows/eyes + head offsets), smoothed in their own state ---
         const g = this.gestures.sample();
         for (const key of Object.keys(g.morphs)) this.gestureKeys.add(key);
         for (const key of this.gestureKeys) {
             const target = g.morphs[key] ?? 0;
-            const cur = this.morphState[key] ?? 0;
-            this.morphState[key] = cur + (target - cur) * sUp;
+            const cur = this.gestureMorphState[key] ?? 0;
+            this.gestureMorphState[key] = cur + (target - cur) * sUp;
         }
 
         // --- blinking ---
@@ -247,8 +251,20 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
                 blink = Math.sin(p * Math.PI); // 0->1->0
             }
         }
-        this.morphState['eyeBlinkLeft'] = blink;
-        this.morphState['eyeBlinkRight'] = blink;
+
+        // --- combine: mouth (lipsync) + gestures (additive) + blink (max on eyelids) ---
+        // Rebuilt fresh each frame so gestures can never zero-out the mouth and vice versa.
+        const combined: Record<string, number> = {};
+        for (const key of MOUTH_KEYS) combined[key] = this.mouthState[key] ?? 0;
+        for (const key of this.gestureKeys) {
+            combined[key] = (combined[key] ?? 0) + (this.gestureMorphState[key] ?? 0);
+        }
+        combined['eyeBlinkLeft'] = Math.max(combined['eyeBlinkLeft'] ?? 0, blink);
+        combined['eyeBlinkRight'] = Math.max(combined['eyeBlinkRight'] ?? 0, blink);
+        for (const key of Object.keys(combined)) {
+            combined[key] = Math.max(0, Math.min(1, combined[key]));
+        }
+        this.morphState = combined;
 
         // --- apply morphs ---
         if (this.headMesh.length > 0) {

@@ -4,14 +4,15 @@
  * SCHEMA
  * ------
  * GestureDef:
- *   id              unique gesture id used in markup: [id]:[seconds]:[speed]
- *   defaultDuration seconds used when markup omits/invalidates duration
- *   defaultSpeed    preset name ('slow'|'normal'|'fast') used when markup omits speed
- *   loopable        if true, the keyframe cycle repeats to fill the requested duration
- *   returnDuration  seconds for smooth return-to-neutral when gesture is cut mid-cycle
- *   entryEasing     easing curve for entry: 'none'|'ease-in-cubic'|'ease-in-out-cubic'
- *   exitEasing      easing curve for exit: 'none'|'ease-out-cubic'|'ease-out-quad'
- *   channels        animation channels, each fully independent:
+ *   id                unique gesture id used in markup: [id]:[repetitions]:[speed]
+ *   defaultRepetitions integer cycle count used when markup omits/invalidates repetitions
+ *   defaultSpeed      preset name ('slow'|'normal'|'fast') used when markup omits speed
+ *   returnDuration    seconds for the smooth return-to-neutral exit blend (also used when a
+ *                     new gesture cancels this one mid-cycle)
+ *   entryEasing       easing curve for entry: 'none'|'ease-in-cubic'|'ease-in-out-cubic'
+ *   exitEasing        easing curve for exit: 'none'|'ease-out-cubic'|'ease-out-quad'
+ *   allowMouth        optional, explicit escape hatch for non-speech expression clips
+ *   channels          animation channels, each fully independent:
  *     type 'morph'  -> target is an ARKit blendshape name (brows/eyes only;
  *                      mouth/jaw channels are rejected at runtime so gestures
  *                      can NEVER overwrite lipsync visemes)
@@ -25,9 +26,13 @@
  *                   First and last v should be 0 to return to neutral.
  *
  * Speed multipliers (global config, tunable per project):
- *   slow:   0.5x  -> motion takes 2x longer, half as many cycles in the window
- *   normal: 1.0x  -> baseline motion speed
- *   fast:   1.5x  -> motion takes 2/3 time, 1.5x cycles in the window
+ *   slow:   0.5x  -> each cycle takes 2x longer
+ *   normal: 1.0x  -> baseline cycle speed
+ *   fast:   1.5x  -> each cycle takes 2/3 the time
+ *
+ * One repetition = one full pass through the keyframe curve (phase 0 -> 1). A gesture plays
+ * exactly `repetitions` full cycles, then settles at neutral (keyframes start/end at 0). Speed
+ * only changes how fast each cycle plays, so total play time = repetitions / speed cycles.
  *
  * Adding a new gesture = adding one entry to GESTURE_LIBRARY. No code changes.
  */
@@ -48,6 +53,12 @@ export const SPEED_MULTIPLIERS: Record<SpeedPreset, number> = {
 export const SPEED_MULTIPLIER_MIN = 0.1;
 export const SPEED_MULTIPLIER_MAX = 3.0;
 
+/**
+ * Wall-clock seconds for one full cycle at speed 1.0. Total gesture time is
+ * repetitions * CYCLE_BASE_SECONDS / speedMultiplier. Tunable per project.
+ */
+export const CYCLE_BASE_SECONDS = 1.0;
+
 export interface GestureKeyframe {
     /** normalized time 0..1 */
     t: number;
@@ -64,25 +75,26 @@ export interface GestureChannel {
 
 export interface GestureDef {
     id: string;
-    defaultDuration: number;
+    /** integer cycle count used when markup omits/invalidates the repetition param */
+    defaultRepetitions: number;
     defaultSpeed?: SpeedPreset;
-    loopable: boolean;
-    /** time to smoothly return to neutral when cut mid-cycle (seconds) */
+    /** seconds for the smooth return-to-neutral exit blend (also used on cancel) */
     returnDuration: number;
     /** easing applied when entering the gesture from neutral */
     entryEasing: EasingType;
     /** easing applied when exiting back to neutral */
     exitEasing: EasingType;
+    /** permit mouth/jaw morph channels when the scheduler marks the gesture as non-speech */
+    allowMouth?: boolean;
     channels: GestureChannel[];
 }
 
 export const GESTURE_LIBRARY: GestureDef[] = [
     {
-        // head shake: yaw left -> right -> left, loopable for multi-cycle shakes
+        // head shake: yaw left -> right -> left, one full cycle per repetition
         id: 'no',
-        defaultDuration: 1.6,
+        defaultRepetitions: 1,
         defaultSpeed: 'normal',
-        loopable: true, // keeps cycling while duration allows
         returnDuration: 0.3,
         entryEasing: 'ease-in-cubic',
         exitEasing: 'ease-out-cubic',
@@ -97,11 +109,10 @@ export const GESTURE_LIBRARY: GestureDef[] = [
         ],
     },
     {
-        // head nod: pitch down -> up -> down, loopable for multi-cycle nods
+        // head nod: pitch down -> up -> down, one full cycle per repetition
         id: 'yes',
-        defaultDuration: 1.4,
+        defaultRepetitions: 1,
         defaultSpeed: 'normal',
-        loopable: true, // keeps cycling while duration allows
         returnDuration: 0.3,
         entryEasing: 'ease-in-cubic',
         exitEasing: 'ease-out-cubic',
@@ -118,9 +129,8 @@ export const GESTURE_LIBRARY: GestureDef[] = [
     {
         // raise both eyebrows + widen eyes, hold, release (one-shot)
         id: 'surprise',
-        defaultDuration: 1.5,
-        defaultSpeed: 'normal',
-        loopable: false,
+        defaultRepetitions: 1,
+        defaultSpeed: 'slow',
         returnDuration: 0.4,
         entryEasing: 'ease-in-out-cubic',
         exitEasing: 'ease-out-quad',
@@ -135,9 +145,8 @@ export const GESTURE_LIBRARY: GestureDef[] = [
     {
         // eyes roll upward + slight head tilt, hold, return (one-shot)
         id: 'thinking',
-        defaultDuration: 2.0,
-        defaultSpeed: 'normal',
-        loopable: false,
+        defaultRepetitions: 1,
+        defaultSpeed: 'slow',
         returnDuration: 0.4,
         entryEasing: 'ease-in-out-cubic',
         exitEasing: 'ease-out-quad',
@@ -147,6 +156,42 @@ export const GESTURE_LIBRARY: GestureDef[] = [
             { type: 'morph', target: 'browInnerUp', keyframes: [{ t: 0, v: 0 }, { t: 0.25, v: 0.4 }, { t: 0.8, v: 0.4 }, { t: 1, v: 0 }] },
             { type: 'bone', target: 'head.z', keyframes: [{ t: 0, v: 0 }, { t: 0.25, v: 0.1 }, { t: 0.8, v: 0.1 }, { t: 1, v: 0 }] },
             { type: 'bone', target: 'head.x', keyframes: [{ t: 0, v: 0 }, { t: 0.25, v: -0.08 }, { t: 0.8, v: -0.08 }, { t: 1, v: 0 }] },
+        ],
+    },
+    {
+        // non-verbal sigh: head floats back, drops gently, eyes close, brows relax
+        id: 'sigh',
+        defaultRepetitions: 1,
+        defaultSpeed: 'slow',
+        returnDuration: 0.35,
+        entryEasing: 'ease-in-out-cubic',
+        exitEasing: 'ease-out-quad',
+        channels: [
+            { type: 'bone', target: 'head.x', keyframes: [{ t: 0, v: 0 }, { t: 0.25, v: -0.12 }, { t: 0.72, v: 0.16 }, { t: 1, v: 0 }] },
+            { type: 'morph', target: 'eyeBlinkLeft', keyframes: [{ t: 0, v: 0 }, { t: 0.22, v: 0.75 }, { t: 0.62, v: 0.75 }, { t: 1, v: 0 }] },
+            { type: 'morph', target: 'eyeBlinkRight', keyframes: [{ t: 0, v: 0 }, { t: 0.22, v: 0.75 }, { t: 0.62, v: 0.75 }, { t: 1, v: 0 }] },
+            { type: 'morph', target: 'browDownLeft', keyframes: [{ t: 0, v: 0 }, { t: 0.28, v: 0.22 }, { t: 0.7, v: 0.22 }, { t: 1, v: 0 }] },
+            { type: 'morph', target: 'browDownRight', keyframes: [{ t: 0, v: 0 }, { t: 0.28, v: 0.22 }, { t: 0.7, v: 0.22 }, { t: 1, v: 0 }] },
+        ],
+    },
+    {
+        // non-verbal laugh clip: head bounces, cheeks/eyes squint, smile and jaw pulse
+        id: 'laugh',
+        defaultRepetitions: 1,
+        defaultSpeed: 'normal',
+        returnDuration: 0.28,
+        entryEasing: 'ease-in-out-cubic',
+        exitEasing: 'ease-out-quad',
+        allowMouth: true,
+        channels: [
+            { type: 'bone', target: 'head.x', keyframes: [{ t: 0, v: 0 }, { t: 0.18, v: 0.08 }, { t: 0.34, v: -0.06 }, { t: 0.52, v: 0.08 }, { t: 0.68, v: -0.05 }, { t: 0.84, v: 0.05 }, { t: 1, v: 0 }] },
+            { type: 'morph', target: 'cheekSquintLeft', keyframes: [{ t: 0, v: 0 }, { t: 0.16, v: 0.55 }, { t: 0.45, v: 0.28 }, { t: 0.66, v: 0.6 }, { t: 1, v: 0 }] },
+            { type: 'morph', target: 'cheekSquintRight', keyframes: [{ t: 0, v: 0 }, { t: 0.16, v: 0.55 }, { t: 0.45, v: 0.28 }, { t: 0.66, v: 0.6 }, { t: 1, v: 0 }] },
+            { type: 'morph', target: 'eyeSquintLeft', keyframes: [{ t: 0, v: 0 }, { t: 0.18, v: 0.5 }, { t: 0.48, v: 0.2 }, { t: 0.7, v: 0.45 }, { t: 1, v: 0 }] },
+            { type: 'morph', target: 'eyeSquintRight', keyframes: [{ t: 0, v: 0 }, { t: 0.18, v: 0.5 }, { t: 0.48, v: 0.2 }, { t: 0.7, v: 0.45 }, { t: 1, v: 0 }] },
+            { type: 'morph', target: 'mouthSmileLeft', keyframes: [{ t: 0, v: 0 }, { t: 0.14, v: 0.75 }, { t: 0.5, v: 0.55 }, { t: 0.72, v: 0.8 }, { t: 1, v: 0 }] },
+            { type: 'morph', target: 'mouthSmileRight', keyframes: [{ t: 0, v: 0 }, { t: 0.14, v: 0.75 }, { t: 0.5, v: 0.55 }, { t: 0.72, v: 0.8 }, { t: 1, v: 0 }] },
+            { type: 'morph', target: 'jawOpen', keyframes: [{ t: 0, v: 0 }, { t: 0.18, v: 0.32 }, { t: 0.38, v: 0.12 }, { t: 0.58, v: 0.36 }, { t: 0.78, v: 0.14 }, { t: 1, v: 0 }] },
         ],
     },
 ];

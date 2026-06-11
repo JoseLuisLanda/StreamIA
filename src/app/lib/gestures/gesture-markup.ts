@@ -1,25 +1,31 @@
 /**
  * Inline gesture markup parser.
  *
- * Syntax:  [gestureId]:[seconds]:[speed]   or   [gestureId]:[seconds]   or   [gestureId]
- *   speed is optional: 'slow', 'normal', 'fast', or numeric (0.1-3.0)
- *   e.g. "Hello there [yes]:[2] nice [no]:[1.5]:[slow] way [yes]:[1.5]:[0.7]"
- * Tolerated variant: [gestureId]:2  or  [gestureId]:2:slow  (unbracketed duration/speed)
+ * Syntax:  [gestureId]:[repetitions]:[speed]   or   [gestureId]:[repetitions]   or   [gestureId]
+ *   repetitions is an integer >= 1 (one full motion cycle each); clamped to MAX_REPETITIONS.
+ *     non-integer values are floored (with a warning); invalid values fall back to the default.
+ *   speed is optional: 'slow', 'normal', 'fast', or numeric (0.1-3.0) — controls how fast each
+ *     cycle plays; total duration is the emergent result of repetitions / speed.
+ *   e.g. "Hello there [yes]:[2] nice [no]:[3]:[slow] way [yes]:[1]:[0.7]"
+ * Tolerated variant: [gestureId]:2  or  [gestureId]:2:slow  (unbracketed repetitions/speed)
  *
  * - Tags are stripped from the text (never sent to TTS).
  * - Each gesture is anchored to its character position in the CLEAN text,
  *   so playback can map it to the moment speech reaches that word.
- * - Unknown ids / malformed durations / invalid speeds produce warnings, never throws.
+ * - Unknown ids / malformed repetitions / invalid speeds produce warnings, never throws.
  */
 
 import type { SpeedParam } from './gesture-library';
+
+/** Maximum repetitions accepted from markup; higher counts are clamped down. */
+export const MAX_REPETITIONS = 10;
 
 export interface ParsedGesture {
     id: string;
     /** char index in the clean (stripped) text where the tag sat */
     charIndex: number;
-    /** seconds; undefined -> use the gesture's defaultDuration */
-    duration?: number;
+    /** integer cycle count; undefined -> use the gesture's defaultRepetitions */
+    repetitions?: number;
     /** speed preset or multiplier; undefined -> use the gesture's defaultSpeed */
     speed?: SpeedParam;
 }
@@ -60,14 +66,21 @@ export function parseGestureMarkup(text: string, knownIds: ReadonlySet<string>):
             continue;
         }
 
-        let duration: number | undefined;
-        const rawDur = durBracketed !== undefined ? durBracketed : durPlain;
-        if (rawDur !== undefined) {
-            const d = parseFloat(String(rawDur).replace(',', '.'));
-            if (Number.isFinite(d) && d > 0 && d <= 60) {
-                duration = d;
+        let repetitions: number | undefined;
+        const rawRep = durBracketed !== undefined ? durBracketed : durPlain;
+        if (rawRep !== undefined) {
+            const n = parseFloat(String(rawRep).replace(',', '.'));
+            if (!Number.isFinite(n) || n < 1) {
+                warnings.push(`Invalid repetitions "${rawRep}" for [${id}], using default (must be an integer >= 1).`);
             } else {
-                warnings.push(`Invalid duration "${rawDur}" for [${id}], using default.`);
+                const floored = Math.floor(n);
+                const clamped = Math.min(MAX_REPETITIONS, floored);
+                if (floored !== n) {
+                    warnings.push(`Non-integer repetitions "${rawRep}" for [${id}] rounded down to ${clamped}.`);
+                } else if (clamped !== floored) {
+                    warnings.push(`Repetitions "${rawRep}" for [${id}] clamped to ${MAX_REPETITIONS}.`);
+                }
+                repetitions = clamped;
             }
         }
 
@@ -88,25 +101,50 @@ export function parseGestureMarkup(text: string, knownIds: ReadonlySet<string>):
             }
         }
 
-        gestures.push({ id, charIndex, duration, speed });
+        gestures.push({ id, charIndex, repetitions, speed });
     }
 
     clean += text.slice(last);
-    // collapse double spaces left behind by stripped tags
-    const collapsed = clean.replace(/[ \t]{2,}/g, ' ').replace(/ +([.,;:!?])/g, '$1').trim();
+    const normalized = normalizeCleanText(clean);
+    for (const g of gestures) g.charIndex = normalized.mapIndex(g.charIndex);
 
-    // re-map charIndex after whitespace collapsing (proportional, conservative)
-    if (collapsed.length !== clean.trim().length) {
-        const scale = collapsed.length / Math.max(1, clean.trim().length);
-        for (const g of gestures) g.charIndex = Math.min(collapsed.length, Math.round(g.charIndex * scale));
-    } else {
-        const lead = clean.length - clean.trimStart().length;
-        for (const g of gestures) g.charIndex = Math.max(0, Math.min(collapsed.length, g.charIndex - lead));
-    }
-
-    return { cleanText: collapsed, gestures, warnings };
+    return { cleanText: normalized.text, gestures, warnings };
 }
 
 function trimEndLength(s: string): number {
     return s.replace(/\s+$/, '').length;
+}
+
+function normalizeCleanText(text: string): { text: string; mapIndex: (index: number) => number } {
+    const map: number[] = new Array(text.length + 1).fill(0);
+    const start = text.length - text.trimStart().length;
+    const end = text.trimEnd().length;
+    let out = '';
+
+    for (let i = 0; i <= start; i++) map[i] = 0;
+
+    let i = start;
+    while (i < end) {
+        map[i] = out.length;
+        const char = text[i];
+        if (/\s/.test(char)) {
+            const runStart = i;
+            while (i < end && /\s/.test(text[i])) i++;
+            const next = text[i] ?? '';
+            if (out.length > 0 && i < end && !/[.,;:!?]/.test(next)) out += ' ';
+            for (let j = runStart + 1; j <= i; j++) map[j] = out.length;
+            continue;
+        }
+
+        out += char;
+        i++;
+        map[i] = out.length;
+    }
+
+    for (let j = end; j <= text.length; j++) map[j] = out.length;
+
+    return {
+        text: out,
+        mapIndex: (index: number) => map[Math.max(0, Math.min(text.length, index))] ?? out.length,
+    };
 }

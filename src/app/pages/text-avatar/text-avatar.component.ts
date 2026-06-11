@@ -38,9 +38,9 @@ import { TtsLipsyncService, TtsProvider, TtsLang, PIPER_VOICES } from '../../ser
         <textarea
           [(ngModel)]="text"
           (keydown.enter)="onEnter($event)"
-          rows="3"
+          rows="6"
           maxlength="2000"
-          placeholder="Escribe el texto que dirá el avatar… (Enter para hablar)"></textarea>
+          placeholder="Escribe el texto que dirá el avatar… (Enter para hablar) — arrastra la esquina inferior para agrandar"></textarea>
         <div class="counter">{{ text.length }}/2000</div>
 
         <div class="row">
@@ -76,8 +76,9 @@ import { TtsLipsyncService, TtsProvider, TtsLang, PIPER_VOICES } from '../../ser
         </div>
         <button class="stop demo" (click)="fillDemo()">🎭 Demo: gestures + speech</button>
         <p class="hint">
-          Gesture markup: <code>[yes]:[2]</code> <code>[no]</code> <code>[surprise]:[1.5]</code> <code>[thinking]</code> —
-          tags are stripped before TTS and fire when speech reaches their position.
+          Markup: <code>[yes]:[repetitions]:[speed]</code> (e.g. <code>[no]:[2]:[slow]</code>); the
+          second number is how many full cycles to play. Commas pause, ellipses pause longer,
+          and <code>jaja</code>/<code>jeje</code>/<code>haha</code> become a laugh clip.
         </p>
 
         <p class="hint" *ngIf="provider === 'piper'">
@@ -111,8 +112,9 @@ import { TtsLipsyncService, TtsProvider, TtsLang, PIPER_VOICES } from '../../ser
     h3 { margin: 0 0 4px; font-weight: 600; }
     textarea {
       width: 100%; box-sizing: border-box; resize: vertical;
+      min-height: 130px; max-height: 70vh;
       background: #26262c; color: #eee; border: 1px solid #3a3a42;
-      border-radius: 8px; padding: 10px; font-size: 14px;
+      border-radius: 8px; padding: 10px; font-size: 15px; line-height: 1.5;
     }
     .counter { font-size: 11px; color: #888; text-align: right; margin-top: -8px; }
     .row { display: flex; gap: 10px; flex-wrap: wrap; }
@@ -196,12 +198,10 @@ export class TextAvatarComponent {
         this.tts.stop();
     }
 
-    /** Demo string exercising all four gestures (manual testing). */
+    /** Demo string exercising pauses, expressions, and gesture timing (manual testing). */
     fillDemo() {
         this.text = this.lang === 'es'
-            ? 'Hola, claro que sí [yes]:[1.5] puedo ayudarte. Pero eso no [no]:[2] lo recomiendo. '
-              + '¡Vaya, qué sorpresa tan grande! [surprise]:[1.5] Déjame pensarlo un momento [thinking]:[2.5] ... listo, continuemos.'
-            : 'Hello, yes of course [yes]:[1.5] I can help you. But I would not [no]:[2] recommend that. '
-              + 'Wow, what a big surprise! [surprise]:[1.5] Let me think about it [thinking]:[2.5] ... okay, let us continue.';
+            ? 'Bueno, déjame pensar... [sigh] esto es difícil, pero [laugh] jaja está bien. Claro que sí [yes]:[3]:[slow] aunque pensándolo [no]:[2]:[fast] mejor hagámoslo...'
+            : 'Okay, let me think... [sigh] this is difficult, but [laugh] haha it is fine. Of course yes [yes]:[3]:[slow] though on second thought [no]:[2]:[fast] let us just do it...';
     }
 }
