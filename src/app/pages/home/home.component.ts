@@ -31,6 +31,7 @@ import { AuthService } from '../../services/auth.service';
 
         <div class="hero-cta">
           <a routerLink="/live" class="cta-btn cta-primary">Ir a Live Studio</a>
+          <a routerLink="/ar-viewer" class="cta-btn cta-ar">📱 AR Viewer</a>
           <a routerLink="/ar-face-tracking" class="cta-btn cta-secondary">AR con Face Tracking</a>
           <a routerLink="/ar" class="cta-btn cta-tertiary">Preview de Modelos 3D</a>
         </div>
@@ -195,6 +196,15 @@ import { AuthService } from '../../services/auth.service';
     .cta-primary {
       color: #fff;
       background: linear-gradient(135deg, #7c3aed, #4f46e5);
+    }
+    .cta-ar {
+      color: #fff;
+      background: linear-gradient(135deg, #667eea, #764ba2);
+      border-color: #667eea;
+    }
+    .cta-ar:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 8px 20px rgba(102, 126, 234, 0.4);
     }
     .cta-secondary {
       color: #e2e8f0;

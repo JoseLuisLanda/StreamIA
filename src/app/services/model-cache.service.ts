@@ -221,7 +221,10 @@ export class ModelCacheService {
      */
     async getModelBlob(storagePath: string): Promise<string> {
         try {
-            // Intentar obtener del cache primero
+            // Soporte para modelos locales en assets (por ejemplo: assets/models/header.glb)
+            const isLocalAsset = storagePath.startsWith('assets/');
+
+            // Intentar obtener del cache primero (usa storagePath como clave)
             const cached = await this.getCachedModel(storagePath);
             if (cached) {
                 console.log('✅ Model found in cache:', storagePath);
@@ -229,8 +232,15 @@ export class ModelCacheService {
                 return URL.createObjectURL(blob);
             }
 
-            // Si no está en cache, obtener URL de descarga directa
-            console.log('📥 Model not in cache, getting download URL:', storagePath);
+            if (isLocalAsset) {
+                // Para assets locales no pasamos por Firebase Storage,
+                // devolvemos directamente la ruta para que GLTFLoader la cargue.
+                console.log('📦 Using local asset path for model:', storagePath);
+                return storagePath;
+            }
+
+            // Si no está en cache y no es un asset local, obtener URL de descarga directa desde Firebase
+            console.log('📥 Model not in cache, getting download URL from Firebase:', storagePath);
             const storageRef = ref(this.storage, storagePath);
             const downloadUrl = await getDownloadURL(storageRef);
             
@@ -278,6 +288,12 @@ export class ModelCacheService {
      */
     async getDownloadUrl(storagePath: string): Promise<string> {
         try {
+            // Para modelos locales en assets devolvemos directamente la ruta
+            if (storagePath.startsWith('assets/')) {
+                console.log('📦 Returning local asset URL:', storagePath);
+                return storagePath;
+            }
+
             const storageRef = ref(this.storage, storagePath);
             return await getDownloadURL(storageRef);
         } catch (error) {

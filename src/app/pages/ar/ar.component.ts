@@ -493,6 +493,19 @@ export class ArPageComponent implements AfterViewInit, OnDestroy {
       this.cdr.detectChanges(); // Forzar detección de cambios
       console.log('📦 Loading models from Firebase Storage...');
       this.models = await this.modelCache.listModelsFromStorage();
+
+      // Asegurar que el modelo de header local (solo cabeza) aparezca en la lista de RA
+      const headerLocalPath = 'assets/models/header.glb';
+      const hasLocalHeader = this.models.some(m => m.storagePath === headerLocalPath);
+      if (!hasLocalHeader) {
+        const headerModel: ModelInfo = {
+          name: 'header-local',
+          displayName: '👤 Header (Solo cabeza)',
+          storagePath: headerLocalPath
+        };
+        // Lo añadimos al inicio para que sea fácil de encontrar
+        this.models = [headerModel, ...this.models];
+      }
       console.log(`✅ Loaded ${this.models.length} models`, this.models);
     } catch (error) {
       console.error('Error loading models from storage:', error);

@@ -1,0 +1,81 @@
+<div class="ar-viewer-container">
+  <!-- Back Button -->
+  <a routerLink="/" class="back-btn">← Volver</a>
+
+  <!-- Model Selector Panel -->
+  <div class="model-panel" [class.collapsed]="isPanelCollapsed">
+    <button class="toggle-panel-btn" (click)="togglePanel()" title="Expandir/Colapsar">
+      <span *ngIf="isPanelCollapsed">◀</span>
+      <span *ngIf="!isPanelCollapsed">▶</span>
+    </button>
+    
+    <div class="panel-content">
+      <h3>Modelos AR</h3>
+      
+      <!-- Loading state -->
+      <div *ngIf="isLoadingModels" class="loading-state">
+        <div class="spinner"></div>
+        <p class="loading-text">Cargando...</p>
+      </div>
+      
+      <!-- Model list -->
+      <div class="model-buttons" *ngIf="!isLoadingModels">
+        <button 
+          *ngFor="let model of models" 
+          (click)="selectModel(model)"
+          [class.active]="currentModelUrl && model.displayName === currentModelName"
+          class="model-btn">
+          {{ model.displayName }}
+        </button>
+        
+        <div *ngIf="models.length === 0" class="no-models">
+          No hay modelos disponibles
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Model Viewer with AR Support -->
+  <div class="viewer-container" *ngIf="currentModelUrl">
+    <model-viewer 
+      [src]="currentModelUrl"
+      ar 
+      ar-modes="scene-viewer webxr quick-look"
+      ar-scale="auto"
+      camera-controls 
+      touch-action="pan-y" 
+      alt="Modelo 3D con soporte AR"
+      shadow-intensity="1"
+      auto-rotate
+      camera-orbit="0deg 75deg 2.5m"
+      min-camera-orbit="auto auto 0.5m"
+      max-camera-orbit="auto auto 10m"
+      style="width: 100%; height: 100%;">
+      
+      <!-- AR Button -->
+      <button slot="ar-button" class="ar-button">
+        📱 Ver en AR
+      </button>
+      
+      <!-- Loading indicator -->
+      <div class="model-loading" slot="poster">
+        <div class="spinner"></div>
+        <p>Cargando modelo...</p>
+      </div>
+    </model-viewer>
+    
+    <!-- Instructions -->
+    <div class="ar-instructions">
+      <p>👆 Toca "Ver en AR" para colocar el objeto en tu espacio</p>
+      <p>🔄 Arrastra para rotar | 🔍 Pinch para zoom</p>
+    </div>
+  </div>
+  
+  <!-- No model selected -->
+  <div class="no-model-selected" *ngIf="!currentModelUrl && !isLoadingModels">
+    <div class="placeholder">
+      <h2>📦 Selecciona un modelo</h2>
+      <p>Elige un modelo 3D de la lista para visualizarlo en AR</p>
+    </div>
+  </div>
+</div>
