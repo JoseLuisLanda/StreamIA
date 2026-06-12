@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildSpeechTimeline, resolveGestureAnchors, TimedSpeechSegment } from './speech-timeline';
+import { PAUSE_MAP, buildSpeechTimeline, resolveGestureAnchors, TimedSpeechSegment } from './speech-timeline';
 import type { ParsedGesture } from '../gestures/gesture-markup';
 import { parseGestureMarkup } from '../gestures/gesture-markup';
 
@@ -11,7 +11,7 @@ describe('buildSpeechTimeline', () => {
 
         expect(plan.segments).toEqual([
             { kind: 'speech', text: 'Bueno', sourceStart: 0, sourceEnd: 5 },
-            { kind: 'pause', symbol: ',', durationMs: 1000, sourceIndex: 5 },
+            { kind: 'pause', symbol: ',', durationMs: PAUSE_MAP[','], sourceIndex: 5 },
             { kind: 'speech', text: 'seguimos', sourceStart: 7, sourceEnd: 15 },
         ]);
     });
@@ -20,20 +20,20 @@ describe('buildSpeechTimeline', () => {
         const plan = buildSpeechTimeline('Pienso... listo', []);
 
         expect(plan.segments.map(s => s.kind)).toEqual(['speech', 'pause', 'speech']);
-        expect(plan.segments[1]).toMatchObject({ kind: 'pause', symbol: '...', durationMs: 2000 });
+        expect(plan.segments[1]).toMatchObject({ kind: 'pause', symbol: '...', durationMs: PAUSE_MAP['...'] });
     });
 
     it('turns unicode ellipsis into a 2s pause', () => {
         const plan = buildSpeechTimeline('Pienso… listo', []);
 
-        expect(plan.segments[1]).toMatchObject({ kind: 'pause', symbol: '…', durationMs: 2000 });
+        expect(plan.segments[1]).toMatchObject({ kind: 'pause', symbol: '…', durationMs: PAUSE_MAP['...'] });
     });
 
     it('places tags adjacent to punctuation after the inserted pause', () => {
         const gestures: ParsedGesture[] = [{ id: 'yes', charIndex: 9, repetitions: 1, speed: 'slow' }];
         const timed: TimedSpeechSegment[] = [
             { segment: { kind: 'speech', text: 'Pienso', sourceStart: 0, sourceEnd: 6 }, start: 0, duration: 1, speechStart: 0, speechEnd: 1 },
-            { segment: { kind: 'pause', symbol: '...', durationMs: 2000, sourceIndex: 6 }, start: 1, duration: 2 },
+            { segment: { kind: 'pause', symbol: '...', durationMs: PAUSE_MAP['...'], sourceIndex: 6 }, start: 1, duration: 2 },
             { segment: { kind: 'speech', text: 'listo', sourceStart: 10, sourceEnd: 15 }, start: 3, duration: 1, speechStart: 0, speechEnd: 1 },
         ];
 

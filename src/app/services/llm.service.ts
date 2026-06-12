@@ -56,7 +56,7 @@ const DEFAULT_SETTINGS: LlmSettings = {
         deepseek: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', apiKey: '' },
     },
     maxTurns: 8,
-    maxReplyTokens: 220,
+    maxReplyTokens: 160,
     systemPrompt: DEFAULT_SYSTEM_PROMPT,
 };
 

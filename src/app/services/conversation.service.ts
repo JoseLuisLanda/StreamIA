@@ -5,6 +5,8 @@ import { LlmService, LLM_PROVIDER_LABELS } from './llm.service';
 import { GesturePlayerService } from './gesture-player.service';
 import { sanitizeLlmReply, truncateAtSentence } from '../lib/llm/llm-sanitizer';
 import { GESTURE_MAP } from '../lib/gestures/gesture-library';
+import { PlanCache } from '../lib/performance/plan-cache';
+import { speechStartLine } from '../lib/performance/timing';
 
 /**
  * Conversation orchestrator: explicit state machine wiring
@@ -18,13 +20,17 @@ export type { ConvState };
 export { canTransition, interruptTarget };
 
 export interface ConvMessage {
+    /** unique per session — keys the replay plan cache */
+    id: number;
     role: 'user' | 'assistant' | 'system';
     content: string;
     /** epoch ms */
     at: number;
-    /** e.g. "Ollama (local) · llama3.2" or "modo texto" */
+    /** e.g. "Ollama (local) · llama3.2" or "modo directo" */
     meta?: string;
     kind?: 'info' | 'error';
+    /** assistant messages with a cached/recompilable performance */
+    replayable?: boolean;
 }
 
 export interface ConvTtsOpts {
@@ -49,9 +55,17 @@ export class ConversationService {
     private llm = inject(LlmService);
     private gestures = inject(GesturePlayerService);
 
+    /** message currently being performed (highlight), or null */
+    public speakingMsgId: WritableSignal<number | null> = signal(null);
+    /** message whose text is being revealed karaoke-style (live turns only, never replays) */
+    public revealingMsgId: WritableSignal<number | null> = signal(null);
+
     /** generation token: bumping it makes any in-flight turn a no-op */
     private gen = 0;
     private lastOpts: ConvTtsOpts = { provider: 'piper', lang: 'es' };
+    private msgSeq = 1;
+    /** compiled performances for the last N assistant messages (replay) */
+    private plans = new PlanCache(10);
 
     // ------------------------------------------------------------------ API
 
@@ -59,18 +73,19 @@ export class ConversationService {
     startListening(opts: ConvTtsOpts): void {
         if (this.muted || !this.stt.isSupported) return;
         this.lastOpts = opts;
+        this.tts.warmup(opts); // pre-warm AudioContext + Piper session while the user talks
         if (this.state() === 'listening') { this.finishListening(); return; }
         this.interruptInternals(); // stops TTS + any in-flight turn (echo prevention)
         if (this.state() !== 'idle') this.setState(interruptTarget(this.state())); // pass through idle
         this.setState('listening');
-        this.stt.start(opts.lang, t => this.onFinalTranscript(t));
+        this.stt.start(opts.lang, t => this.runTurn(t));
     }
 
     /** Mic pressed while listening: end the turn gracefully (flushes final). */
     finishListening(): void {
         if (this.state() !== 'listening') return;
         this.stt.finish();
-        // state advances in onFinalTranscript; if nothing was said the STT
+        // state advances in runTurn; if nothing was said the STT
         // onend fires with no final -> watchdog below returns us to idle
         setTimeout(() => {
             if (this.state() === 'listening' && !this.stt.listening()) this.setState('idle');
@@ -83,14 +98,59 @@ export class ConversationService {
         this.setState(interruptTarget(this.state()));
     }
 
-    /** Manual "Modo texto": speak typed text through the same pipeline + log it. */
+    /**
+     * Typed conversation input: EXACTLY the same turn as a final voice
+     * transcript (same state transitions, history, sanitizer, compiler).
+     * Sending while the avatar speaks interrupts playback, like the mic.
+     */
+    sendText(text: string, opts: ConvTtsOpts): void {
+        const trimmed = text.trim();
+        if (!trimmed) return;
+        this.lastOpts = opts;
+        this.tts.warmup(opts);
+        this.interruptInternals();
+        if (this.state() !== 'idle') this.setState(interruptTarget(this.state()));
+        void this.runTurn(trimmed, opts);
+    }
+
+    /**
+     * Replay a previous assistant performance: instant from the plan cache
+     * (no re-synthesis); recompiles transparently if evicted. Pure
+     * re-performance: no new chat message, no LLM history change.
+     */
+    async replayMessage(msgId: number, opts: ConvTtsOpts): Promise<void> {
+        const msg = this.messages().find(m => m.id === msgId);
+        if (!msg || msg.role !== 'assistant') return;
+        if (this.state() !== 'idle') this.interrupt(); // replay only from idle
+        const gen = ++this.gen;
+        this.speakingMsgId.set(msgId);
+        this.setState('speaking');
+        try {
+            const cached = this.plans.get(msgId);
+            if (cached) {
+                await this.tts.replayPerformance(cached);
+            } else {
+                await this.tts.speak(msg.content, opts); // transparent recompile
+                if (gen === this.gen && this.tts.lastPerformance) this.plans.set(msgId, this.tts.lastPerformance);
+            }
+        } catch (e: any) {
+            this.fail(e?.message ?? String(e));
+        } finally {
+            if (gen === this.gen) {
+                this.speakingMsgId.set(null);
+                if (this.state() !== 'idle') this.setState('idle');
+            }
+        }
+    }
+
+    /** Manual "Modo directo": speak typed text through the same pipeline + log it. */
     async sayManual(text: string, opts: ConvTtsOpts): Promise<void> {
         const trimmed = text.trim();
         if (!trimmed) return;
         this.lastOpts = opts;
         this.interruptInternals();
         const gen = ++this.gen;
-        this.push({ role: 'assistant', content: trimmed, at: Date.now(), meta: 'modo texto' });
+        this.push({ role: 'assistant', content: trimmed, at: Date.now(), meta: 'modo directo' });
         this.setState('speaking');
         try {
             await this.tts.speak(trimmed, opts);
@@ -105,14 +165,17 @@ export class ConversationService {
         this.messages.set([]);
         this.streaming.set('');
         this.llm.clearConversation();
+        this.plans.clear();
+        this.speakingMsgId.set(null);
+        this.revealingMsgId.set(null);
     }
 
     // ----------------------------------------------------------------- turn
 
-    private async onFinalTranscript(transcript: string): Promise<void> {
+    private async runTurn(transcript: string, optsOverride?: ConvTtsOpts): Promise<void> {
         this.stt.stop(); // hard off: never listen while we think & speak
         const gen = ++this.gen;
-        const opts = this.lastOpts;
+        const opts = optsOverride ?? this.lastOpts;
         const s = this.llm.settings();
         const cfg = s.providers[s.provider];
         const label = LLM_PROVIDER_LABELS[s.provider];
@@ -121,7 +184,9 @@ export class ConversationService {
         this.setState('sending');
         this.pushSystem(`Transcripción enviada a ${label} (${cfg.model})…`);
         this.setState('waiting_llm');
-        this.gestures.trigger('thinking', 1, 'slow');
+        if (this.tts.waitingAnimsEnabled()) {
+            this.gestures.triggerTransient('thinking', 1, 'slow'); // waiting gesture: killed at audio start
+        }
 
         const t0 = performance.now();
         try {
@@ -129,8 +194,9 @@ export class ConversationService {
                 if (gen === this.gen) this.streaming.set(acc);
             });
             if (gen !== this.gen) return; // interrupted while waiting
+            const tReplyReceived = performance.now(); // llm_response_received
             this.streaming.set('');
-            this.pushSystem(`Respuesta recibida (${((performance.now() - t0) / 1000).toFixed(1)} s)`);
+            this.pushSystem(`Respuesta recibida (${((tReplyReceived - t0) / 1000).toFixed(1)} s)`);
 
             const sane = sanitizeLlmReply(reply, new Set(GESTURE_MAP.keys()));
             for (const w of sane.warnings) console.warn('[llm-sanitizer]', w);
@@ -139,15 +205,26 @@ export class ConversationService {
             }
 
             let finalText = sane.text;
-            const truncated = truncateAtSentence(finalText, 250);
+            const truncated = truncateAtSentence(finalText, 130);
             if (truncated !== null) {
                 finalText = truncated;
                 this.pushSystem('Respuesta truncada (límite de longitud)');
             }
 
-            this.push({ role: 'assistant', content: finalText, at: Date.now(), meta: `${label} · ${cfg.model}` });
+            const assistantMsg = this.push({ role: 'assistant', content: finalText, at: Date.now(), meta: `${label} · ${cfg.model}`, replayable: true });
             this.setState('speaking');
-            await this.tts.speak(finalText, opts);
+            this.speakingMsgId.set(assistantMsg.id);
+            if (opts.provider === 'piper') this.revealingMsgId.set(assistantMsg.id);
+            await this.tts.speak(finalText, {
+                ...opts,
+                timingStart: tReplyReceived,
+                onFirstAudio: summary => {
+                    if (gen === this.gen) this.pushSystem(speechStartLine(summary));
+                },
+            });
+            if (this.tts.lastPerformance) this.plans.set(assistantMsg.id, this.tts.lastPerformance);
+            this.speakingMsgId.set(null);
+            this.revealingMsgId.set(null);
             if (gen !== this.gen) return; // interrupted while speaking
             this.afterSpeaking(opts);
         } catch (e: any) {
@@ -167,7 +244,7 @@ export class ConversationService {
     private afterSpeaking(opts: ConvTtsOpts): void {
         if (this.continuous && !this.muted && this.stt.isSupported) {
             this.setState('listening');
-            this.stt.start(opts.lang, t => this.onFinalTranscript(t));
+            this.stt.start(opts.lang, t => this.runTurn(t));
         } else {
             this.setState('idle');
         }
@@ -180,6 +257,8 @@ export class ConversationService {
         this.tts.stop();       // cancels audio via the TTS generation token
         this.stt.stop();       // hard mic off
         this.streaming.set('');
+        this.speakingMsgId.set(null);
+        this.revealingMsgId.set(null); // interruption: bubble shows full text
     }
 
     private fail(msg: string): void {
@@ -195,8 +274,10 @@ export class ConversationService {
         this.state.set(to);
     }
 
-    private push(m: ConvMessage): void {
-        this.messages.update(list => [...list, m]);
+    private push(m: Omit<ConvMessage, 'id'>): ConvMessage {
+        const full: ConvMessage = { ...m, id: this.msgSeq++ };
+        this.messages.update(list => [...list, full]);
+        return full;
     }
 
     private pushSystem(content: string): void {

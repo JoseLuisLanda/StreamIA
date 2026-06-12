@@ -6,6 +6,8 @@ import { TtsLipsyncService, TtsProvider, TtsLang, PIPER_VOICES } from '../../ser
 import { SpeechRecognitionService } from '../../services/speech-recognition.service';
 import { LlmService, LlmProviderId, LLM_PROVIDER_LABELS } from '../../services/llm.service';
 import { ConversationService, ConvMessage } from '../../services/conversation.service';
+import { parseGestureMarkup } from '../../lib/gestures/gesture-markup';
+import { GESTURE_MAP } from '../../lib/gestures/gesture-library';
 
 interface MsgSegment { kind: 'text' | 'chip'; value: string; }
 
@@ -69,7 +71,7 @@ const CHIP_LABELS: Record<string, string> = {
                 <span class="dots"><i></i><i></i><i></i></span> Pensando…
               </ng-container>
               <ng-container *ngSwitchCase="'speaking'">
-                <span class="spk"></span> Hablando…
+                <span class="spk"></span> {{ tts.bridging() ? '…' : 'Hablando…' }}
               </ng-container>
               <ng-container *ngSwitchCase="'error'">⚠️ Error</ng-container>
               <ng-container *ngSwitchDefault>🕐 Esperando…</ng-container>
@@ -104,11 +106,11 @@ const CHIP_LABELS: Record<string, string> = {
           <!-- bottom drawer: manual text mode (secondary) -->
           <div class="drawer" [class.open]="textMode">
             <button class="drawer-toggle" (click)="textMode = !textMode">
-              ⌨️ Modo texto {{ textMode ? '▾' : '▸' }}
+              ⌨️ Modo directo (sin IA) {{ textMode ? '▾' : '▸' }}
             </button>
             <div class="drawer-body" *ngIf="textMode">
               <textarea [(ngModel)]="text" (keydown.enter)="onEnter($event)" rows="3" maxlength="2000"
-                        placeholder="Escribe el texto que dirá el avatar… (Enter para hablar)"></textarea>
+                        placeholder="Texto directo al avatar (sin IA, con markup) — Enter para hablar"></textarea>
               <div class="drawer-actions">
                 <button class="ghost" (click)="speakManual()" [disabled]="!text.trim()">▶️ Speak</button>
                 <button class="ghost" (click)="fillDemo()">🎭 Demo</button>
@@ -137,18 +139,32 @@ const CHIP_LABELS: Record<string, string> = {
               </div>
               <div class="bubble user" *ngIf="m.role === 'user'" [title]="msgTitle(m)">{{ m.content }}</div>
               <div class="bubble bot" *ngIf="m.role === 'assistant'"
-                   [class.karaoke]="isSpokenNow(i)" [title]="msgTitle(m)">
-                <ng-container *ngFor="let seg of segments(m.content)">
+                   [class.karaoke]="isSpokenNow(m)" [title]="msgTitle(m)">
+                <ng-container *ngFor="let seg of revealSegments(m)">
                   <span *ngIf="seg.kind === 'text'">{{ seg.value }}</span>
                   <span class="chip" *ngIf="seg.kind === 'chip' && showMarkup">{{ seg.value }}</span>
                 </ng-container>
-                <div class="meta" *ngIf="m.meta">{{ m.meta }}</div>
+                <span class="cursor" *ngIf="isRevealing(m)">▍</span>
+                <div class="botfoot">
+                  <span class="meta" *ngIf="m.meta">{{ m.meta }}</span>
+                  <button class="replay" *ngIf="m.replayable" (click)="replay(m.id)" title="Repetir (voz + gestos)">↻</button>
+                </div>
               </div>
             </ng-container>
 
             <div class="bubble bot streaming" *ngIf="conv.streaming()">{{ conv.streaming() }}</div>
             <div class="bubble user interimb" *ngIf="stt.interim()">{{ stt.interim() }}…</div>
             <div class="inline-err" *ngIf="stt.error()">{{ stt.error() }}</div>
+          </div>
+
+          <div class="chat-input">
+            <textarea rows="1" [(ngModel)]="convText" maxlength="1000"
+                      (keydown.enter)="onConvEnter($event)"
+                      [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
+                      placeholder="Escribe un mensaje…"></textarea>
+            <button class="send" (click)="sendTyped()"
+                    [disabled]="!convText.trim() || conv.state() === 'waiting_llm' || conv.state() === 'sending'"
+                    title="Enviar (Enter)">➤</button>
           </div>
         </aside>
       </main>
@@ -179,7 +195,7 @@ const CHIP_LABELS: Record<string, string> = {
 
         <h4>Conversación</h4>
         <label class="chk"><input type="checkbox" [(ngModel)]="conv.continuous" /> Conversación continua</label>
-        <label class="chk"><input type="checkbox" [(ngModel)]="showMarkup" /> Mostrar chips de gestos en el chat</label>
+        <label class="chk"><input type="checkbox" [(ngModel)]="showMarkup" /> Mostrar chips de gestos (debug)</label>
         <label class="chk"><input type="checkbox" [(ngModel)]="showProcess" /> Mostrar procesos (líneas de sistema)</label>
         <label>Máx. turnos
           <input type="number" min="1" max="50" [ngModel]="llm.settings().maxTurns" (ngModelChange)="setMaxTurns($event)" />
@@ -359,6 +375,33 @@ const CHIP_LABELS: Record<string, string> = {
     }
     .karaoke .chip { box-shadow: 0 0 8px rgba(139,92,246,.5); }
     .sysline { align-self: center; text-align: center; color: #66708c; font-size: 11px; max-width: 95%; }
+    .botfoot { margin-top: 5px; display: flex; align-items: center; gap: 8px; }
+    .cursor { color: var(--accent); animation: blinkc 1s steps(2) infinite; margin-left: 1px; }
+    @keyframes blinkc { 50% { opacity: 0; } }
+    .replay {
+      flex: none; width: 22px; height: 22px; padding: 0; border-radius: 50%;
+      background: rgba(139,92,246,.15); border: 1px solid rgba(139,92,246,.35);
+      color: #c4b0f7; font-size: 12px; cursor: pointer; opacity: .45; transition: opacity .15s, background .15s;
+      display: grid; place-items: center;
+    }
+    .bubble.bot:hover .replay { opacity: 1; }
+    .replay:hover { background: rgba(139,92,246,.35); }
+    .chat-input {
+      flex: none; display: flex; gap: 8px; align-items: flex-end;
+      padding: 10px 12px; border-top: 1px solid rgba(255,255,255,.06);
+    }
+    .chat-input textarea {
+      flex: 1; resize: none; min-height: 36px; max-height: 100px;
+      background: rgba(255,255,255,.05); color: #E8E9EE; border: 1px solid rgba(255,255,255,.1);
+      border-radius: 12px; padding: 8px 12px; font-size: 13px; line-height: 1.4;
+    }
+    .chat-input textarea:disabled { opacity: .5; }
+    .send {
+      flex: none; width: 38px; height: 38px; border-radius: 50%; border: none;
+      background: var(--accent); color: #fff; font-size: 15px; cursor: pointer;
+      display: grid; place-items: center; transition: opacity .15s;
+    }
+    .send:disabled { opacity: .35; cursor: default; }
     .sysline.errline { color: #ff9c9c; font-size: 12px; }
     .inline-err { color: #ff9c9c; font-size: 12px; }
 
@@ -414,7 +457,7 @@ export class TextAvatarComponent implements AfterViewChecked {
     avatarUrlInput = this.avatarUrl;
 
     // view options
-    showMarkup = true;
+    showMarkup = false; // debug toggle: chips hidden by default, clean text only
     showProcess = true;
     settingsOpen = false;
     providerLabels = LLM_PROVIDER_LABELS;
@@ -450,19 +493,62 @@ export class TextAvatarComponent implements AfterViewChecked {
         return false;
     }
 
-    /** Is message i the assistant reply currently being spoken? */
-    isSpokenNow(i: number): boolean {
-        if (this.conv.state() !== 'speaking') return false;
-        const ms = this.conv.messages();
-        for (let k = ms.length - 1; k >= 0; k--) {
-            if (ms[k].role === 'assistant') return k === i;
-        }
-        return false;
+    /** Is this message the one currently being performed? (incl. replays) */
+    isSpokenNow(m: ConvMessage): boolean {
+        return this.conv.state() === 'speaking' && this.conv.speakingMsgId() === m.id;
     }
 
     msgTitle(m: ConvMessage): string {
         const time = new Date(m.at).toLocaleTimeString();
         return m.meta ? `${time} — ${m.meta}` : time;
+    }
+
+    /** True while this message's text is being revealed in sync with speech. */
+    isRevealing(m: ConvMessage): boolean {
+        return this.conv.revealingMsgId() === m.id;
+    }
+
+    /** Cached clean-text + chip-position model per message (content is immutable). */
+    private modelCache = new Map<number, { clean: string; chips: { pos: number; label: string }[] }>();
+
+    private displayModel(m: ConvMessage) {
+        let model = this.modelCache.get(m.id);
+        if (!model) {
+            const parsed = parseGestureMarkup(m.content, new Set(GESTURE_MAP.keys()));
+            const chips = parsed.gestures.map(g => {
+                let label = CHIP_LABELS[g.id] ?? g.id;
+                if (g.repetitions) label += ' ×' + g.repetitions;
+                if (g.speed) label += ' ' + g.speed;
+                return { pos: g.charIndex, label };
+            });
+            model = { clean: parsed.cleanText, chips };
+            this.modelCache.set(m.id, model);
+            if (this.modelCache.size > 100) this.modelCache.clear(); // safety bound
+        }
+        return model;
+    }
+
+    /**
+     * Karaoke rendering: clean text revealed up to the spoken position, chips
+     * popping in when speech reaches their anchor. Never renders raw [tags].
+     * Non-revealing messages (history, replays, interruptions) show full text.
+     */
+    revealSegments(m: ConvMessage): MsgSegment[] {
+        const model = this.displayModel(m);
+        const limit = this.isRevealing(m)
+            ? Math.min(this.tts.revealedChars(), model.clean.length)
+            : model.clean.length;
+        const out: MsgSegment[] = [];
+        let cursor = 0;
+        for (const chip of model.chips) {
+            const pos = Math.min(chip.pos, model.clean.length);
+            if (pos > limit) break;
+            if (pos > cursor) out.push({ kind: 'text', value: model.clean.slice(cursor, pos) });
+            out.push({ kind: 'chip', value: chip.label });
+            cursor = pos;
+        }
+        if (limit > cursor) out.push({ kind: 'text', value: model.clean.slice(cursor, limit) });
+        return out;
     }
 
     /** Splits an assistant message into text segments + gesture chips. */
@@ -483,6 +569,27 @@ export class TextAvatarComponent implements AfterViewChecked {
         }
         if (last < content.length) out.push({ kind: 'text', value: content.slice(last) });
         return out;
+    }
+
+    // conversation text input
+    convText = '';
+
+    sendTyped() {
+        const t = this.convText.trim();
+        if (!t) return;
+        this.convText = '';
+        this.conv.sendText(t, this.opts());
+    }
+
+    onConvEnter(event: Event) {
+        const e = event as KeyboardEvent;
+        if (e.shiftKey) return; // Shift+Enter = newline
+        e.preventDefault();
+        this.sendTyped();
+    }
+
+    replay(msgId: number) {
+        void this.conv.replayMessage(msgId, this.opts());
     }
 
     toggleLang() {

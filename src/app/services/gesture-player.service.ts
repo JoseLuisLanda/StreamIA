@@ -24,6 +24,12 @@ import { MOUTH_KEYS } from '../lib/lipsync/viseme-map';
  * gesture immediately cancels the current one — the cancelled gesture stops advancing
  * and its residual pose blends to neutral over returnDuration (no snapping) while the
  * new gesture enters. Pending future instances are dropped. There is no parallel merge.
+ *
+ * WAITING (TRANSIENT) GESTURES: thinking-while-the-LLM-responds and bridge-wait
+ * micro-gestures are marked transient. The single kill switch cancelTransient()
+ * — bound by the TTS player to the actual audio-start event — smoothly returns
+ * the active transient gesture to neutral (returnDuration blend, never a snap)
+ * and drops every scheduled transient pick. Plan-scheduled gestures are unaffected.
  */
 
 const MOUTH_SET = new Set(MOUTH_KEYS);
@@ -48,6 +54,8 @@ interface ScheduledGesture {
     repetitions: number;
     speedMultiplier: number;
     allowMouthNow: boolean;
+    /** waiting/filler gesture: killed by cancelTransient() when speech audio starts */
+    transient?: boolean;
 }
 
 interface ActiveGesture {
@@ -59,6 +67,7 @@ interface ActiveGesture {
     /** accumulated phase in cycles (0..repetitions) */
     phase: number;
     allowMouthNow: boolean;
+    transient?: boolean;
 }
 
 interface ExitingGesture {
@@ -94,8 +103,9 @@ export class GesturePlayerService {
      * Schedule a gesture at an absolute wall-clock time (sec, performance.now()/1000 basis).
      * @param repetitions integer cycle count; undefined -> gesture's defaultRepetitions.
      * @param allowMouthNow only honoured for gestures flagged allowMouth (expression clips).
+     * @param transient waiting/filler gesture killed at audio start via cancelTransient().
      */
-    schedule(id: string, atWallSec: number, repetitions?: number, speed?: 'slow' | 'normal' | 'fast' | number, allowMouthNow = false): boolean {
+    schedule(id: string, atWallSec: number, repetitions?: number, speed?: 'slow' | 'normal' | 'fast' | number, allowMouthNow = false, transient = false): boolean {
         const def = GESTURE_MAP.get(id);
         if (!def) {
             console.warn(`[gestures] unknown gesture id "${id}" — skipped`);
@@ -107,6 +117,7 @@ export class GesturePlayerService {
             repetitions: this.resolveRepetitions(def, repetitions),
             speedMultiplier: this.resolveSpeed(speed),
             allowMouthNow: allowMouthNow && def.allowMouth === true,
+            transient,
         });
         // keep schedule ordered by start time for deterministic promotion
         this.scheduled.sort((a, b) => a.start - b.start);
@@ -118,8 +129,38 @@ export class GesturePlayerService {
         return this.schedule(id, now(), repetitions, speed);
     }
 
-    /** Cancel everything (e.g. speech interrupted). Channels ease back via renderer smoothing. */
-    clear(): void {
+    /** Waiting/filler gesture (LLM wait, A→B bridge): killed at audio start. */
+    triggerTransient(id: string, repetitions?: number, speed?: 'slow' | 'normal' | 'fast' | number): boolean {
+        return this.schedule(id, now(), repetitions, speed, false, true);
+    }
+
+    /**
+     * Single kill switch for waiting gestures: smooth exit (returnDuration
+     * blend, never a snap) for the active transient gesture + drops every
+     * scheduled transient pick. The TTS player calls this exactly at the
+     * audio-start event of each plan.
+     */
+    cancelTransient(t: number = now()): void {
+        this.scheduled = this.scheduled.filter(s => !s.transient);
+        if (this.current?.transient) {
+            this.beginExit(this.current, t);
+            this.current = null;
+        }
+    }
+
+    /**
+     * Cancel gestures. keepTransient=true preserves waiting gestures (used at
+     * speak() entry so "thinking" survives synthesis and ends at audio start).
+     */
+    clear(opts?: { keepTransient?: boolean }): void {
+        if (opts?.keepTransient) {
+            this.scheduled = this.scheduled.filter(s => s.transient);
+            if (this.current && !this.current.transient) {
+                this.beginExit(this.current, now());
+                this.current = null;
+            }
+            return;
+        }
         this.scheduled = [];
         this.current = null;
         this.exiting = null;
@@ -224,6 +265,7 @@ export class GesturePlayerService {
             speedMultiplier: promote.speedMultiplier,
             phase: 0,
             allowMouthNow: promote.allowMouthNow,
+            transient: promote.transient,
         };
     }
 

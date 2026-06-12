@@ -1,12 +1,18 @@
 import { Injectable, inject, signal, WritableSignal } from '@angular/core';
 import {
-    textToVisemes, scaleTimeline, findSpeechBounds, splitIntoChunksWithOffsets, TextChunk, VisemeFrame
+    textToVisemes, scaleTimeline, findSpeechBounds, VisemeFrame
 } from '../lib/lipsync/text-to-visemes';
 import { parseGestureMarkup } from '../lib/gestures/gesture-markup';
 import { GESTURE_MAP, CYCLE_BASE_SECONDS, SPEED_MULTIPLIER_MIN, SPEED_MULTIPLIER_MAX } from '../lib/gestures/gesture-library';
 import { GesturePlayerService, now as wallNow } from './gesture-player.service';
 import { Viseme, VISEME_TO_ARKIT, BlendWeights } from '../lib/lipsync/viseme-map';
-import { buildSpeechTimeline, SpeechTimelineSegment, TimelineGesture } from '../lib/lipsync/speech-timeline';
+import { buildSpeechTimeline, SpeechTimelineSegment, TimelineGesture, EXPRESSION_REGISTRY } from '../lib/lipsync/speech-timeline';
+import {
+    compilePerformance, expandSegments, planToJson, revealAtTime, ExpandedSegment, PerformancePlan, CompilerDeps
+} from '../lib/performance/performance-compiler';
+import { PiperClient } from '../lib/performance/piper-client';
+import { TimingRecorder, speechStartLine, SpeechStartSummary } from '../lib/performance/timing';
+import { splitProgressive } from '../lib/performance/progressive-split';
 
 export type TtsProvider = 'piper' | 'webspeech';
 export type TtsLang = 'es' | 'en';
@@ -17,10 +23,15 @@ export interface SpeakOptions {
     lang: TtsLang;
     /** Piper voice id, e.g. 'es_MX-claude-high' */
     voiceId?: string;
+    /** instrumentation: reference t0 (e.g. llm_response_received, performance.now()) */
+    timingStart?: number;
+    /** instrumentation: called once when the first audio actually starts */
+    onFirstAudio?: (summary: SpeechStartSummary) => void;
 }
 
 // Piper engine is an npm dependency: npm i @diffusionstudio/vits-web
-// (engine code is bundled; voice models + onnx wasm are fetched at runtime and cached in OPFS)
+// Synthesis runs in a Web Worker (src/app/workers/piper.worker.ts) so the
+// render loop never blocks; falls back to main thread if workers fail.
 
 export const PIPER_VOICES: Record<TtsLang, { id: string; label: string }[]> = {
     es: [
@@ -35,55 +46,79 @@ export const PIPER_VOICES: Record<TtsLang, { id: string; label: string }[]> = {
     ],
 };
 
+/** Replies with total speech below this compile as ONE full plan up front. */
+const FULL_PRECOMPILE_MAX_CHARS = 220;
+
 interface ActivePlayback {
     frames: VisemeFrame[];
-    /** AudioContext time at which buffer started, or wall-clock anchor for webspeech */
     anchor: number;
     duration: number;
     clock: 'audio' | 'wall';
 }
 
-type PlaybackSegment =
-    | { kind: 'speech'; text: string; sourceStart: number; sourceEnd: number }
-    | Exclude<SpeechTimelineSegment, { kind: 'speech' }>;
-
-interface SynthesizedSpeechSegment {
-    buffer: AudioBuffer;
-    frames: VisemeFrame[];
-    bounds: { start: number; end: number };
-}
-
 /**
- * Text -> TTS audio + viseme timeline, with provider abstraction.
+ * Text -> TTS audio + viseme timeline.
  *
- * Stage 1 providers (no cloud):
- *  - 'piper': @diffusionstudio/vits-web (Piper ONNX, WASM). Fully offline after first use.
- *  - 'webspeech': browser SpeechSynthesis (OS voices). Zero download, estimated timing.
- *
- * A Stage 2 cloud provider (Azure viseme events) can implement the same
- * synthesize->frames contract and drop in without touching the animation layer.
+ * Piper path (compile -> play):
+ *  1. PerformanceCompiler builds an immutable plan (all audio synthesized in a
+ *     worker + decoded, speech windows measured, visemes + gestures on one
+ *     absolute time axis) BEFORE playback.
+ *  2. Playback is a dumb sampler: all AudioBufferSourceNodes scheduled up
+ *     front against AudioContext.currentTime; per frame only the precomputed
+ *     viseme track is sampled. Zero synthesis/decoding/fetching during play.
+ *  Long replies use the hybrid: per-sentence units compiled in the worker
+ *  while the previous unit plays (playback never reaches uncompiled audio:
+ *  each unit is complete before it starts).
+ * Expression clips are preloaded + decoded once at service init.
  */
 @Injectable({ providedIn: 'root' })
 export class TtsLipsyncService {
     public state: WritableSignal<TtsState> = signal('idle');
     public error: WritableSignal<string | null> = signal(null);
-    /** 0..1 model download progress (piper first run) */
     public downloadProgress: WritableSignal<number | null> = signal(null);
     public currentViseme: WritableSignal<Viseme> = signal('sil');
-    /** parser warnings from the last speak() call (unknown gestures, bad durations) */
     public gestureWarnings: WritableSignal<string[]> = signal([]);
+    /** compile time of the last performance unit (ms) — perf visibility */
+    public lastCompileMs: WritableSignal<number | null> = signal(null);
+    /** compiled plans of the most recent piper speak() — consumers may cache for replay */
+    public lastPerformance: PerformancePlan[] | null = null;
+    /** true while waiting at a seam for the next part to finish compiling */
+    public bridging: WritableSignal<boolean> = signal(false);
+    /** karaoke: chars of the clean text spoken so far (page reveals up to here) */
+    public revealedChars: WritableSignal<number> = signal(0);
 
     private gestures = inject(GesturePlayerService);
 
     private audioCtx: AudioContext | null = null;
-    private piperModule: any = null;
+    private piper = new PiperClient();
     private active: ActivePlayback | null = null;
     private currentSources: AudioBufferSourceNode[] = [];
     private pendingTimers: number[] = [];
+    private pendingIntervals: number[] = [];
     private pendingTimerResolvers: Array<() => void> = [];
     private clipCache = new Map<string, Promise<AudioBuffer>>();
-    /** generation token - bump to cancel in-flight work */
     private generation = 0;
+    private timing: TimingRecorder | null = null;
+    private timingOpts: SpeakOptions | null = null;
+    private firstSynthMarked = false;
+    private firstAudioReported = false;
+    private warmedVoice: string | null = null;
+
+    constructor() {
+        // Preload + decode expression clips once at init (they used to be
+        // fetched/decoded on demand at trigger time -> first-use hitch).
+        if (typeof window !== 'undefined' && typeof AudioContext !== 'undefined') {
+            setTimeout(() => {
+                try {
+                    const ctx = this.ensureAudioCtx();
+                    for (const e of Object.values(EXPRESSION_REGISTRY)) {
+                        this.loadAudioClip(ctx, e.clipUrl).catch(err =>
+                            console.warn('[tts] expression clip preload failed:', e.clipUrl, err?.message ?? err));
+                    }
+                } catch { /* no audio support */ }
+            }, 0);
+        }
+    }
 
     // ---------------------------------------------------------------- public
 
@@ -91,18 +126,25 @@ export class TtsLipsyncService {
         const trimmed = text?.trim();
         if (!trimmed) return;
 
-        this.stop(); // interrupt anything playing
+        // interrupt previous playback but let a waiting (transient) gesture
+        // survive synthesis — it dies at the actual audio start (kill switch)
+        this.stopInternal(true);
         const gen = ++this.generation;
         this.error.set(null);
 
-        // strip gesture markup; tags are never sent to TTS
+        // per-reply timing instrumentation
+        this.timing = new TimingRecorder(opts.timingStart ?? performance.now());
+        this.timingOpts = opts;
+        this.firstSynthMarked = false;
+        this.firstAudioReported = false;
+
         const parsed = parseGestureMarkup(trimmed, new Set(GESTURE_MAP.keys()));
         this.gestureWarnings.set(parsed.warnings);
         for (const w of parsed.warnings) console.warn('[gestures]', w);
 
         const plan = buildSpeechTimeline(parsed.cleanText, parsed.gestures);
+        this.timing.mark('parse_split_done');
 
-        // markup-only input: play gestures with no speech
         if (!plan.segments.some(s => s.kind === 'speech') && plan.segments.length === 0) {
             const t0 = wallNow();
             for (const g of plan.gestures) this.gestures.schedule(g.id, t0, g.repetitions, g.speed);
@@ -110,13 +152,18 @@ export class TtsLipsyncService {
         }
 
         try {
-            if (opts.provider === 'piper') {
+            const split = (opts.provider === 'piper' && this.progressiveEnabled())
+                ? splitProgressive(parsed.cleanText, plan.gestures, this.partAMaxWords())
+                : null;
+            if (opts.provider === 'piper' && split) {
+                await this.speakProgressive(split, opts, gen);
+            } else if (opts.provider === 'piper') {
                 await this.speakPiper(plan.segments, plan.gestures, opts, gen);
             } else {
                 await this.speakWebSpeech(plan.segments, plan.gestures, opts, gen);
             }
         } catch (e: any) {
-            if (gen !== this.generation) return; // interrupted - not an error
+            if (gen !== this.generation) return;
             console.error('TTS error:', e);
             this.error.set(e?.message ?? String(e));
         } finally {
@@ -129,14 +176,21 @@ export class TtsLipsyncService {
     }
 
     stop(): void {
+        this.stopInternal(false);
+    }
+
+    private stopInternal(keepTransient: boolean): void {
         this.generation++;
-        this.gestures.clear();
+        this.gestures.clear({ keepTransient });
         for (const source of this.currentSources) {
             try { source.stop(); } catch { /* already stopped */ }
         }
         this.currentSources = [];
         for (const timer of this.pendingTimers) window.clearTimeout(timer);
         this.pendingTimers = [];
+        for (const iv of this.pendingIntervals) window.clearInterval(iv);
+        this.pendingIntervals = [];
+        this.bridging.set(false);
         for (const resolve of this.pendingTimerResolvers) resolve();
         this.pendingTimerResolvers = [];
         try { window.speechSynthesis?.cancel(); } catch { /* unavailable */ }
@@ -145,10 +199,7 @@ export class TtsLipsyncService {
         this.currentViseme.set('sil');
     }
 
-    /**
-     * Called every animation frame by the avatar component.
-     * Returns target ARKit weights for the mouth, crossfaded between visemes.
-     */
+    /** Per-frame mouth sampling against the precompiled viseme track. */
     getMouthWeights(): BlendWeights {
         const a = this.active;
         if (!a || a.frames.length === 0) return {};
@@ -172,132 +223,346 @@ export class TtsLipsyncService {
         this.currentViseme.set(frame.viseme);
 
         const base = VISEME_TO_ARKIT[frame.viseme];
-        const XFADE = 0.06; // 60 ms crossfade into next viseme
+        const XFADE = 0.06;
         if (next && frame.tEnd - now < XFADE) {
-            const p = 1 - (frame.tEnd - now) / XFADE; // 0->1
+            const p = 1 - (frame.tEnd - now) / XFADE;
             return this.mix(base, VISEME_TO_ARKIT[next.viseme], p);
         }
         return base;
     }
 
-    // ----------------------------------------------------------------- piper
-
-    private async ensurePiper(gen: number): Promise<any> {
-        if (this.piperModule) return this.piperModule;
-        this.state.set('loading-engine');
-        let mod: any;
-        try {
-            mod = await import('@diffusionstudio/vits-web');
-        } catch (e) {
-            throw new Error(
-                'Could not load the Piper TTS engine. Run: npm i @diffusionstudio/vits-web (then restart ng serve). ' +
-                'Original error: ' + (e as Error)?.message
-            );
-        }
-        if (gen !== this.generation) throw new Error('interrupted');
-        this.piperModule = mod;
-        return mod;
-    }
+    // ------------------------------------------------- piper: compile -> play
 
     private async speakPiper(segments: SpeechTimelineSegment[], gestures: TimelineGesture[], opts: SpeakOptions, gen: number): Promise<void> {
-        const tts = await this.ensurePiper(gen);
         const voiceId = opts.voiceId ?? PIPER_VOICES[opts.lang][0].id;
         const ctx = this.ensureAudioCtx();
+        const expanded = expandSegments(segments);
 
-        const playbackSegments = this.expandSpeechSegments(segments);
+        const deps = this.makeDeps(ctx, voiceId);
+
+        // hybrid: short replies -> ONE fully precompiled plan; long replies ->
+        // per-segment units compiled in the worker while the previous unit plays
+        const totalSpeechChars = expanded.reduce((a, s) => a + (s.kind === 'speech' ? s.text.length : 0), 0);
+        const units: ExpandedSegment[][] = totalSpeechChars <= FULL_PRECOMPILE_MAX_CHARS
+            ? [expanded]
+            : expanded.map(s => [s]);
+        const unitGestures = this.assignGesturesToUnits(units, gestures);
+
         this.state.set('synthesizing');
+        this.lastPerformance = null;
+        this.revealedChars.set(0);
+        const captured: PerformancePlan[] = [];
+        await this.playUnits(ctx, units, unitGestures, opts, gen, deps, captured, 0);
+    }
 
-        const synthesize = async (segment: Extract<PlaybackSegment, { kind: 'speech' }>): Promise<SynthesizedSpeechSegment> => {
-            const blob: Blob = await tts.predict(
-                { text: segment.text.trim(), voiceId },
-                (p: any) => {
-                    if (p?.total) this.downloadProgress.set(Math.min(1, p.loaded / p.total));
+    /**
+     * Progressive (two-phase) playback: Part A = first sentence (capped at
+     * partAMaxWords), tag-free, synthesized first -> starts playing within
+     * ~1-2 s. Part B (rest + gestures + clips) compiles in the worker while
+     * A plays and is appended on the same timeline. If B isn't ready at the
+     * seam, a bridge state holds (mouth closed, '…' pill, subtle thinking
+     * micro-gesture) — never a freeze, never overlapping audio.
+     * lastPerformance captures A+B plans, so ↻ replays the full stitched
+     * reply with no progressive gap.
+     */
+    private async speakProgressive(
+        split: { partA: string; partB: string; partBOffset: number; gesturesB: TimelineGesture[] },
+        opts: SpeakOptions, gen: number
+    ): Promise<void> {
+        const voiceId = opts.voiceId ?? PIPER_VOICES[opts.lang][0].id;
+        const ctx = this.ensureAudioCtx();
+        const deps = this.makeDeps(ctx, voiceId);
+        const t0 = performance.now();
+
+        this.state.set('synthesizing');
+        this.lastPerformance = null;
+        this.revealedChars.set(0);
+        const captured: PerformancePlan[] = [];
+
+        // Part A: single light unit, no gestures (top priority in the worker queue)
+        const tlA = buildSpeechTimeline(split.partA, []);
+        const planAPromise = compilePerformance(expandSegments(tlA.segments), [], opts.lang, deps);
+
+        // Part B: queued right behind A in the worker (FIFO), per-sentence units
+        const tlB = buildSpeechTimeline(split.partB, split.gesturesB);
+        const expandedB = expandSegments(tlB.segments);
+        const unitsB: ExpandedSegment[][] = expandedB.map(seg => [seg]);
+        const unitGesturesB = this.assignGesturesToUnits(unitsB, tlB.gestures);
+
+        const planA = await planAPromise;
+        if (gen !== this.generation) return;
+        captured.push(planA);
+        this.lastPerformance = captured;
+        this.lastCompileMs.set(planA.compileMs);
+        console.log(`[tts] progressive: part A (${split.partA.split(/\s+/).length} words) ready in ${(performance.now() - t0).toFixed(0)} ms — first word now`);
+
+        this.state.set('speaking');
+        const playA = this.playPlan(ctx, planA, gen, 0);
+        // compile B's first unit while A plays
+        await this.playUnitsAfter(playA, ctx, unitsB, unitGesturesB, opts, gen, deps, captured, split.partBOffset);
+    }
+
+    private makeDeps(ctx: AudioContext, voiceId: string): CompilerDeps {
+        return {
+            synthesize: async (text: string) => {
+                const first = !this.firstSynthMarked;
+                if (first) { this.firstSynthMarked = true; this.timing?.mark('synthA_started'); }
+                const wav = await this.piper.synthesizeWav(text, voiceId, p => this.downloadProgress.set(p));
+                if (first) this.timing?.mark('synthA_done');
+                this.downloadProgress.set(null);
+                const buffer = await ctx.decodeAudioData(wav);
+                if (first) this.timing?.mark('decodeA_done');
+                return buffer;
+            },
+            getClip: (url: string) => this.loadAudioClip(ctx, url),
+            measureBounds: findSpeechBounds,
+        };
+    }
+
+    /** Plays compiled units sequentially with prefetch + bridge handling. */
+    private async playUnits(
+        ctx: AudioContext, units: ExpandedSegment[][], unitGestures: TimelineGesture[][],
+        opts: SpeakOptions, gen: number, deps: CompilerDeps,
+        captured: PerformancePlan[], revealOffset: number
+    ): Promise<void> {
+        if (!units.length) return;
+        const first = compilePerformance(units[0], unitGestures[0], opts.lang, deps);
+        await this.playUnitsAfter(Promise.resolve(), ctx, units, unitGestures, opts, gen, deps, captured, revealOffset, first);
+    }
+
+    private async playUnitsAfter(
+        previousPlayback: Promise<void>,
+        ctx: AudioContext, units: ExpandedSegment[][], unitGestures: TimelineGesture[][],
+        opts: SpeakOptions, gen: number, deps: CompilerDeps,
+        captured: PerformancePlan[], revealOffset: number,
+        firstPending?: Promise<PerformancePlan>
+    ): Promise<void> {
+        const debugPlan = localStorage.getItem('textAvatar.debugPlan') === '1';
+        let pending = firstPending ?? (units.length ? compilePerformance(units[0], unitGestures[0], opts.lang, deps) : null);
+        await previousPlayback;
+        if (gen !== this.generation || !pending) return;
+
+        for (let i = 0; i < units.length; i++) {
+            // bridge: if the next plan isn't compiled yet, hold naturally
+            let resolved = false;
+            pending.then(() => { resolved = true; }, () => { resolved = true; });
+            await Promise.resolve(); // let an already-settled promise mark itself
+            if (!resolved) {
+                this.bridging.set(true);
+                if (this.waitingAnimsEnabled()) {
+                    this.gestures.triggerTransient('thinking', 1, 'fast'); // subtle micro-gesture, killed at audio start
                 }
-            );
-            this.downloadProgress.set(null);
-            const arr = await blob.arrayBuffer();
-            const buffer = await ctx.decodeAudioData(arr);
-            const bounds = findSpeechBounds(buffer);
-            const frames = scaleTimeline(textToVisemes(segment.text, opts.lang), bounds.start, bounds.end);
-            return { buffer, bounds, frames };
-        };
-
-        const pendingSpeech = new Map<number, Promise<SynthesizedSpeechSegment>>();
-        const ensurePendingSpeech = (fromIndex: number) => {
-            const nextIndex = this.nextSpeechIndex(playbackSegments, fromIndex);
-            if (nextIndex >= 0 && !pendingSpeech.has(nextIndex)) {
-                pendingSpeech.set(nextIndex, synthesize(playbackSegments[nextIndex] as Extract<PlaybackSegment, { kind: 'speech' }>));
             }
-        };
-
-        ensurePendingSpeech(0);
-        for (let i = 0; i < playbackSegments.length; i++) {
+            const plan = await pending;
+            this.bridging.set(false);
             if (gen !== this.generation) return;
-            const segment = playbackSegments[i];
-            ensurePendingSpeech(i + 1);
-            if (segment.kind === 'speech') {
-                const pending = pendingSpeech.get(i) ?? synthesize(segment);
-                const { buffer, frames, bounds } = await pending;
-                if (gen !== this.generation) return;
-                this.state.set('speaking');
-                await this.playSpeechBuffer(ctx, buffer, frames, gen, this.gesturesForSpeechSegment(gestures, segment), bounds);
-            } else if (segment.kind === 'pause') {
-                this.state.set('speaking');
-                await this.playSilence(segment.durationMs / 1000, gen);
-            } else {
-                this.state.set('speaking');
-                await this.playExpressionClip(ctx, segment, gen);
+            captured.push(plan);
+            this.lastPerformance = captured;
+            if (i + 1 < units.length) {
+                pending = compilePerformance(units[i + 1], unitGestures[i + 1], opts.lang, deps);
             }
+            this.lastCompileMs.set(plan.compileMs);
+            console.log(`[tts] unit ${i + 1}/${units.length}: compiled ${plan.duration.toFixed(1)} s audio in ${plan.compileMs.toFixed(0)} ms`);
+            if (debugPlan) console.log('[tts] PerformancePlan', JSON.stringify(planToJson(plan), null, 2));
+
+            this.state.set('speaking');
+            await this.playPlan(ctx, plan, gen, revealOffset);
             if (gen !== this.generation) return;
-            if (this.nextSpeechIndex(playbackSegments, i + 1) >= 0) this.state.set('synthesizing');
         }
     }
 
-    /** Gestures whose anchor falls inside a speech segment, with anchor as 0..1 fraction. */
-    private gesturesForSpeechSegment(gestures: TimelineGesture[], segment: Extract<PlaybackSegment, { kind: 'speech' }>):
-        { id: string; frac: number; repetitions?: number; speed?: TimelineGesture['speed'] }[] {
-        const start = segment.sourceStart;
-        const end = segment.sourceEnd;
-        const len = Math.max(1, end - start);
-        return gestures
-            .filter(g => g.charIndex >= start && g.charIndex <= end)
-            .map(g => ({ id: g.id, frac: Math.min(1, Math.max(0, (g.charIndex - start) / len)), repetitions: g.repetitions, speed: g.speed }));
+    /**
+     * Re-perform previously compiled plans (replay button): instant, zero
+     * synthesis — buffers are already decoded inside the plans.
+     */
+    async replayPerformance(plans: PerformancePlan[]): Promise<void> {
+        if (!plans?.length) return;
+        this.stop(); // interrupts anything playing (generation token)
+        const gen = ++this.generation;
+        const ctx = this.ensureAudioCtx();
+        try {
+            this.state.set('speaking');
+            for (const plan of plans) {
+                if (gen !== this.generation) return;
+                await this.playPlan(ctx, plan, gen);
+            }
+        } finally {
+            if (gen === this.generation) {
+                this.state.set('idle');
+                this.active = null;
+                this.currentViseme.set('sil');
+            }
+        }
     }
 
-    private playSpeechBuffer(
-        ctx: AudioContext, buffer: AudioBuffer, frames: VisemeFrame[], gen: number,
-        chunkGestures: { id: string; frac: number; repetitions?: number; speed?: TimelineGesture['speed'] }[] = [],
-        bounds: { start: number; end: number } = { start: 0, end: buffer.duration }
-    ): Promise<void> {
-        return this.playAudioBuffer(ctx, buffer, frames, gen, (startAt) => {
-            const wallStart = wallNow() + (startAt - ctx.currentTime);
-            const span = bounds.end - bounds.start;
-            for (const g of chunkGestures) {
-                this.gestures.schedule(g.id, wallStart + bounds.start + g.frac * span, g.repetitions, g.speed);
+    /** Each gesture goes to the first unit whose source range covers/follows it. */
+    private assignGesturesToUnits(units: ExpandedSegment[][], gestures: TimelineGesture[]): TimelineGesture[][] {
+        const ranges = units.map(unit => {
+            let end = -1;
+            for (const s of unit) {
+                end = Math.max(end, s.kind === 'speech' ? s.sourceEnd : s.sourceIndex);
             }
+            return end;
         });
+        const out: TimelineGesture[][] = units.map(() => []);
+        for (const g of gestures) {
+            let idx = ranges.findIndex(end => g.charIndex <= end);
+            if (idx < 0) idx = units.length - 1;
+            out[idx].push(g);
+        }
+        return out;
+    }
+
+    /**
+     * Dumb sampler playback: every source scheduled up front on the audio
+     * clock; gestures scheduled on the wall clock; mouth sampled per frame
+     * from the plan's viseme track. Nothing is computed during playback.
+     */
+    /** Audio scheduling slack: small cushion so start(base) is never in the past. */
+    private static readonly SCHEDULING_SLACK_S = 0.025;
+
+    private playPlan(ctx: AudioContext, plan: PerformancePlan, gen: number, revealOffset = 0): Promise<void> {
+        return new Promise(resolve => {
+            if (gen !== this.generation) { resolve(); return; }
+            const base = ctx.currentTime + TtsLipsyncService.SCHEDULING_SLACK_S;
+            const wallBase = wallNow() + TtsLipsyncService.SCHEDULING_SLACK_S;
+
+            // AUDIO FIRST: schedule every source synchronously before any
+            // gesture/reveal bookkeeping — speech start is gated ONLY on the
+            // decoded plan being ready, never on animation state.
+            for (const ev of plan.events) {
+                if (ev.type === 'speech' || ev.type === 'clip') {
+                    const buffer = plan.buffers.get(ev.bufferId);
+                    if (!buffer) { console.warn('[tts] missing buffer in plan:', ev.bufferId); continue; }
+                    const source = ctx.createBufferSource();
+                    source.buffer = buffer;
+                    source.connect(ctx.destination);
+                    source.start(base + ev.t0);
+                    this.currentSources.push(source);
+                    source.onended = () => {
+                        this.currentSources = this.currentSources.filter(x => x !== source);
+                    };
+                }
+            }
+            this.timing?.mark('audio_scheduled');
+
+            // KILL SWITCH (parallel, never gates audio): waiting/bridge gestures
+            // end exactly when this plan's audio starts
+            const killAt = window.setTimeout(() => {
+                this.pendingTimers = this.pendingTimers.filter(x => x !== killAt);
+                this.gestures.cancelTransient();
+                this.reportFirstAudio();
+            }, Math.max(0, (base - ctx.currentTime) * 1000));
+            this.pendingTimers.push(killAt);
+
+            // karaoke reveal: sample spoken chars on a light interval
+            const maxSrcEnd = plan.events.reduce((a, e) => e.type === 'speech' ? Math.max(a, e.srcEnd) : a, 0);
+            const iv = window.setInterval(() => {
+                const t = ctx.currentTime - base;
+                if (t >= 0) {
+                    const r = revealOffset + revealAtTime(plan.events, t);
+                    if (r > this.revealedChars()) this.revealedChars.set(r);
+                }
+            }, 60);
+            this.pendingIntervals.push(iv);
+
+            for (const g of plan.gestures) {
+                this.gestures.schedule(g.gestureId, wallBase + g.t, g.repetitions, g.speed as any, g.allowMouth ?? false);
+            }
+
+            this.active = { frames: plan.visemeTrack, anchor: base, duration: plan.duration, clock: 'audio' };
+
+            const timer = window.setTimeout(() => {
+                this.pendingTimers = this.pendingTimers.filter(t => t !== timer);
+                this.pendingTimerResolvers = this.pendingTimerResolvers.filter(r => r !== resolve);
+                window.clearInterval(iv);
+                this.pendingIntervals = this.pendingIntervals.filter(x => x !== iv);
+                if (maxSrcEnd > 0) {
+                    const r = revealOffset + maxSrcEnd;
+                    if (r > this.revealedChars()) this.revealedChars.set(r);
+                }
+                resolve();
+            }, (plan.duration + 0.1) * 1000);
+            this.pendingTimers.push(timer);
+            this.pendingTimerResolvers.push(resolve);
+        });
+    }
+
+    /** Finalizes the per-reply timing summary at the actual audio start. */
+    private reportFirstAudio(): void {
+        if (this.firstAudioReported || !this.timing) return;
+        this.firstAudioReported = true;
+        this.timing.mark('audio_started');
+        const summary = this.timing.summary(this.piper.lastSynthMeta?.sessionCached);
+        if (localStorage.getItem('textAvatar.debugPlan') === '1' || localStorage.getItem('textAvatar.debugTiming') === '1') {
+            console.log('[tts] speech-start timing', summary.totalMs.toFixed(0) + ' ms total');
+            console.table(summary.stages.map(st => ({ stage: st.name, ms: Math.round(st.ms) })));
+        }
+        try { this.timingOpts?.onFirstAudio?.(summary); } catch { /* listener errors are not ours */ }
+    }
+
+    /**
+     * Pre-warm the pipeline while the user is still talking/typing:
+     * resumes the AudioContext and runs a tiny synthesis so the worker loads
+     * the engine + model and (via the session cache) builds the ONNX session
+     * once — the real reply then skips the dominant cold-start cost.
+     */
+    warmup(opts: SpeakOptions): void {
+        try { this.ensureAudioCtx(); } catch { /* no audio support */ }
+        if (opts.provider !== 'piper') return;
+        const voiceId = opts.voiceId ?? PIPER_VOICES[opts.lang][0].id;
+        if (this.warmedVoice === voiceId) return;
+        this.warmedVoice = voiceId;
+        const t0 = performance.now();
+        this.piper.synthesizeWav('ok', voiceId)
+            .then(() => console.log(`[tts] warmup(${voiceId}) done in ${(performance.now() - t0).toFixed(0)} ms`))
+            .catch(err => { this.warmedVoice = null; console.warn('[tts] warmup failed:', err?.message ?? err); });
+    }
+
+    /** Waiting/bridge animations during pre-speech gaps (experiment flag, default OFF). */
+    waitingAnimsEnabled(): boolean {
+        return localStorage.getItem('textAvatar.waitingAnims') === '1';
+    }
+
+    /** localStorage flags for A/B testing the progressive mode */
+    private progressiveEnabled(): boolean {
+        return localStorage.getItem('textAvatar.progressive') !== '0';
+    }
+    private partAMaxWords(): number {
+        const n = parseInt(localStorage.getItem('textAvatar.partAMaxWords') ?? '8', 10);
+        return Number.isFinite(n) ? Math.max(3, Math.min(20, n)) : 8;
+    }
+
+    // ------------------------------------------------------------- webspeech
+    // (Web Speech API cannot precompile - no audio buffers - so this path keeps
+    //  the segment-by-segment player; clips are preloaded so it also avoids
+    //  the on-demand decode hitch.)
+
+    private async speakWebSpeech(segments: SpeechTimelineSegment[], gestures: TimelineGesture[], opts: SpeakOptions, gen: number): Promise<void> {
+        const synth = window.speechSynthesis;
+        if (!synth) throw new Error('Web Speech API not available in this browser');
+        const ctx = this.ensureAudioCtx();
+        const playbackSegments = expandSegments(segments);
+
+        for (const segment of playbackSegments) {
+            if (gen !== this.generation) return;
+            this.state.set('speaking');
+            if (segment.kind === 'speech') {
+                await this.playWebSpeechSegment(segment, gestures, opts, gen);
+            } else if (segment.kind === 'pause') {
+                await this.playSilence(segment.durationMs / 1000, gen);
+            } else {
+                await this.playExpressionClip(ctx, segment, gen);
+            }
+        }
     }
 
     private async playExpressionClip(ctx: AudioContext, segment: Extract<SpeechTimelineSegment, { kind: 'expression' }>, gen: number): Promise<void> {
         const buffer = await this.loadAudioClip(ctx, segment.clipUrl);
         if (gen !== this.generation) return;
         const frames: VisemeFrame[] = [{ viseme: 'sil', tStart: 0, tEnd: buffer.duration }];
-        // play exactly one gesture cycle stretched to match the clip length
         const clipSpeed = Math.max(SPEED_MULTIPLIER_MIN, Math.min(SPEED_MULTIPLIER_MAX, CYCLE_BASE_SECONDS / Math.max(0.1, buffer.duration)));
-        await this.playAudioBuffer(ctx, buffer, frames, gen, (startAt) => {
-            const wallStart = wallNow() + (startAt - ctx.currentTime);
-            this.gestures.schedule(segment.gestureId, wallStart, 1, clipSpeed, true);
-        });
-    }
-
-    private playAudioBuffer(
-        ctx: AudioContext,
-        buffer: AudioBuffer,
-        frames: VisemeFrame[],
-        gen: number,
-        onScheduled?: (startAt: number) => void
-    ): Promise<void> {
-        return new Promise(resolve => {
+        await new Promise<void>(resolve => {
             if (gen !== this.generation) { resolve(); return; }
             const source = ctx.createBufferSource();
             source.buffer = buffer;
@@ -310,7 +575,8 @@ export class TtsLipsyncService {
             const startAt = ctx.currentTime + 0.03;
             source.start(startAt);
             this.active = { frames, anchor: startAt, duration: buffer.duration, clock: 'audio' };
-            onScheduled?.(startAt);
+            const wallStart = wallNow() + (startAt - ctx.currentTime);
+            this.gestures.schedule(segment.gestureId, wallStart, 1, clipSpeed, true);
         });
     }
 
@@ -329,29 +595,8 @@ export class TtsLipsyncService {
         });
     }
 
-    // ------------------------------------------------------------- webspeech
-
-    private async speakWebSpeech(segments: SpeechTimelineSegment[], gestures: TimelineGesture[], opts: SpeakOptions, gen: number): Promise<void> {
-        const synth = window.speechSynthesis;
-        if (!synth) throw new Error('Web Speech API not available in this browser');
-        const ctx = this.ensureAudioCtx();
-        const playbackSegments = this.expandSpeechSegments(segments);
-
-        for (const segment of playbackSegments) {
-            if (gen !== this.generation) return;
-            this.state.set('speaking');
-            if (segment.kind === 'speech') {
-                await this.playWebSpeechSegment(segment, gestures, opts, gen);
-            } else if (segment.kind === 'pause') {
-                await this.playSilence(segment.durationMs / 1000, gen);
-            } else {
-                await this.playExpressionClip(ctx, segment, gen);
-            }
-        }
-    }
-
     private async playWebSpeechSegment(
-        segment: Extract<PlaybackSegment, { kind: 'speech' }>,
+        segment: Extract<ExpandedSegment, { kind: 'speech' }>,
         gestures: TimelineGesture[],
         opts: SpeakOptions,
         gen: number
@@ -370,15 +615,19 @@ export class TtsLipsyncService {
                 if (gen !== this.generation) return;
                 const anchor = performance.now() / 1000;
                 this.active = { frames, anchor, duration: estDuration, clock: 'wall' };
-                for (const g of this.gesturesForSpeechSegment(gestures, segment)) {
-                    this.gestures.schedule(g.id, anchor + g.frac * estDuration, g.repetitions, g.speed);
+                const start = segment.sourceStart;
+                const len = Math.max(1, segment.sourceEnd - segment.sourceStart);
+                for (const g of gestures) {
+                    if (g.charIndex >= start && g.charIndex <= segment.sourceEnd) {
+                        const frac = Math.min(1, Math.max(0, (g.charIndex - start) / len));
+                        this.gestures.schedule(g.id, anchor + frac * estDuration, g.repetitions, g.speed);
+                    }
                 }
             };
             utter.onboundary = (ev: SpeechSynthesisEvent) => {
                 if (gen !== this.generation || !this.active || ev.name !== 'word') return;
                 const progress = ev.charIndex / Math.max(1, segment.text.length);
-                const expectedT = progress * estDuration;
-                this.active.anchor = performance.now() / 1000 - expectedT;
+                this.active.anchor = performance.now() / 1000 - progress * estDuration;
             };
             utter.onend = () => resolve();
             utter.onerror = (e) => {
@@ -395,33 +644,6 @@ export class TtsLipsyncService {
         if (!this.audioCtx) this.audioCtx = new AudioContext();
         if (this.audioCtx.state === 'suspended') this.audioCtx.resume();
         return this.audioCtx;
-    }
-
-    private expandSpeechSegments(segments: SpeechTimelineSegment[]): PlaybackSegment[] {
-        const out: PlaybackSegment[] = [];
-        for (const segment of segments) {
-            if (segment.kind !== 'speech') {
-                out.push(segment);
-                continue;
-            }
-            const chunks: TextChunk[] = splitIntoChunksWithOffsets(segment.text);
-            for (const chunk of chunks) {
-                out.push({
-                    kind: 'speech',
-                    text: chunk.text,
-                    sourceStart: segment.sourceStart + chunk.start,
-                    sourceEnd: segment.sourceStart + chunk.start + chunk.text.length,
-                });
-            }
-        }
-        return out;
-    }
-
-    private nextSpeechIndex(segments: PlaybackSegment[], fromIndex: number): number {
-        for (let i = fromIndex; i < segments.length; i++) {
-            if (segments[i].kind === 'speech') return i;
-        }
-        return -1;
     }
 
     private loadAudioClip(ctx: AudioContext, url: string): Promise<AudioBuffer> {

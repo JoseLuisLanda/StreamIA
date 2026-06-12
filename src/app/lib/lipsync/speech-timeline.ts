@@ -2,9 +2,9 @@ import type { ParsedGesture } from '../gestures/gesture-markup';
 import type { SpeedParam } from '../gestures/gesture-library';
 
 export const PAUSE_MAP: Record<string, number> = {
-    ',': 1000,
-    '...': 2000,
-    '…': 2000,
+    ',': 100,
+    '...': 300,
+    '…': 300,
 };
 
 export interface ExpressionRegistryEntry {
