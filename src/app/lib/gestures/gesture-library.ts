@@ -86,6 +86,13 @@ export interface GestureDef {
     exitEasing: EasingType;
     /** permit mouth/jaw morph channels when the scheduler marks the gesture as non-speech */
     allowMouth?: boolean;
+    /**
+     * Real-time duration of one full keyframe cycle in seconds.
+     * Set by MotionCompilerService to the actual recording length so
+     * GesturePlayerService advances phase at the correct rate.
+     * Built-in gestures leave this undefined → falls back to CYCLE_BASE_SECONDS (1.0 s).
+     */
+    cycleDurationSec?: number;
     channels: GestureChannel[];
 }
 
@@ -240,14 +247,13 @@ export function sampleChannel(channel: GestureChannel, u: number): number {
     if (kf.length === 0) return 0;
     if (u <= kf[0].t) return kf[0].v;
     if (u >= kf[kf.length - 1].t) return kf[kf.length - 1].v;
-    for (let i = 0; i < kf.length - 1; i++) {
-        const a = kf[i], b = kf[i + 1];
-        if (u >= a.t && u <= b.t) {
-            const span = b.t - a.t || 1e-6;
-            let p = (u - a.t) / span;
-            p = p * p * (3 - 2 * p); // smoothstep ease in/out
-            return a.v + (b.v - a.v) * p;
-        }
+    // linear interpolation between bracketing keyframes
+    let lo = 0, hi = kf.length - 1;
+    while (hi - lo > 1) {
+        const mid = (lo + hi) >> 1;
+        if (kf[mid].t <= u) lo = mid; else hi = mid;
     }
-    return 0;
+    const t0 = kf[lo].t, t1 = kf[hi].t;
+    const alpha = t1 === t0 ? 1 : (u - t0) / (t1 - t0);
+    return kf[lo].v + alpha * (kf[hi].v - kf[lo].v);
 }

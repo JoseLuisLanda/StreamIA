@@ -231,6 +231,46 @@ export class TtsLipsyncService {
         return base;
     }
 
+    /**
+     * Play a pre-synthesized audio buffer with its pre-computed viseme timeline.
+     * Used by gesture-studio to play back a gesture's converted TTS voice in sync.
+     * Fully replaces any active speech — mouth morphs are driven by `lipsyncFrames`
+     * via the normal `getMouthWeights()` path.
+     */
+    async playVisemeTrack(audioData: ArrayBuffer, lipsyncFrames: VisemeFrame[]): Promise<void> {
+        this.stopInternal(false);
+        const ctx = this.ensureAudioCtx();
+        // Resume AudioContext if suspended (browser autoplay policy)
+        if (ctx.state === 'suspended') await ctx.resume();
+
+        const audioBuffer = await ctx.decodeAudioData(audioData.slice(0));
+        const source = ctx.createBufferSource();
+        source.buffer = audioBuffer;
+        source.connect(ctx.destination);
+
+        const anchor = ctx.currentTime;
+        source.start(anchor);
+        this.currentSources = [source];
+
+        this.active = {
+            frames: lipsyncFrames,
+            anchor,
+            duration: audioBuffer.duration,
+            clock: 'audio',
+        };
+        this.state.set('speaking');
+
+        source.onended = () => {
+            // Only reset if this is still the active playback (not interrupted)
+            if (this.active?.anchor === anchor) {
+                this.active = null;
+                this.state.set('idle');
+                this.currentViseme.set('sil');
+            }
+            this.currentSources = this.currentSources.filter(x => x !== source);
+        };
+    }
+
     // ------------------------------------------------- piper: compile -> play
 
     private async speakPiper(segments: SpeechTimelineSegment[], gestures: TimelineGesture[], opts: SpeakOptions, gen: number): Promise<void> {

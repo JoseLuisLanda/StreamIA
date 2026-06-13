@@ -124,9 +124,13 @@ export class GesturePlayerService {
         return true;
     }
 
-    /** Programmatic API: play a gesture immediately (repetitions cycles). */
-    trigger(id: string, repetitions?: number, speed?: 'slow' | 'normal' | 'fast' | number): boolean {
-        return this.schedule(id, now(), repetitions, speed);
+    /** Programmatic API: play a gesture immediately (repetitions cycles).
+     *  allowMouthNow defaults to auto: true when the gesture's def.allowMouth is set,
+     *  so compiled expression/recording clips play mouth channels without extra call-site plumbing. */
+    trigger(id: string, repetitions?: number, speed?: 'slow' | 'normal' | 'fast' | number, allowMouthNow?: boolean): boolean {
+        const def = GESTURE_MAP.get(id);
+        const effectiveAllowMouth = allowMouthNow ?? (def?.allowMouth === true);
+        return this.schedule(id, now(), repetitions, speed, effectiveAllowMouth);
     }
 
     /** Waiting/filler gesture (LLM wait, A→B bridge): killed at audio start. */
@@ -279,9 +283,12 @@ export class GesturePlayerService {
         };
     }
 
-    /** cycles per second for this gesture at its speed */
+    /** cycles per second for this gesture at its speed.
+     *  Uses def.cycleDurationSec when set (compiled recordings store their actual length),
+     *  falling back to CYCLE_BASE_SECONDS for built-in gestures. */
     private phaseVelocity(g: ActiveGesture): number {
-        return g.speedMultiplier / CYCLE_BASE_SECONDS;
+        const cycleSec = g.def.cycleDurationSec ?? CYCLE_BASE_SECONDS;
+        return g.speedMultiplier / cycleSec;
     }
 
     /** Capture the current pose of all channels for a smooth exit blend. */

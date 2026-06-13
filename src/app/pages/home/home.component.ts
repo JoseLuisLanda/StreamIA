@@ -34,6 +34,7 @@ import { AuthService } from '../../services/auth.service';
           <a routerLink="/ar-viewer" class="cta-btn cta-ar">📱 AR Viewer</a>
           <a routerLink="/ar-face-tracking" class="cta-btn cta-secondary">AR con Face Tracking</a>
           <a routerLink="/ar" class="cta-btn cta-tertiary">Preview de Modelos 3D</a>
+          <a routerLink="/gesture-studio" class="cta-btn cta-studio">🎭 Gesture Studio</a>
         </div>
 
         <section class="feature-grid">
@@ -215,6 +216,14 @@ import { AuthService } from '../../services/auth.service';
       color: #e2e8f0;
       border-color: #415f35;
       background: rgba(19, 31, 14, 0.7);
+    }
+    .cta-studio {
+      color: #e2e8f0;
+      border-color: #5c24ff;
+      background: rgba(92, 36, 255, 0.18);
+    }
+    .cta-studio:hover {
+      background: rgba(92, 36, 255, 0.32);
     }
     .feature-grid {
       margin: 2rem auto 0;

@@ -75,7 +75,7 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
     private blinkStart = 0;
     private readonly BLINK_MS = 160;
 
-    private resizeHandler = this.onWindowResize.bind(this);
+    private resizeObserver!: ResizeObserver;
 
     ngAfterViewInit() {
         this.initThree();
@@ -91,7 +91,7 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
 
     ngOnDestroy() {
         cancelAnimationFrame(this.requestID);
-        window.removeEventListener('resize', this.resizeHandler);
+        this.resizeObserver?.disconnect();
         this.renderer?.dispose();
     }
 
@@ -119,7 +119,11 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
         hemiLight.position.set(0, 20, 0);
         this.scene.add(hemiLight);
 
-        window.addEventListener('resize', this.resizeHandler);
+        // Use ResizeObserver so the camera/renderer updates whenever the
+        // *container* changes size (e.g. single→dual viewport split), not
+        // just when the browser window is resized.
+        this.resizeObserver = new ResizeObserver(() => this.onWindowResize());
+        this.resizeObserver.observe(el);
     }
 
     private normalizeAvatarUrl(url: string): string {

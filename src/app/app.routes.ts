@@ -18,5 +18,9 @@ export const routes: Routes = [
         path: 'text-avatar',
         loadComponent: () => import('./pages/text-avatar/text-avatar.component').then(m => m.TextAvatarComponent)
     },
+    {
+        path: 'gesture-studio',
+        loadComponent: () => import('./pages/gesture-studio/gesture-studio.component').then(m => m.GestureStudioComponent)
+    },
     { path: '**', redirectTo: '' }
 ];
