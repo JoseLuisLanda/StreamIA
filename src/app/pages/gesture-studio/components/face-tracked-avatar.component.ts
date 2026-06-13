@@ -1,7 +1,7 @@
 import {
     Component, ElementRef, ViewChild, Input,
     AfterViewInit, OnDestroy, OnChanges, SimpleChanges,
-    inject, NgZone
+    inject, NgZone, signal
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import * as THREE from 'three';
@@ -23,28 +23,28 @@ import { MotionRecorderService } from '../../../services/motion-recorder.service
       <canvas #canvas class="ft-canvas"></canvas>
 
       <!-- Overlay: initialising / waiting for face -->
-      <div class="ft-overlay" *ngIf="!faceDetected">
+      <div class="ft-overlay" *ngIf="!faceDetected()">
         <div class="ft-overlay-inner">
           <div class="ft-icon">
-            {{ cameraState === 'requesting' ? '📷' : isLoading ? '⏳' : '👤' }}
+            {{ cameraState() === 'requesting' ? '📷' : isLoading() ? '⏳' : '👤' }}
           </div>
           <div class="ft-msg">
-            {{ cameraState === 'requesting' ? 'Requesting camera…'
-             : cameraState === 'denied'    ? 'Camera access denied'
-             : isLoading                   ? 'Loading avatar…'
+            {{ cameraState() === 'requesting' ? 'Requesting camera…'
+             : cameraState() === 'denied'    ? 'Camera access denied'
+             : isLoading()                 ? 'Loading avatar…'
              :                              'Look at camera' }}
           </div>
-          <div class="ft-sub" *ngIf="cameraState === 'ready' && !isLoading">
+          <div class="ft-sub" *ngIf="cameraState() === 'ready' && !isLoading()">
             Face tracking active — move into frame
           </div>
-          <div class="ft-sub err" *ngIf="cameraState === 'denied'">
+          <div class="ft-sub err" *ngIf="cameraState() === 'denied'">
             Enable camera access in browser settings and reload.
           </div>
         </div>
       </div>
 
       <!-- Live badge -->
-      <div class="ft-live-badge" *ngIf="faceDetected">
+      <div class="ft-live-badge" *ngIf="faceDetected()">
         <span class="ft-live-dot"></span> TRACKING
       </div>
     </div>
@@ -129,10 +129,13 @@ export class FaceTrackedAvatarComponent implements AfterViewInit, OnDestroy, OnC
     // Resize
     private resizeObserver!: ResizeObserver;
 
-    // Public state (template bindings)
-    isLoading = true;
-    faceDetected = false;
-    cameraState: 'requesting' | 'ready' | 'denied' = 'requesting';
+    // Public state (template bindings) — signals so the template updates
+    // reactively without depending on Angular zone scheduling (animate() runs
+    // outside zone via runOutsideAngular; plain property writes don't reliably
+    // trigger CD; signals do regardless of zone context)
+    readonly isLoading    = signal(true);
+    readonly faceDetected = signal(false);
+    readonly cameraState  = signal<'requesting' | 'ready' | 'denied'>('requesting');
 
     async ngAfterViewInit(): Promise<void> {
         this.initThree();
@@ -160,13 +163,13 @@ export class FaceTrackedAvatarComponent implements AfterViewInit, OnDestroy, OnC
     // ------------------------------------------------------------------ Camera init
 
     private async initCamera(): Promise<void> {
-        this.ngZone.run(() => { this.cameraState = 'requesting'; });
+        this.cameraState.set('requesting');
         try {
             await this.recorder.enableCamera(this.videoRef.nativeElement);
-            this.ngZone.run(() => { this.cameraState = 'ready'; });
+            this.cameraState.set('ready');
         } catch (e) {
             console.warn('[FaceTrackedAvatar] camera init failed:', e);
-            this.ngZone.run(() => { this.cameraState = 'denied'; });
+            this.cameraState.set('denied');
         }
     }
 
@@ -233,7 +236,7 @@ export class FaceTrackedAvatarComponent implements AfterViewInit, OnDestroy, OnC
     }
 
     private async loadAvatar(url: string): Promise<void> {
-        this.isLoading = true;
+        this.isLoading.set(true);
         const normUrl = this.normalizeUrl(url);
         const loader = new GLTFLoader();
         try {
@@ -246,7 +249,7 @@ export class FaceTrackedAvatarComponent implements AfterViewInit, OnDestroy, OnC
             }
         } catch (e) {
             console.error('[FaceTrackedAvatar] loadAvatar error:', e);
-            this.isLoading = false;
+            this.isLoading.set(false);
         }
     }
 
@@ -256,9 +259,9 @@ export class FaceTrackedAvatarComponent implements AfterViewInit, OnDestroy, OnC
             .then(ab => {
                 this.modelCache.cacheModel(url, ab);
                 loader.parse(ab, '', (gltf: any) => this.onModelLoaded(gltf),
-                    (err: any) => { console.error('[FaceTrackedAvatar] parse error', err); this.isLoading = false; });
+                    (err: any) => { console.error('[FaceTrackedAvatar] parse error', err); this.isLoading.set(false); });
             })
-            .catch(e => { console.error('[FaceTrackedAvatar] download error', e); this.isLoading = false; });
+            .catch(e => { console.error('[FaceTrackedAvatar] download error', e); this.isLoading.set(false); });
     }
 
     private onModelLoaded(gltf: any): void {
@@ -290,7 +293,7 @@ export class FaceTrackedAvatarComponent implements AfterViewInit, OnDestroy, OnC
             }
         });
 
-        this.isLoading = false;
+        this.isLoading.set(false);
     }
 
     // ------------------------------------------------------------------ Render loop
@@ -305,8 +308,8 @@ export class FaceTrackedAvatarComponent implements AfterViewInit, OnDestroy, OnC
 
         // Update face-detected flag (run in zone only on state change)
         const tracking = blendshapes.length > 0;
-        if (tracking !== this.faceDetected) {
-            this.ngZone.run(() => { this.faceDetected = tracking; });
+        if (tracking !== this.faceDetected()) {
+            this.faceDetected.set(tracking);
         }
 
         // Apply all ARKit blendshapes directly from MediaPipe

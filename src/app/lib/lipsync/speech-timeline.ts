@@ -14,19 +14,11 @@ export interface ExpressionRegistryEntry {
     triggers?: string[];
 }
 
-export const EXPRESSION_REGISTRY: Record<string, ExpressionRegistryEntry> = {
-    sigh: {
-        id: 'sigh',
-        clipUrl: '/assets/audio/sigh.wav',
-        gestureId: 'sigh',
-    },
-    laugh: {
-        id: 'laugh',
-        clipUrl: '/assets/audio/laugh.wav',
-        gestureId: 'laugh',
-        triggers: ['jaja', 'jeje', 'haha'],
-    },
-};
+// Expression clip entries require pre-recorded audio files under /assets/audio/.
+// sigh and laugh have full motion definitions in gesture-library.ts and are
+// handled as regular timeline gestures (motion-only, like 'thinking' or 'yes').
+// Add entries here only when the corresponding audio clip files are available.
+export const EXPRESSION_REGISTRY: Record<string, ExpressionRegistryEntry> = {};
 
 export const EXPRESSION_IDS = new Set(Object.keys(EXPRESSION_REGISTRY));
 

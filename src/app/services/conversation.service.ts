@@ -31,6 +31,10 @@ export interface ConvMessage {
     kind?: 'info' | 'error';
     /** assistant messages with a cached/recompilable performance */
     replayable?: boolean;
+    /** Lead-in gesture block played before TTS speech (stored for replay) */
+    leadGesture?: string;
+    /** Tail gesture block played after TTS speech ends (stored for replay) */
+    tailGesture?: string;
 }
 
 export interface ConvTtsOpts {
@@ -59,6 +63,12 @@ export class ConversationService {
     public speakingMsgId: WritableSignal<number | null> = signal(null);
     /** message whose text is being revealed karaoke-style (live turns only, never replays) */
     public revealingMsgId: WritableSignal<number | null> = signal(null);
+    /** Lead-in gesture ID played immediately while the LLM is generating (covers latency).
+     *  Set from the Response Editor lead-in dropdown before each live turn. */
+    public liveLeadGesture: WritableSignal<string> = signal('');
+    /** Tail gesture ID played after body speech ends in live turns.
+     *  Set from the Response Editor tail dropdown before each live turn. */
+    public liveTailGesture: WritableSignal<string> = signal('');
 
     /** generation token: bumping it makes any in-flight turn a no-op */
     private gen = 0;
@@ -143,21 +153,30 @@ export class ConversationService {
         }
     }
 
-    /** Manual "Modo directo": speak typed text through the same pipeline + log it. */
-    async sayManual(text: string, opts: ConvTtsOpts): Promise<void> {
+    /** Manual "Modo directo": speak typed text through the same pipeline + log it.
+     *  lead/tail gesture IDs are stored on the message so replay can reconstruct the full sequence. */
+    async sayManual(text: string, opts: ConvTtsOpts, lead?: string, tail?: string): Promise<void> {
         const trimmed = text.trim();
         if (!trimmed) return;
         this.lastOpts = opts;
         this.interruptInternals();
         const gen = ++this.gen;
-        this.push({ role: 'assistant', content: trimmed, at: Date.now(), meta: 'modo directo' });
+        const msg = this.push({ role: 'assistant', content: trimmed, at: Date.now(), meta: 'preview', replayable: true, leadGesture: lead || undefined, tailGesture: tail || undefined });
+        this.speakingMsgId.set(msg.id);
+        if (opts.provider === 'piper') this.revealingMsgId.set(msg.id);
         this.setState('speaking');
         try {
-            await this.tts.speak(trimmed, opts);
+            // singlePass: the lead-in gesture covers synthesis latency, so we
+            // compile the full body as one plan rather than splitting early.
+            await this.tts.speak(trimmed, { ...opts, singlePass: true });
         } catch (e: any) {
             this.fail('TTS: ' + (e?.message ?? e));
         } finally {
-            if (gen === this.gen && this.state() === 'speaking') this.setState('idle');
+            if (gen === this.gen) {
+                this.speakingMsgId.set(null);
+                this.revealingMsgId.set(null);
+                if (this.state() === 'speaking') this.setState('idle');
+            }
         }
     }
 
@@ -184,7 +203,12 @@ export class ConversationService {
         this.setState('sending');
         this.pushSystem(`Transcripción enviada a ${label} (${cfg.model})…`);
         this.setState('waiting_llm');
-        if (this.tts.waitingAnimsEnabled()) {
+        const leadId = this.liveLeadGesture();
+        if (leadId) {
+            // Lead gesture plays immediately while the LLM generates, covering synthesis latency.
+            // It blends out naturally when speak() calls stopInternal at audio start.
+            this.gestures.trigger(leadId, undefined, undefined, true);
+        } else if (this.tts.waitingAnimsEnabled()) {
             this.gestures.triggerTransient('thinking', 1, 'slow'); // waiting gesture: killed at audio start
         }
 
@@ -221,11 +245,18 @@ export class ConversationService {
                 onFirstAudio: summary => {
                     if (gen === this.gen) this.pushSystem(speechStartLine(summary));
                 },
+                // singlePass: lead gesture covers synthesis latency, so no need to split early
+                singlePass: !!leadId,
             });
             if (this.tts.lastPerformance) this.plans.set(assistantMsg.id, this.tts.lastPerformance);
             this.speakingMsgId.set(null);
             this.revealingMsgId.set(null);
             if (gen !== this.gen) return; // interrupted while speaking
+
+            // Tail gesture (motion-only) plays after body speech completes
+            const tailId = this.liveTailGesture();
+            if (tailId) this.gestures.trigger(tailId, undefined, undefined, true);
+
             this.afterSpeaking(opts);
         } catch (e: any) {
             if (gen !== this.gen) return;
@@ -274,13 +305,5 @@ export class ConversationService {
         this.state.set(to);
     }
 
-    private push(m: Omit<ConvMessage, 'id'>): ConvMessage {
-        const full: ConvMessage = { ...m, id: this.msgSeq++ };
-        this.messages.update(list => [...list, full]);
-        return full;
-    }
-
-    private pushSystem(content: string): void {
-        this.push({ role: 'system', kind: 'info', content, at: Date.now() });
-    }
-}
+    private pushSystem(content: string): ConvMessage {
+        return this.push

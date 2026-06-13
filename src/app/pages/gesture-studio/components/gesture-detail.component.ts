@@ -1,12 +1,14 @@
-import { Component, Input, Output, EventEmitter, OnChanges, SimpleChanges, inject, signal } from '@angular/core';
+import { Component, Input, Output, EventEmitter, OnChanges, SimpleChanges, inject, signal, ViewChild, ElementRef } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { MotionRecording, RecordingCategory, VoiceAttachment } from '../../../lib/motion/motion.models';
+import { MotionRecording, RecordingCategory, VoiceAttachment, AudioEntry } from '../../../lib/motion/motion.models';
 import { GestureDef, GESTURE_LIBRARY, EasingType } from '../../../lib/gestures/gesture-library';
 import { GesturePlayerService } from '../../../services/gesture-player.service';
 import { MotionStoreService } from '../../../services/motion-store.service';
 import { CustomGestureRegistryService } from '../../../services/custom-gesture-registry.service';
 import { MotionCompilerService } from '../../../services/motion-compiler.service';
+import { VoiceConversionService } from '../../../services/voice-conversion.service';
+import { PIPER_VOICES, TtsLang } from '../../../services/tts-lipsync.service';
 
 const EASING_OPTIONS: EasingType[] = ['none', 'ease-in-cubic', 'ease-in-out-cubic', 'ease-out-cubic', 'ease-out-quad'];
 
@@ -95,28 +97,64 @@ const EASING_OPTIONS: EasingType[] = ['none', 'ease-in-cubic', 'ease-in-out-cubi
     </div>
 
 
-      <!-- Voice attachment summary -->
-      <ng-container *ngIf="recording && recording.voiceAttachment">
+      <!-- ── Voice / Audio management ── -->
+      <ng-container *ngIf="!isBuiltIn && recording as rec">
         <div class="section-sep"></div>
-        <div class="voice-section">
-          <div class="voice-head">🎙 Voice</div>
-          <div class="voice-row" *ngIf="recording.voiceAttachment.transcript">
-            <span class="voice-label">Transcript:</span>
-            <span class="voice-val">{{ recording.voiceAttachment.transcript }}</span>
+        <div class="voice-head">🎙 Voice</div>
+
+        <!-- Existing attachment info -->
+        <ng-container *ngIf="rec.voiceAttachment as va">
+          <div class="voice-row" *ngIf="va.ttsAudioDurationSec">
+            <span class="voice-label">TTS:</span>
+            <span class="voice-val">{{ va.ttsAudioDurationSec.toFixed(2) }}s (gesture: {{ rec.duration.toFixed(2) }}s)</span>
           </div>
-          <div class="voice-row" *ngIf="recording.voiceAttachment.ttsAudioDurationSec">
-            <span class="voice-label">TTS duration:</span>
-            <span class="voice-val">{{ recording.voiceAttachment.ttsAudioDurationSec.toFixed(2) }}s
-              (gesture: {{ recording.duration.toFixed(2) }}s)</span>
-          </div>
-          <div class="voice-row" *ngIf="recording.voiceAttachment.voiceId">
+          <div class="voice-row" *ngIf="va.voiceId">
             <span class="voice-label">Voice:</span>
-            <span class="voice-val">{{ recording.voiceAttachment.voiceId }}</span>
+            <span class="voice-val">{{ va.voiceId }}</span>
           </div>
-          <div class="voice-row" *ngIf="!recording.voiceAttachment.transcriptConfirmed">
-            <span class="voice-warn">⚠ Transcript not confirmed — re-synthesize to attach audio</span>
-          </div>
+        </ng-container>
+
+        <!-- Editable transcript -->
+        <label class="field-label">
+          Transcript
+          <textarea class="field-ta" [(ngModel)]="audioTranscript" rows="2"
+                    placeholder="Text for TTS synthesis — edit and Regenerate"></textarea>
+        </label>
+
+        <!-- Voice picker -->
+        <label class="field-label">
+          Voice
+          <select class="field-select" [(ngModel)]="audioVoiceId">
+            <optgroup *ngFor="let lang of voiceLangs" [label]="lang === 'es' ? 'Español' : 'English'">
+              <option *ngFor="let v of voicesList[lang]" [value]="v.id">{{ v.label }}</option>
+            </optgroup>
+          </select>
+        </label>
+
+        <!-- Action row -->
+        <div class="audio-actions">
+          <button class="btn audio-btn regen" (click)="regenerateAudio()"
+                  [disabled]="voiceConv.converting() || !audioTranscript.trim()"
+                  title="Re-run TTS with current transcript">
+            {{ voiceConv.converting() ? 'Converting…' : '🔄 Regenerate' }}
+          </button>
+          <button class="btn audio-btn upload" (click)="fileInput.click()"
+                  title="Attach a local audio file">
+            📂 Upload
+          </button>
+          <button class="btn audio-btn del-audio" (click)="deleteAudio()"
+                  *ngIf="rec.voiceAttachment"
+                  title="Remove audio, keep motion">
+            🗑 Del Audio
+          </button>
         </div>
+        <!-- Hidden file input for upload -->
+        <input #fileInput type="file" accept="audio/*" style="display:none"
+               (change)="onAudioFileSelected($event)" />
+
+        <div class="toast-msg ok" *ngIf="audioToast() === 'ok'">✔ Audio updated</div>
+        <div class="toast-msg err" *ngIf="audioToast() === 'err'">Audio update failed — check console</div>
+        <div class="toast-msg info" *ngIf="audioToast() === 'deleted'">Audio removed</div>
       </ng-container>
 
     <ng-template #noSel>
@@ -159,6 +197,17 @@ const EASING_OPTIONS: EasingType[] = ['none', 'ease-in-cubic', 'ease-in-out-cubi
     .voice-label { font-size:11px; color:#667; min-width:90px; }
     .voice-val { font-size:11.5px; color:#ccc; word-break:break-word; flex:1; }
     .voice-warn { font-size:11px; color:#f59e0b; }
+    .voice-head { font-size:11px; font-weight:700; color:#67e8f9; text-transform:uppercase; letter-spacing:.8px; margin-bottom:4px; }
+    .field-ta { background:rgba(255,255,255,.06); color:#E8E9EE; border:1px solid rgba(255,255,255,.12); border-radius:8px; padding:7px 10px; font-size:12px; width:100%; resize:vertical; }
+    .audio-actions { display:flex; gap:6px; flex-wrap:wrap; }
+    .audio-btn { padding:7px 10px; border-radius:9px; border:none; font-size:11.5px; font-weight:600; cursor:pointer; transition:all .12s; }
+    .audio-btn:disabled { opacity:.4; cursor:default; }
+    .regen { background:rgba(14,116,144,.25); color:#67e8f9; border:1px solid rgba(14,116,144,.4); }
+    .regen:hover:not(:disabled) { background:rgba(14,116,144,.45); }
+    .upload { background:rgba(99,102,241,.2); color:#a5b4fc; border:1px solid rgba(99,102,241,.35); }
+    .upload:hover:not(:disabled) { background:rgba(99,102,241,.38); }
+    .del-audio { background:rgba(239,68,68,.12); color:#fca5a5; border:1px solid rgba(239,68,68,.25); }
+    .del-audio:hover:not(:disabled) { background:rgba(239,68,68,.25); }
   `]
 })
 export class GestureDetailComponent implements OnChanges {
@@ -166,12 +215,17 @@ export class GestureDetailComponent implements OnChanges {
     @Output() deleted = new EventEmitter<string>();
     @Output() saved = new EventEmitter<MotionRecording>();
 
-    private player = inject(GesturePlayerService);
-    private store = inject(MotionStoreService);
+    @ViewChild('fileInput') fileInputRef!: ElementRef<HTMLInputElement>;
+
+    private player  = inject(GesturePlayerService);
+    private store   = inject(MotionStoreService);
     private registry = inject(CustomGestureRegistryService);
     private compiler = inject(MotionCompilerService);
+    readonly voiceConv = inject(VoiceConversionService);
 
-    readonly easings = EASING_OPTIONS;
+    readonly easings    = EASING_OPTIONS;
+    readonly voiceLangs: TtsLang[] = ['es', 'en'];
+    readonly voicesList = PIPER_VOICES;
 
     editLabel = '';
     editCategory: RecordingCategory = 'mixed';
@@ -181,8 +235,13 @@ export class GestureDetailComponent implements OnChanges {
     editRepetitions = 1;
     editReturnDuration = 0.3;
 
-    saving = signal(false);
-    toastMsg = signal<'ok' | 'err' | 'copied' | null>(null);
+    // Audio management state
+    audioTranscript = '';
+    audioVoiceId    = PIPER_VOICES.es[0].id;
+
+    saving    = signal(false);
+    toastMsg  = signal<'ok' | 'err' | 'copied' | null>(null);
+    audioToast = signal<'ok' | 'err' | 'deleted' | null>(null);
 
     get isBuiltIn(): boolean {
         return this.registry.isBuiltIn(this.recording?.compiledGesture?.id ?? '');
@@ -199,6 +258,11 @@ export class GestureDetailComponent implements OnChanges {
             this.editRepetitions = g?.defaultRepetitions ?? 1;
             this.editReturnDuration = g?.returnDuration ?? 0.3;
             this.toastMsg.set(null);
+            this.audioToast.set(null);
+            // Pre-fill audio management fields from existing attachment
+            const va = this.recording.voiceAttachment;
+            this.audioTranscript = va?.transcript ?? '';
+            this.audioVoiceId    = va?.voiceId ?? PIPER_VOICES.es[0].id;
         }
     }
 
@@ -288,6 +352,114 @@ export class GestureDetailComponent implements OnChanges {
             setTimeout(() => this.toastMsg.set(null), 2000);
         } catch {
             console.warn('[gesture-detail] clipboard write failed');
+        }
+    }
+
+    // ─── Audio management ────────────────────────────────────────────────────
+
+    /** Re-run TTS with the current (possibly edited) transcript → replace stored audio. */
+    async regenerateAudio(): Promise<void> {
+        if (!this.recording || !this.audioTranscript.trim()) return;
+        this.audioToast.set(null);
+        try {
+            const lang: TtsLang = this.audioVoiceId.startsWith('es') ? 'es' : 'en';
+            const result = await this.voiceConv.convertPiper(
+                this.audioTranscript.trim(), this.audioVoiceId, lang);
+
+            const audioEntry: AudioEntry = {
+                id: this.recording.id,
+                ttsAudioData: result.ttsAudioData,
+            };
+            await this.store.saveAudio(audioEntry);
+
+            const attachment = this.voiceConv.buildAttachment(
+                result, this.audioTranscript.trim(), this.audioVoiceId);
+            const updated: MotionRecording = {
+                ...this.recording,
+                voiceAttachment: attachment,
+                updatedAt: Date.now(),
+            };
+            await this.store.save(updated);
+            this.audioToast.set('ok');
+            this.saved.emit(updated);
+            setTimeout(() => this.audioToast.set(null), 2500);
+        } catch (e) {
+            console.error('[gesture-detail] regenerateAudio failed:', e);
+            this.audioToast.set('err');
+        }
+    }
+
+    /**
+     * Upload a local audio file and attach it to this gesture.
+     * Lipsync frames are derived from the current transcript using textToVisemes()
+     * scaled to the uploaded audio duration — no cloud call needed.
+     */
+    async onAudioFileSelected(event: Event): Promise<void> {
+        const file = (event.target as HTMLInputElement).files?.[0];
+        if (!file || !this.recording) return;
+        this.audioToast.set(null);
+
+        try {
+            const arrayBuffer = await file.arrayBuffer();
+            // Decode to get actual duration
+            const audioCtx = new AudioContext();
+            const decoded  = await audioCtx.decodeAudioData(arrayBuffer.slice(0));
+            const durationSec = decoded.duration;
+            await audioCtx.close();
+
+            // Derive lipsync from transcript (or empty → no mouth movement)
+            const { textToVisemes, scaleTimeline } = await import('../../../lib/lipsync/text-to-visemes');
+            const lang: TtsLang = this.audioVoiceId.startsWith('es') ? 'es' : 'en';
+            const events = this.audioTranscript.trim()
+                ? textToVisemes(this.audioTranscript.trim(), lang)
+                : [];
+            const lipsyncFrames = events.length ? scaleTimeline(events, 0, durationSec) : [];
+
+            const audioEntry: AudioEntry = { id: this.recording.id, ttsAudioData: arrayBuffer };
+            await this.store.saveAudio(audioEntry);
+
+            const attachment: VoiceAttachment = {
+                transcript: this.audioTranscript.trim() || undefined,
+                transcriptConfirmed: this.audioTranscript.trim().length > 0,
+                ttsAudioDurationSec: durationSec,
+                lipsyncFrames,
+                voiceId: this.audioVoiceId,
+                provider: 'piper',
+                rawAudioMimeType: file.type || 'audio/*',
+            };
+            const updated: MotionRecording = {
+                ...this.recording,
+                voiceAttachment: attachment,
+                updatedAt: Date.now(),
+            };
+            await this.store.save(updated);
+            this.audioToast.set('ok');
+            this.saved.emit(updated);
+            setTimeout(() => this.audioToast.set(null), 2500);
+        } catch (e) {
+            console.error('[gesture-detail] onAudioFileSelected failed:', e);
+            this.audioToast.set('err');
+        } finally {
+            // Reset the file input so the same file can be re-selected later
+            if (this.fileInputRef) this.fileInputRef.nativeElement.value = '';
+        }
+    }
+
+    /** Remove audio from this gesture, keeping all motion keyframes intact. */
+    async deleteAudio(): Promise<void> {
+        if (!this.recording) return;
+        this.audioToast.set(null);
+        try {
+            await this.store.deleteAudio(this.recording.id);
+            const { voiceAttachment: _va, ...rest } = this.recording;
+            const updated: MotionRecording = { ...rest, updatedAt: Date.now() };
+            await this.store.save(updated);
+            this.audioToast.set('deleted');
+            this.saved.emit(updated);
+            setTimeout(() => this.audioToast.set(null), 2500);
+        } catch (e) {
+            console.error('[gesture-detail] deleteAudio failed:', e);
+            this.audioToast.set('err');
         }
     }
 

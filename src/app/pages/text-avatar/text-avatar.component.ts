@@ -7,7 +7,10 @@ import { SpeechRecognitionService } from '../../services/speech-recognition.serv
 import { LlmService, LlmProviderId, LLM_PROVIDER_LABELS } from '../../services/llm.service';
 import { ConversationService, ConvMessage } from '../../services/conversation.service';
 import { parseGestureMarkup } from '../../lib/gestures/gesture-markup';
-import { GESTURE_MAP } from '../../lib/gestures/gesture-library';
+import { GESTURE_MAP, GestureDef, SPEED_MULTIPLIERS } from '../../lib/gestures/gesture-library';
+import { CustomGestureRegistryService } from '../../services/custom-gesture-registry.service';
+import { MotionStoreService } from '../../services/motion-store.service';
+import { GesturePlayerService } from '../../services/gesture-player.service';
 
 interface MsgSegment { kind: 'text' | 'chip'; value: string; }
 
@@ -102,6 +105,94 @@ const CHIP_LABELS: Record<string, string> = {
           <p class="stt-unsupported" *ngIf="!stt.isSupported">
             Este navegador no soporta reconocimiento de voz — usa Chrome o Edge, o el Modo texto.
           </p>
+
+          <!-- Preview Editor Panel — authors responses with inline gesture markup -->
+          <div class="preview-panel" [class.open]="previewMode">
+            <button class="drawer-toggle preview-toggle" (click)="previewMode = !previewMode"
+                    [class.active]="previewMode" title="Author and preview avatar responses with gesture markup">
+              🎭 Response Editor {{ previewMode ? '▾' : '▸' }}
+            </button>
+
+            <div class="preview-body" *ngIf="previewMode">
+              <!-- Gesture insert row -->
+              <div class="preview-insert-row">
+                <select [(ngModel)]="previewGestureId" class="gesture-select">
+                  <option value="" disabled>— pick gesture —</option>
+                  <optgroup label="Built-in">
+                    <option *ngFor="let g of builtInGestures()" [value]="g.id">{{ g.id }}</option>
+                  </optgroup>
+                  <optgroup label="Custom" *ngIf="gestureRegistry.customGestures().length">
+                    <option *ngFor="let g of gestureRegistry.customGestures()" [value]="g.id">{{ g.id }}</option>
+                  </optgroup>
+                </select>
+                <button class="ghost small" (click)="insertGesture()" [disabled]="!previewGestureId"
+                        title="Insert [gestureId] token at cursor">＋ Insert</button>
+                <span class="hint">[id]:[reps]:[speed]</span>
+              </div>
+
+              <!-- Response text area -->
+              <textarea #previewTextareaEl
+                        [(ngModel)]="previewText"
+                        rows="4" maxlength="3000"
+                        placeholder="Type the avatar's response here. Use the picker above to insert gesture tokens like [yes]:[2]:[slow] anywhere in the text."></textarea>
+
+              <!-- Lead-in / Tail blocks -->
+              <div class="block-row">
+                <div class="block-cell">
+                  <label class="block-label">▶ Lead-in</label>
+                  <select [(ngModel)]="previewLeadGestureId" class="gesture-select small-select">
+                    <option value="">— none —</option>
+                    <optgroup label="Built-in">
+                      <option *ngFor="let g of builtInGestures()" [value]="g.id">{{ g.id }}</option>
+                    </optgroup>
+                    <optgroup label="Custom" *ngIf="gestureRegistry.customGestures().length">
+                      <option *ngFor="let g of gestureRegistry.customGestures()" [value]="g.id">{{ g.id }}</option>
+                    </optgroup>
+                  </select>
+                </div>
+                <div class="block-cell">
+                  <label class="block-label">◀ Tail</label>
+                  <select [(ngModel)]="previewTailGestureId" class="gesture-select small-select">
+                    <option value="">— none —</option>
+                    <optgroup label="Built-in">
+                      <option *ngFor="let g of builtInGestures()" [value]="g.id">{{ g.id }}</option>
+                    </optgroup>
+                    <optgroup label="Custom" *ngIf="gestureRegistry.customGestures().length">
+                      <option *ngFor="let g of gestureRegistry.customGestures()" [value]="g.id">{{ g.id }}</option>
+                    </optgroup>
+                  </select>
+                </div>
+                <span class="hint block-hint">Lead-in plays first (filler); tail plays after speech</span>
+              </div>
+
+              <!-- LLM Command output — live preview of the canonical sequence string -->
+              <div class="cmd-row" *ngIf="llmCommand">
+                <div class="cmd-header">
+                  <label class="block-label">📋 LLM Command</label>
+                  <span class="hint">copy this as the target output format for your LLM</span>
+                </div>
+                <div class="cmd-box">
+                  <textarea class="cmd-textarea" readonly [value]="llmCommand" rows="2" spellcheck="false"></textarea>
+                  <button class="ghost small cmd-copy" (click)="copyCommand()" title="Copy command to clipboard">⎘ Copy</button>
+                </div>
+              </div>
+
+              <!-- Action row -->
+              <div class="drawer-actions">
+                <button class="ghost accent" (click)="generatePreview()"
+                        [disabled]="previewBusy() || (!previewText.trim() && !previewLeadGestureId && !previewTailGestureId)"
+                        title="Generate avatar performance: lead-in → text → tail">
+                  {{ previewRunning ? '⏳ Running…' : '🎭 Generate Preview' }}
+                </button>
+                <button class="ghost" (click)="fillPreviewDemo()">💡 Demo</button>
+                <button class="ghost small" (click)="stopPreview()" [disabled]="!previewBusy()"
+                        title="Stop current preview">⏹</button>
+                <button class="ghost small" (click)="previewText = ''" [disabled]="!previewText"
+                        title="Clear editor">✕ Clear</button>
+                <span class="counter">{{ previewText.length }}/3000</span>
+              </div>
+            </div>
+          </div>
 
           <!-- bottom drawer: manual text mode (secondary) -->
           <div class="drawer" [class.open]="textMode">
@@ -337,7 +428,7 @@ const CHIP_LABELS: Record<string, string> = {
       background: rgba(255,255,255,.04); color: #E8E9EE; border: 1px solid rgba(255,255,255,.1);
       border-radius: 12px; padding: 10px 12px; font-size: 14px; line-height: 1.5;
     }
-    .drawer-actions { display: flex; gap: 8px; align-items: center; }
+    .drawer-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
     .counter { margin-left: auto; font-size: 11px; color: #666; }
     .ghost {
       padding: 8px 16px; border-radius: 10px; cursor: pointer; font-size: 13px;
@@ -346,6 +437,47 @@ const CHIP_LABELS: Record<string, string> = {
     }
     .ghost:hover:not(:disabled) { background: rgba(255,255,255,.12); }
     .ghost:disabled { opacity: .4; cursor: default; }
+    .ghost.small { padding: 6px 10px; font-size: 12px; }
+    .ghost.accent {
+      background: rgba(139,92,246,.18); border-color: rgba(139,92,246,.4); color: #c4b0f7;
+    }
+    .ghost.accent:hover:not(:disabled) { background: rgba(139,92,246,.3); }
+
+    /* ---- Preview Editor Panel ---- */
+    .preview-panel { flex: none; border-top: 1px solid rgba(139,92,246,.2); padding-top: 6px; margin-top: 4px; }
+    .preview-toggle { color: #9b87c4 !important; }
+    .preview-toggle:hover { color: #c4b0f7 !important; }
+    .preview-toggle.active { color: var(--accent) !important; font-weight: 600; }
+    .preview-body {
+      display: flex; flex-direction: column; gap: 8px; padding: 10px;
+      background: rgba(139,92,246,.06); border: 1px solid rgba(139,92,246,.15);
+      border-radius: 14px; margin-top: 6px;
+    }
+    .preview-insert-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+    .gesture-select {
+      flex: 1; min-width: 120px; max-width: 220px;
+      background: rgba(255,255,255,.05); color: #E8E9EE; border: 1px solid rgba(255,255,255,.12);
+      border-radius: 8px; padding: 6px 10px; font-size: 12.5px; cursor: pointer;
+    }
+    .gesture-select option, .gesture-select optgroup { background: #16171d; color: #E8E9EE; }
+    .hint { font-size: 10.5px; color: #667; font-family: monospace; white-space: nowrap; }
+    .preview-body textarea {
+      width: 100%; resize: vertical; min-height: 80px;
+      background: rgba(255,255,255,.04); color: #E8E9EE; border: 1px solid rgba(139,92,246,.2);
+      border-radius: 12px; padding: 10px 12px; font-size: 13.5px; line-height: 1.55;
+    }
+    .preview-body textarea:focus { outline: none; border-color: rgba(139,92,246,.5); }
+    .block-row { display: flex; align-items: flex-end; gap: 12px; flex-wrap: wrap; }
+    .block-cell { display: flex; flex-direction: column; gap: 4px; flex: 1; min-width: 130px; }
+    .block-label { font-size: 10.5px; color: #8896a9; font-weight: 600; letter-spacing: .4px; text-transform: uppercase; }
+    .small-select { padding: 5px 8px !important; font-size: 12px !important; }
+    .block-hint { font-size: 10px; color: #556; align-self: flex-end; padding-bottom: 6px; flex: 2; }
+    .cmd-row { display: flex; flex-direction: column; gap: 4px; }
+    .cmd-header { display: flex; align-items: baseline; gap: 10px; }
+    .cmd-box { display: flex; align-items: flex-start; gap: 6px; }
+    .cmd-textarea { flex: 1; resize: none; background: rgba(0,0,0,.25); color: #a8b5c8; border: 1px solid rgba(139,92,246,.15); border-radius: 10px; padding: 8px 10px; font-size: 11.5px; font-family: 'JetBrains Mono', 'Fira Code', monospace; line-height: 1.5; cursor: text; }
+    .cmd-textarea:focus { outline: none; }
+    .cmd-copy { margin-top: 2px; flex: none; }
 
     .chat {
       flex: 1; min-width: 300px; max-width: 420px; display: flex; flex-direction: column;
@@ -439,14 +571,26 @@ export class TextAvatarComponent implements AfterViewChecked {
     public stt = inject(SpeechRecognitionService);
     public llm = inject(LlmService);
     public conv = inject(ConversationService);
+    public gestureRegistry = inject(CustomGestureRegistryService);
+    private store = inject(MotionStoreService);
+    private player = inject(GesturePlayerService);
 
     @ViewChild('feedEl') feedEl?: ElementRef<HTMLDivElement>;
+    @ViewChild('previewTextareaEl') previewTextareaEl?: ElementRef<HTMLTextAreaElement>;
     private stickToBottom = true;
     private lastMsgCount = 0;
 
     // manual text mode
     text = '';
     textMode = false;
+
+    // preview editor mode
+    previewMode = false;
+    previewText = '';
+    previewGestureId = '';
+    previewLeadGestureId = '';
+    previewTailGestureId = '';
+    previewRunning = false;
 
     // tts config
     provider: TtsProvider = 'piper';
@@ -470,6 +614,9 @@ export class TextAvatarComponent implements AfterViewChecked {
     }
 
     micPress() {
+        // Sync editor dropdowns so runTurn() picks up the right lead/tail gestures
+        this.conv.liveLeadGesture.set(this.previewLeadGestureId);
+        this.conv.liveTailGesture.set(this.previewTailGestureId);
         // listening -> finish turn; speaking/thinking -> interrupt + listen; idle -> listen
         this.conv.startListening(this.opts());
     }
@@ -578,6 +725,10 @@ export class TextAvatarComponent implements AfterViewChecked {
         const t = this.convText.trim();
         if (!t) return;
         this.convText = '';
+        // Sync editor dropdowns to conversation service so runTurn() can
+        // trigger the lead gesture during LLM latency and the tail after body speech.
+        this.conv.liveLeadGesture.set(this.previewLeadGestureId);
+        this.conv.liveTailGesture.set(this.previewTailGestureId);
         this.conv.sendText(t, this.opts());
     }
 
@@ -588,8 +739,23 @@ export class TextAvatarComponent implements AfterViewChecked {
         this.sendTyped();
     }
 
-    replay(msgId: number) {
-        void this.conv.replayMessage(msgId, this.opts());
+    async replay(msgId: number): Promise<void> {
+        const msg = this.conv.messages().find(m => m.id === msgId);
+        if (!msg) return;
+        // If the message has stored lead/tail gestures, orchestrate the full sequence
+        if (msg.leadGesture || msg.tailGesture) {
+            if (this.previewBusy()) return;
+            this.previewRunning = true;
+            try {
+                if (msg.leadGesture) await this.playGestureBlock(msg.leadGesture);
+                await this.conv.replayMessage(msgId, this.opts());
+                if (msg.tailGesture) await this.playGestureBlock(msg.tailGesture);
+            } finally {
+                this.previewRunning = false;
+            }
+        } else {
+            void this.conv.replayMessage(msgId, this.opts());
+        }
     }
 
     toggleLang() {
@@ -651,6 +817,145 @@ export class TextAvatarComponent implements AfterViewChecked {
         this.text = this.lang === 'es'
             ? 'Bueno, déjame pensar... [sigh] esto es difícil, pero [laugh] jaja está bien. Claro que sí [yes]:[3]:[slow] aunque pensándolo [no]:[2]:[fast] mejor hagámoslo...'
             : 'Okay, let me think... [sigh] this is difficult, but [laugh] haha it is fine. Of course yes [yes]:[3]:[slow] though on second thought [no]:[2]:[fast] let us just do it...';
+    }
+
+    // ------------------------------------------------------------ preview editor
+
+    /** Gesture list for the dropdown: built-in gestures (all minus custom). */
+    builtInGestures(): GestureDef[] {
+        const all = this.gestureRegistry.allGestures();
+        const customIds = new Set(this.gestureRegistry.customGestures().map(g => g.id));
+        return all.filter(g => !customIds.has(g.id));
+    }
+
+    /** True when preview is actively running (lead-in, text, or tail phase). */
+    previewBusy(): boolean {
+        return this.previewRunning || this.conv.state() === 'speaking' || this.conv.state() === 'sending' || this.conv.state() === 'waiting_llm';
+    }
+
+    /** Insert a [gestureId] token at the current cursor position in the preview textarea. */
+    insertGesture(): void {
+        if (!this.previewGestureId) return;
+        const el = this.previewTextareaEl?.nativeElement;
+        const token = `[${this.previewGestureId}]`;
+        if (!el) {
+            this.previewText += token;
+            return;
+        }
+        const start = el.selectionStart ?? this.previewText.length;
+        const end = el.selectionEnd ?? start;
+        this.previewText = this.previewText.slice(0, start) + token + this.previewText.slice(end);
+        requestAnimationFrame(() => {
+            el.selectionStart = el.selectionEnd = start + token.length;
+            el.focus();
+        });
+    }
+
+    /**
+     * Play a standalone gesture block (lead-in or tail):
+     *   - If the gesture has pre-recorded TTS audio → play voice + lipsync + body motion together
+     *   - Otherwise → trigger body motion and wait for its natural duration
+     * Returns a Promise that resolves when the block is fully complete.
+     */
+    async playGestureBlock(gestureId: string): Promise<void> {
+        const def = GESTURE_MAP.get(gestureId);
+        if (!def) { console.warn(`[preview] unknown gesture id "${gestureId}"`); return; }
+
+        // Look up whether this gesture has saved voice audio
+        const rec = this.store.recordings().find(r => r.compiledGesture?.id === gestureId);
+        if (rec?.voiceAttachment?.lipsyncFrames?.length) {
+            const entry = await this.store.loadAudio(rec.id);
+            if (entry?.ttsAudioData) {
+                // IMPORTANT ordering: playVisemeTrack is async and calls stopInternal()
+                // synchronously as its very first line (before any internal await). If we
+                // called player.trigger() BEFORE playVisemeTrack, stopInternal would clear
+                // the gesture we just triggered. Instead:
+                //   1. Capture the Promise from playVisemeTrack (stopInternal runs now, sync)
+                //   2. Immediately trigger body motion (after stopInternal, before audio starts)
+                //   3. Await the Promise so the caller waits for audio to finish
+                const audioEnd = this.tts.playVisemeTrack(entry.ttsAudioData, rec.voiceAttachment.lipsyncFrames);
+                this.player.trigger(gestureId, def.defaultRepetitions, def.defaultSpeed, true);
+                await audioEnd;
+                return;
+            }
+        }
+
+        // No voice: trigger body motion and wait for the gesture's natural duration
+        const speedMultiplier = typeof def.defaultSpeed === 'number'
+            ? def.defaultSpeed
+            : SPEED_MULTIPLIERS[def.defaultSpeed ?? 'normal'] ?? 1.0;
+        const cycleSec = def.cycleDurationSec ?? 1.0;
+        const reps = def.defaultRepetitions ?? 1;
+        const totalMs = (cycleSec * reps / speedMultiplier) * 1000 + (def.returnDuration ?? 0.3) * 1000;
+
+        this.player.trigger(gestureId, def.defaultRepetitions, def.defaultSpeed, def.allowMouth === true);
+        await new Promise<void>(resolve => setTimeout(resolve, totalMs));
+    }
+
+    /**
+     * Run the full preview sequence: Lead-in → Main text → Tail.
+     * Each block is awaited before the next starts, so there are no gaps or overlaps.
+     */
+    async generatePreview(): Promise<void> {
+        const text = this.previewText.trim();
+        if (!text && !this.previewLeadGestureId && !this.previewTailGestureId) return;
+        if (this.previewBusy()) return;
+
+        this.previewRunning = true;
+        try {
+            // 1. Lead-in gesture block (plays with its pre-recorded voice if any)
+            if (this.previewLeadGestureId) {
+                await this.playGestureBlock(this.previewLeadGestureId);
+            }
+
+            // 2. Main response text (TTS + inline gesture body motion)
+            // Pass lead/tail IDs so they're persisted in the message for replay
+            if (text) {
+                await this.conv.sayManual(text, this.opts(),
+                    this.previewLeadGestureId || undefined,
+                    this.previewTailGestureId || undefined);
+            }
+
+            // 3. Tail gesture block
+            if (this.previewTailGestureId) {
+                await this.playGestureBlock(this.previewTailGestureId);
+            }
+        } finally {
+            this.previewRunning = false;
+        }
+    }
+
+    /** Interrupt any running preview (lead-in, text, or tail). */
+    stopPreview(): void {
+        this.previewRunning = false;
+        this.conv.interrupt();
+        this.player.clear();
+    }
+
+    fillPreviewDemo(): void {
+        this.previewText = this.lang === 'es'
+            ? '¡Hola! [yes] Me alegra verte. [sigh] Ha sido un día largo, pero [laugh] ¡qué bueno que estás aquí! Cuéntame [thinking]:[2] ¿en qué puedo ayudarte?'
+            : 'Hello! [yes] Great to see you. [sigh] It has been a long day, but [laugh] I am glad you are here! Tell me [thinking]:[2] how can I help you?';
+    }
+
+    /**
+     * Canonical serialized form of the current sequence: lead-in + body + tail.
+     * Shows the exact string the LLM should output to reproduce this performance.
+     * Format: [lead:id]\n{body text}\n[tail:id]
+     */
+    get llmCommand(): string {
+        const parts: string[] = [];
+        if (this.previewLeadGestureId) parts.push(`[lead:${this.previewLeadGestureId}]`);
+        const body = this.previewText.trim();
+        if (body) parts.push(body);
+        if (this.previewTailGestureId) parts.push(`[tail:${this.previewTailGestureId}]`);
+        return parts.join('\n');
+    }
+
+    copyCommand(): void {
+        const cmd = this.llmCommand;
+        if (!cmd) return;
+        navigator.clipboard.writeText(cmd).catch(() => {});
     }
 
     // ------------------------------------------------------------ settings

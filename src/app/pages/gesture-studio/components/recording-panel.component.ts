@@ -191,6 +191,10 @@ export interface RecordingResult {
 })
 export class RecordingPanelComponent implements OnDestroy {
     @Output() recordingComplete = new EventEmitter<RecordingResult>();
+    /** Fires as soon as motion frames arrive (voice path: BEFORE Save/Discard).
+     *  gesture-studio uses this to show a compiled draft in the Detail panel
+     *  while the user is reviewing/converting voice. */
+    @Output() recordingCaptured = new EventEmitter<{ frames: MotionFrame[]; duration: number; channels: RecordChannelConfig }>();
 
     readonly recorder = inject(MotionRecorderService);
     readonly voiceConv = inject(VoiceConversionService);
@@ -199,7 +203,7 @@ export class RecordingPanelComponent implements OnDestroy {
 
     durationSec = 5;
     devMode = false;
-    channels: RecordChannelConfig = { ...DEFAULT_CHANNEL_CONFIG };
+    channels: RecordChannelConfig = { ...DEFAULT_CHANNEL_CONFIG, voice: true };
 
     // Mic state
     readonly micReady = signal(false);
@@ -258,6 +262,10 @@ export class RecordingPanelComponent implements OnDestroy {
                     this.ttsAudioUrl = null;
                     this.ttsResult = null;
                     this.conversionError = '';
+                    // Notify parent so it can compile a draft and show Detail panel immediately
+                    // (before the user clicks Save/Discard — gesture-studio uses this to
+                    // set selectedRecording so the Detail column is not empty during conversion)
+                    this.recordingCaptured.emit({ frames: result.frames, duration: result.duration, channels: result.channels });
                     // STT ran concurrently; transcript already populated via onSttResult
                 } else {
                     // No voice — emit immediately
@@ -292,7 +300,21 @@ export class RecordingPanelComponent implements OnDestroy {
         return Math.min(100, (this.recorder.elapsed() / this.durationSec) * 100);
     }
 
-    startRecording(): void {
+    async startRecording(): Promise<void> {
+        // Lazily acquire mic on first Record click when Voice is pre-checked.
+        // We don't auto-prompt on page load (needs user gesture); this click IS one.
+        if (this.channels.voice && !this.micReady()) {
+            const ok = await this.recorder.enableMic();
+            this.ngZone.run(() => {
+                this.micReady.set(ok);
+                this.micDenied.set(!ok);
+                if (!ok) {
+                    // Downgrade to motion-only if mic was denied
+                    this.channels.voice = false;
+                }
+            });
+        }
+
         this.clearPending();
         this.voiceTranscript = '';
         this.liveTranscriptParts = [];

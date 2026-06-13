@@ -155,9 +155,20 @@ export class GesturePlayerService {
     /**
      * Cancel gestures. keepTransient=true preserves waiting gestures (used at
      * speak() entry so "thinking" survives synthesis and ends at audio start).
+     *
+     * Both paths now route through beginExit() rather than hard-nulling, so the
+     * active gesture always blends back to neutral over def.returnDuration
+     * (0.25–0.4 s) instead of snapping. This covers all clip boundaries:
+     *   lead-in → body  (sayManual → interruptInternals → stopInternal(false))
+     *   body → tail     (playGestureBlock → playVisemeTrack → stopInternal(false))
+     *   user Stop        (stopPreview → conv.interrupt → stopInternal(false))
+     *
+     * The only difference from a "hard stop" is a 0.25–0.4 s pose decay, which
+     * reads as natural and is imperceptible as a responsiveness delay.
      */
     clear(opts?: { keepTransient?: boolean }): void {
         if (opts?.keepTransient) {
+            // Keep transient (thinking) gestures alive; blend non-transient current to neutral.
             this.scheduled = this.scheduled.filter(s => s.transient);
             if (this.current && !this.current.transient) {
                 this.beginExit(this.current, now());
@@ -165,9 +176,18 @@ export class GesturePlayerService {
             }
             return;
         }
+        // Hard clear — but smooth: drop scheduled immediately, blend active to neutral.
+        // beginExit() replaces any existing exit blend with a fresh one from the
+        // current captured pose, so there is exactly one exit blend running at a time.
+        // If current is null but exiting is still running (e.g. the previous clip's
+        // tail-off), that blend is preserved and continues to completion rather than
+        // being hard-cleared — this avoids a second snap at the body→tail boundary.
         this.scheduled = [];
-        this.current = null;
-        this.exiting = null;
+        if (this.current) {
+            this.beginExit(this.current, now()); // replaces previous exiting slot
+            this.current = null;
+        }
+        // exiting (if any) continues blending to neutral
     }
 
     get pendingOrActiveCount(): number {

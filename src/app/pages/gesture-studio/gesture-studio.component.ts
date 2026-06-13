@@ -11,7 +11,7 @@ import { MotionCompilerService } from '../../services/motion-compiler.service';
 import { MotionStoreService } from '../../services/motion-store.service';
 import { MotionRecorderService } from '../../services/motion-recorder.service';
 import { CustomGestureRegistryService } from '../../services/custom-gesture-registry.service';
-import { MotionRecording } from '../../lib/motion/motion.models';
+import { MotionRecording, MotionFrame, RecordChannelConfig } from '../../lib/motion/motion.models';
 import { GestureDef, GESTURE_LIBRARY } from '../../lib/gestures/gesture-library';
 
 import { RecordingPanelComponent, RecordingResult } from './components/recording-panel.component';
@@ -118,7 +118,8 @@ import { FaceTrackedAvatarComponent } from './components/face-tracked-avatar.com
         <aside class="col-right">
           <div class="panel-head">Recording</div>
           <app-recording-panel
-            (recordingComplete)="onRecordingComplete($event)">
+            (recordingComplete)="onRecordingComplete($event)"
+            (recordingCaptured)="onRecordingCaptured($event)">
           </app-recording-panel>
 
           <div class="divider"></div>
@@ -327,6 +328,38 @@ export class GestureStudioComponent implements OnInit {
 
     // ---- recording pipeline --------------------------------------------------
 
+    /**
+     * Fires as soon as motion frames arrive in the voice path (before Save/Discard).
+     * Compiles a draft gesture and sets selectedRecording so the Detail panel is
+     * visible while the user reviews transcript and converts voice.
+     * The draft is NOT persisted — onRecordingComplete() will save the final version.
+     */
+    onRecordingCaptured(data: { frames: MotionFrame[]; duration: number; channels: RecordChannelConfig }): void {
+        if (data.frames.length < 2) return;
+        const tempLabel = `gesture_draft_${Date.now().toString(36)}`;
+        const compiled = this.compiler.compile(data.frames, tempLabel, { allowMouth: data.channels.mouth });
+        if (!compiled.channels.length) return;
+
+        const draft: MotionRecording = {
+            id: `draft_${Date.now().toString(36)}`,
+            label: tempLabel,
+            category: this.compiler.detectCategory(compiled.channels),
+            duration: data.duration,
+            frameCount: data.frames.length,
+            fps: data.frames.length / Math.max(0.1, data.duration),
+            frames: data.frames,
+            compiledGesture: compiled,
+            tags: [],
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+        };
+        // Register the draft so player.trigger() works for preview
+        this.registry.register(compiled);
+        this.selectedRecording.set(draft);
+        this.player.trigger(compiled.id);
+        this.showStatus(`Compiled draft: ${compiled.channels.length} channels`);
+    }
+
     async onRecordingComplete(result: RecordingResult): Promise<void> {
         if (result.frames.length < 2) {
             this.showStatus('Recording too short (< 2 frames) — try again');
@@ -451,15 +484,19 @@ export class GestureStudioComponent implements OnInit {
 
         const attachment = rec.voiceAttachment;
         if (attachment?.lipsyncFrames?.length) {
-            // Load audio blobs from store
             const entry = await this.store.loadAudio(rec.id);
             if (entry?.ttsAudioData) {
-                // Scale gesture duration to TTS audio duration
-                if (attachment.ttsAudioDurationSec) {
-                    def.cycleDurationSec = attachment.ttsAudioDurationSec;
-                }
-                // Start lipsync track (plays audio + drives mouth via getMouthWeights)
-                await this.tts.playVisemeTrack(entry.ttsAudioData, attachment.lipsyncFrames);
+                // playVisemeTrack is async and calls stopInternal() synchronously before its
+                // first internal await. We capture the Promise BEFORE triggering body motion
+                // so that stopInternal runs first (clearing old state), and then we immediately
+                // fire player.trigger while the audio is still loading/starting. Both tracks
+                // begin at the same moment rather than sequentially.
+                // DO NOT await here before triggering — that would make motion start only
+                // AFTER the entire audio clip has finished (the old regression).
+                const audioEnd = this.tts.playVisemeTrack(entry.ttsAudioData, attachment.lipsyncFrames);
+                this.player.trigger(def.id); // start body motion simultaneously with audio
+                await audioEnd;              // wait here so callers know when the clip is done
+                return;
             }
         }
         this.player.trigger(def.id);

@@ -27,6 +27,9 @@ export interface SpeakOptions {
     timingStart?: number;
     /** instrumentation: called once when the first audio actually starts */
     onFirstAudio?: (summary: SpeechStartSummary) => void;
+    /** Skip progressive early-start split and compile the full body as one plan.
+     *  Use when a lead-in gesture/clip already covers synthesis latency. */
+    singlePass?: boolean;
 }
 
 // Piper engine is an npm dependency: npm i @diffusionstudio/vits-web
@@ -152,7 +155,7 @@ export class TtsLipsyncService {
         }
 
         try {
-            const split = (opts.provider === 'piper' && this.progressiveEnabled())
+            const split = (opts.provider === 'piper' && !opts.singlePass && this.progressiveEnabled())
                 ? splitProgressive(parsed.cleanText, plan.gestures, this.partAMaxWords())
                 : null;
             if (opts.provider === 'piper' && split) {
@@ -260,15 +263,20 @@ export class TtsLipsyncService {
         };
         this.state.set('speaking');
 
-        source.onended = () => {
-            // Only reset if this is still the active playback (not interrupted)
-            if (this.active?.anchor === anchor) {
-                this.active = null;
-                this.state.set('idle');
-                this.currentViseme.set('sil');
-            }
-            this.currentSources = this.currentSources.filter(x => x !== source);
-        };
+        // Return a Promise that resolves when the audio node fires onended
+        // (either natural end or external stop). This makes playVisemeTrack
+        // truly await-able so callers can sequence lead-in → body → tail.
+        return new Promise<void>((resolve) => {
+            source.onended = () => {
+                if (this.active?.anchor === anchor) {
+                    this.active = null;
+                    this.state.set('idle');
+                    this.currentViseme.set('sil');
+                }
+                this.currentSources = this.currentSources.filter(x => x !== source);
+                resolve();
+            };
+        });
     }
 
     // ------------------------------------------------- piper: compile -> play
