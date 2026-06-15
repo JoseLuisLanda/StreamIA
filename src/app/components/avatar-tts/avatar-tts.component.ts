@@ -1,4 +1,4 @@
-import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, OnChanges, SimpleChanges, inject, NgZone, Input, signal } from '@angular/core';
+import { Component, ElementRef, ViewChild, AfterViewInit, OnDestroy, OnChanges, SimpleChanges, inject, NgZone, Input, Output, EventEmitter, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import * as THREE from 'three';
 // @ts-ignore
@@ -7,6 +7,22 @@ import { ModelCacheService } from '../../services/model-cache.service';
 import { TtsLipsyncService } from '../../services/tts-lipsync.service';
 import { GesturePlayerService } from '../../services/gesture-player.service';
 import { MOUTH_KEYS } from '../../lib/lipsync/viseme-map';
+import { GESTURE_MAP } from '../../lib/gestures/gesture-library';
+import {
+    buildNormalizedRig,
+    conformanceLabel,
+    NormalizedRig,
+    RigReport,
+} from '../../lib/avatars/rig-spec';
+
+/** Canonical gesture morphs the built-in gesture library touches (for conformance). */
+const REQUIRED_GESTURE_MORPHS: string[] = Array.from(
+    new Set(
+        Array.from(GESTURE_MAP.values()).flatMap((g) =>
+            g.channels.filter((c) => c.type === 'morph').map((c) => c.target)
+        )
+    )
+);
 
 /** Ready Player Me hosting shut down 2026-01-31; default is a hosted RPM-style sample with ARKit morphs. */
 export const DEFAULT_AVATAR_URL = 'https://raw.githubusercontent.com/met4citizen/TalkingHead/main/avatars/brunette.glb';
@@ -40,6 +56,8 @@ export const DEFAULT_AVATAR_URL = 'https://raw.githubusercontent.com/met4citizen
 export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
     @ViewChild('canvasContainer') canvasContainer!: ElementRef<HTMLDivElement>;
     @Input() avatarUrl: string = DEFAULT_AVATAR_URL;
+    /** Emitted after a model loads + is inspected — drives the picker conformance badge. */
+    @Output() rigReport = new EventEmitter<RigReport>();
 
     private modelCache = inject(ModelCacheService);
     private tts = inject(TtsLipsyncService);
@@ -57,6 +75,9 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
     private headMesh: THREE.Object3D[] = [];
     private nodes: Record<string, THREE.Object3D> = {};
     private currentModel: THREE.Object3D | null = null;
+
+    // canonical→actual blendshape/bone normalization for the loaded avatar
+    private rig: NormalizedRig | null = null;
 
     private breathingTime = 0;
     private lastFrameTime = performance.now();
@@ -190,19 +211,40 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
 
         this.headMesh = [];
         this.nodes = {};
+        const morphMeshes: { name: string; dict: Record<string, number> }[] = [];
         model.traverse((node: THREE.Object3D) => {
             this.nodes[node.name] = node;
-            if (['Wolf3D_Head', 'Wolf3D_Teeth', 'Wolf3D_Beard', 'Wolf3D_Avatar', 'Wolf3D_Head_Custom'].includes(node.name)) {
+            const m = node as any;
+            // Any mesh carrying blendshapes is a candidate for facial animation,
+            // regardless of naming convention (RPM Wolf3D_*, CC4, Mixamo, custom…).
+            if (m.morphTargetDictionary && m.morphTargetInfluences) {
                 this.headMesh.push(node);
+                morphMeshes.push({ name: node.name, dict: m.morphTargetDictionary });
             }
         });
-        console.log('[avatar-tts] model loaded. head meshes:', this.headMesh.map(m => m.name),
-            '| morph targets:', (this.headMesh[0] as any)?.morphTargetDictionary
-                ? Object.keys((this.headMesh[0] as any).morphTargetDictionary).length : 0);
+
+        // Build the canonical→actual normalization map + conformance report.
+        this.rig = buildNormalizedRig({
+            morphMeshes,
+            nodes: this.nodes,
+            requiredMouthKeys: MOUTH_KEYS,
+            requiredGestureMorphs: REQUIRED_GESTURE_MORPHS,
+        });
+        const r = this.rig.report;
+        console.log(
+            `[avatar-tts] model loaded — ${conformanceLabel(r.conformance)}\n` +
+            `  morph meshes: ${r.morphMeshes.join(', ') || '(none)'}\n` +
+            `  total morphs: ${r.totalMorphs} | matched ARKit: ${r.matchedArkit.length}/52 | remapped: ${r.remappedCount}\n` +
+            `  bones: ${JSON.stringify(r.bones)}\n` +
+            (r.missingArkit.length ? `  missing ARKit: ${r.missingArkit.join(', ')}\n` : '') +
+            (r.warnings.length ? `  warnings:\n   - ${r.warnings.join('\n   - ')}` : '  ✓ no warnings')
+        );
+        this.ngZone.run(() => this.rigReport.emit(r));
+
         this.isLoading = false;
         this.ngZone.run(() => this.loadStatus.set('ready'));
         if (this.headMesh.length === 0) {
-            this.fail('Model loaded but no Wolf3D meshes found - is this a Ready Player Me avatar?');
+            this.fail('Model loaded but it has no blendshapes/morph targets — facial animation and lipsync are unavailable for this avatar.');
         }
     }
 
@@ -270,13 +312,15 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
         }
         this.morphState = combined;
 
-        // --- apply morphs ---
+        // --- apply morphs (canonical ARKit key → this avatar's actual morph name) ---
         if (this.headMesh.length > 0) {
+            const morphMap = this.rig?.morphMap;
             for (const mesh of this.headMesh) {
                 const m = mesh as any;
                 if (!m.morphTargetDictionary || !m.morphTargetInfluences) continue;
                 for (const key of Object.keys(this.morphState)) {
-                    const idx = m.morphTargetDictionary[key];
+                    const actual = morphMap?.get(key) ?? key;
+                    const idx = m.morphTargetDictionary[actual];
                     if (idx !== undefined && idx >= 0) {
                         m.morphTargetInfluences[idx] = this.morphState[key];
                     }
@@ -284,25 +328,30 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
             }
         }
 
-        // --- breathing (same pattern as avatar-viewer) ---
+        // --- breathing (same pattern as avatar-viewer); bones resolved per-avatar ---
         const breathCycle = Math.sin(this.breathingTime * 0.6);
         const breathIntensity = 0.05;
-        const parts = this.nodes;
-        if (parts['Spine']) parts['Spine'].rotation.x = breathCycle * breathIntensity * 0.2;
-        if (parts['Spine1']) parts['Spine1'].rotation.x = breathCycle * breathIntensity * 0.2;
-        if (parts['Spine2']) parts['Spine2'].rotation.x = breathCycle * breathIntensity;
+        const bones = this.rig?.boneNodes;
+        const spine = bones?.['Spine'] ?? this.nodes['Spine'];
+        const spine1 = bones?.['Spine1'] ?? this.nodes['Spine1'];
+        const spine2 = bones?.['Spine2'] ?? this.nodes['Spine2'];
+        const headBone = bones?.['Head'] ?? this.nodes['Head'];
+        const neckBone = bones?.['Neck'] ?? this.nodes['Neck'];
+        if (spine) spine.rotation.x = breathCycle * breathIntensity * 0.2;
+        if (spine1) spine1.rotation.x = breathCycle * breathIntensity * 0.2;
+        if (spine2) spine2.rotation.x = breathCycle * breathIntensity;
 
         // subtle head sway while speaking + additive gesture rotation (nod/shake/tilt)
-        if (parts['Head']) {
+        if (headBone) {
             const speaking = this.tts.state() === 'speaking';
             const sway = speaking ? Math.sin(this.breathingTime * 1.7) * 0.02 : 0;
-            parts['Head'].rotation.set(
+            headBone.rotation.set(
                 sway + g.head.x,
                 Math.sin(this.breathingTime * 0.9) * (speaking ? 0.03 : 0.01) + g.head.y,
                 g.head.z
             );
         }
-        if (parts['Neck']) parts['Neck'].rotation.set(0.3, 0, 0);
+        if (neckBone) neckBone.rotation.set(0.3, 0, 0);
 
         this.renderer.render(this.scene, this.camera);
     }

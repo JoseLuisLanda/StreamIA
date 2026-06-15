@@ -2,6 +2,7 @@ import { Component, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
 import { AuthService } from '../../services/auth.service';
+import { AdminService } from '../../services/admin.service';
 
 @Component({
   selector: 'app-home',
@@ -20,6 +21,7 @@ import { AuthService } from '../../services/auth.service';
           <a *ngIf="!authService.user()" routerLink="/login" class="nav-btn nav-btn-solid">Login</a>
 
           <span *ngIf="authService.user() as user" class="user-pill">{{ user.email }}</span>
+          <a *ngIf="authService.user() && adminService.isAdmin()" routerLink="/rag-admin" class="nav-btn nav-btn-admin">📋 Admin</a>
           <button *ngIf="authService.user()" type="button" class="nav-btn nav-btn-ghost" (click)="logout()">Cerrar sesión</button>
         </nav>
       </header>
@@ -35,6 +37,7 @@ import { AuthService } from '../../services/auth.service';
           <a routerLink="/ar-face-tracking" class="cta-btn cta-secondary">AR con Face Tracking</a>
           <a routerLink="/ar" class="cta-btn cta-tertiary">Preview de Modelos 3D</a>
           <a routerLink="/gesture-studio" class="cta-btn cta-studio">🎭 Gesture Studio</a>
+          <a routerLink="/assistants" class="cta-btn cta-text">📝 Assistants</a>
         </div>
 
         <section class="feature-grid">
@@ -134,6 +137,13 @@ import { AuthService } from '../../services/auth.service';
     .nav-btn-solid {
       background: linear-gradient(135deg, #5c24ff, #a855f7);
     }
+    .nav-btn-admin {
+      background: linear-gradient(135deg, #f59e0b, #d97706);
+      border-color: #f59e0b;
+    }
+    .nav-btn-admin:hover {
+      background: linear-gradient(135deg, #fbbf24, #f59e0b);
+    }
     .user-pill {
       font-size: 0.78rem;
       color: #94a3b8;
@@ -225,6 +235,14 @@ import { AuthService } from '../../services/auth.service';
     .cta-studio:hover {
       background: rgba(92, 36, 255, 0.32);
     }
+    .cta-text {
+      color: #e2e8f0;
+      border-color: #f97316;
+      background: rgba(249, 115, 22, 0.18);
+    }
+    .cta-text:hover {
+      background: rgba(249, 115, 22, 0.32);
+    }
     .feature-grid {
       margin: 2rem auto 0;
       display: grid;
@@ -283,6 +301,7 @@ import { AuthService } from '../../services/auth.service';
 })
 export class HomeComponent {
   readonly authService = inject(AuthService);
+  readonly adminService = inject(AdminService);
   private router = inject(Router);
 
   async logout() {

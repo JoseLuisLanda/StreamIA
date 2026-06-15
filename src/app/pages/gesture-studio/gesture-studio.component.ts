@@ -19,6 +19,9 @@ import { GestureListComponent } from './components/gesture-list.component';
 import { MotionTimelineComponent } from './components/motion-timeline.component';
 import { GestureDetailComponent } from './components/gesture-detail.component';
 import { FaceTrackedAvatarComponent } from './components/face-tracked-avatar.component';
+import { AvatarPickerComponent, AvatarPick } from '../../components/avatar-picker/avatar-picker.component';
+import { AvatarCatalogService } from '../../services/avatar-catalog.service';
+import { RigReport } from '../../lib/avatars/rig-spec';
 
 @Component({
     selector: 'app-gesture-studio',
@@ -27,6 +30,7 @@ import { FaceTrackedAvatarComponent } from './components/face-tracked-avatar.com
         CommonModule, FormsModule, RouterLink,
         AvatarTtsComponent,
         FaceTrackedAvatarComponent,
+        AvatarPickerComponent,
         RecordingPanelComponent,
         GestureListComponent,
         MotionTimelineComponent,
@@ -42,6 +46,7 @@ import { FaceTrackedAvatarComponent } from './components/face-tracked-avatar.com
           <span class="name">Gesture <em>Studio</em></span>
         </div>
         <div class="topctl">
+          <app-avatar-picker (pick)="onAvatarPicked($event)" (pickError)="statusLabel.set($event)"></app-avatar-picker>
           <div class="avatar-url-row">
             <input class="url-input" type="text" [(ngModel)]="avatarUrlInput"
                    placeholder="Avatar GLB URL…" [value]="avatarUrlInput" />
@@ -73,7 +78,7 @@ import { FaceTrackedAvatarComponent } from './components/face-tracked-avatar.com
             <!-- LEFT panel: idle / playback avatar -->
             <div class="avatar-panel left-panel">
               <div class="glow"></div>
-              <app-avatar-tts [avatarUrl]="avatarUrl"></app-avatar-tts>
+              <app-avatar-tts [avatarUrl]="avatarUrl" (rigReport)="onRigReport($event)"></app-avatar-tts>
               <div class="panel-label">Playback</div>
 
               <!-- Countdown overlay -->
@@ -271,10 +276,13 @@ export class GestureStudioComponent implements OnInit {
     private tts = inject(TtsLipsyncService);
     private store = inject(MotionStoreService);
     private registry = inject(CustomGestureRegistryService);
+    private catalog = inject(AvatarCatalogService);
     readonly recorder = inject(MotionRecorderService);
 
     avatarUrl = localStorage.getItem('gestureStudio.avatarUrl') || DEFAULT_AVATAR_URL;
     avatarUrlInput = this.avatarUrl;
+    /** which catalog avatar (if any) is currently loaded — keys its rig report */
+    private currentLoadedAvatarId: string | null = this.catalog.selectedId();
 
     readonly selectedRecording = signal<MotionRecording | null>(null);
     readonly countdown = signal<number | null>(null);
@@ -291,8 +299,24 @@ export class GestureStudioComponent implements OnInit {
     loadAvatar(): void {
         const url = this.avatarUrlInput.trim();
         if (!url) return;
+        // Manual load → leave the catalog (dev/fallback path).
+        this.catalog.select(null);
+        this.currentLoadedAvatarId = null;
         this.avatarUrl = url;
         localStorage.setItem('gestureStudio.avatarUrl', url);
+    }
+
+    /** Hot-swap to a catalog avatar (resolved URL from the shared picker). */
+    onAvatarPicked(p: AvatarPick): void {
+        this.currentLoadedAvatarId = p.id;
+        this.avatarUrl = p.url;            // [avatarUrl] change → both avatar panels reload
+        this.avatarUrlInput = p.url;
+        localStorage.setItem('gestureStudio.avatarUrl', p.url);
+    }
+
+    /** Store the rig conformance report for whichever avatar just loaded. */
+    onRigReport(r: RigReport): void {
+        if (this.currentLoadedAvatarId) this.catalog.setReport(this.currentLoadedAvatarId, r);
     }
 
     // ---- list callbacks ------------------------------------------------------

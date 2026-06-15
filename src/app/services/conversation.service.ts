@@ -7,6 +7,7 @@ import { sanitizeLlmReply, truncateAtSentence } from '../lib/llm/llm-sanitizer';
 import { GESTURE_MAP } from '../lib/gestures/gesture-library';
 import { PlanCache } from '../lib/performance/plan-cache';
 import { speechStartLine } from '../lib/performance/timing';
+import { MediaItem, RagResponse } from '../lib/rag/rag.models';
 
 /**
  * Conversation orchestrator: explicit state machine wiring
@@ -35,6 +36,8 @@ export interface ConvMessage {
     leadGesture?: string;
     /** Tail gesture block played after TTS speech ends (stored for replay) */
     tailGesture?: string;
+    /** RAG informational mode: media references attached to this answer (lazy-fetched). */
+    media?: MediaItem[];
 }
 
 export interface ConvTtsOpts {
@@ -69,6 +72,9 @@ export class ConversationService {
     /** Tail gesture ID played after body speech ends in live turns.
      *  Set from the Response Editor tail dropdown before each live turn. */
     public liveTailGesture: WritableSignal<string> = signal('');
+    /** When set (Text-Avatar RAG/informational mode), every turn is answered by
+     *  the Cloud Function via this fetcher instead of the client LLM. null = LLM. */
+    public ragFetcher: ((q: string) => Promise<RagResponse>) | null = null;
 
     /** generation token: bumping it makes any in-flight turn a no-op */
     private gen = 0;
@@ -88,7 +94,7 @@ export class ConversationService {
         this.interruptInternals(); // stops TTS + any in-flight turn (echo prevention)
         if (this.state() !== 'idle') this.setState(interruptTarget(this.state())); // pass through idle
         this.setState('listening');
-        this.stt.start(opts.lang, t => this.runTurn(t));
+        this.stt.start(opts.lang, t => this.dispatchTurn(t, opts));
     }
 
     /** Mic pressed while listening: end the turn gracefully (flushes final). */
@@ -120,7 +126,83 @@ export class ConversationService {
         this.tts.warmup(opts);
         this.interruptInternals();
         if (this.state() !== 'idle') this.setState(interruptTarget(this.state()));
-        void this.runTurn(trimmed, opts);
+        this.dispatchTurn(trimmed, opts);
+    }
+
+    /**
+     * Route a transcript/typed turn to either the client LLM (runTurn) or the
+     * RAG Function (runRagTurn) depending on whether informational mode is active.
+     * Setting `ragFetcher` (from the Text-Avatar deployment) flips every voice +
+     * typed turn to RAG without changing call sites.
+     */
+    private dispatchTurn(text: string, opts: ConvTtsOpts): void {
+        if (this.ragFetcher) void this.runRagTurn(text, this.ragFetcher, opts);
+        else void this.runTurn(text, opts);
+    }
+
+    private async runRagTurn(query: string, fetcher: (q: string) => Promise<RagResponse>, optsOverride?: ConvTtsOpts): Promise<void> {
+        this.stt.stop();
+        const gen = ++this.gen;
+        const opts = optsOverride ?? this.lastOpts;
+
+        this.push({ role: 'user', content: query, at: Date.now() });
+        this.setState('sending');
+        this.pushSystem('Consultando la base de conocimiento…');
+        this.setState('waiting_llm');
+
+        // Lead-in plays immediately, covering Function cold-start + RAG retrieval.
+        const leadId = this.liveLeadGesture();
+        if (leadId) {
+            this.gestures.trigger(leadId, undefined, undefined, true);
+        } else if (this.tts.waitingAnimsEnabled()) {
+            this.gestures.triggerTransient('thinking', 1, 'slow');
+        }
+
+        const t0 = performance.now();
+        try {
+            const payload = await fetcher(query);
+            if (gen !== this.gen) return; // interrupted while waiting
+            const tReplyReceived = performance.now();
+            this.pushSystem(`Respuesta recibida (${((tReplyReceived - t0) / 1000).toFixed(1)} s)`);
+
+            // gestureCommands carries inline tags; fall back to plain body if absent.
+            const spoken = (payload.gestureCommands || payload.body || '').trim();
+            const sane = sanitizeLlmReply(spoken, new Set(GESTURE_MAP.keys()));
+            for (const w of sane.warnings) console.warn('[rag-sanitizer]', w);
+            const finalText = sane.text;
+
+            const assistantMsg = this.push({
+                role: 'assistant', content: finalText, at: Date.now(),
+                meta: 'RAG', replayable: true, media: payload.media,
+                leadGesture: leadId || undefined, tailGesture: this.liveTailGesture() || undefined,
+            });
+            this.setState('speaking');
+            this.speakingMsgId.set(assistantMsg.id);
+            if (opts.provider === 'piper') this.revealingMsgId.set(assistantMsg.id);
+
+            await this.tts.speak(finalText, {
+                ...opts,
+                timingStart: tReplyReceived,
+                onFirstAudio: summary => { if (gen === this.gen) this.pushSystem(speechStartLine(summary)); },
+                singlePass: !!leadId, // lead-in already covered latency
+            });
+            if (this.tts.lastPerformance) this.plans.set(assistantMsg.id, this.tts.lastPerformance);
+            this.speakingMsgId.set(null);
+            this.revealingMsgId.set(null);
+            if (gen !== this.gen) return;
+
+            const tailId = this.liveTailGesture();
+            if (tailId) this.gestures.trigger(tailId, undefined, undefined, true);
+            this.afterSpeaking(opts);
+        } catch (e: any) {
+            if (gen !== this.gen) return;
+            this.fail(e?.message ?? String(e));
+            const fallback = opts.lang === 'es'
+                ? 'Lo siento, no pude consultar la información en este momento.'
+                : 'Sorry, I could not retrieve that information right now.';
+            try { this.setState('speaking'); await this.tts.speak(fallback, opts); } catch { /* best-effort */ }
+            if (gen === this.gen) this.setState('idle');
+        }
     }
 
     /**
@@ -275,7 +357,7 @@ export class ConversationService {
     private afterSpeaking(opts: ConvTtsOpts): void {
         if (this.continuous && !this.muted && this.stt.isSupported) {
             this.setState('listening');
-            this.stt.start(opts.lang, t => this.runTurn(t));
+            this.stt.start(opts.lang, t => this.dispatchTurn(t, opts));
         } else {
             this.setState('idle');
         }
@@ -306,4 +388,15 @@ export class ConversationService {
     }
 
     private pushSystem(content: string): ConvMessage {
-        return this.push
+        return this.push({ role: 'system', content, at: Date.now() });
+    }
+
+    private push(m: Omit<ConvMessage, 'id'>): ConvMessage {
+        const full: ConvMessage = {
+            ...m,
+            id: this.msgSeq++,
+        };
+        this.messages.update(msgs => [...msgs, full]);
+        return full;
+    }
+}

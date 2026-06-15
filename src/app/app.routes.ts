@@ -6,9 +6,15 @@ import { ArViewer } from './pages/ar-viewer/ar-viewer';
 import { ArFaceTrackingComponent } from './pages/ar-face-tracking/ar-face-tracking.component';
 import { LoginComponent } from './pages/login/login.component';
 import { authGuard } from './guards/auth.guard';
+import { adminGuard } from './guards/admin.guard';
 
 export const routes: Routes = [
     { path: '', component: HomeComponent },
+    {
+        path: 'assistants',
+        loadComponent: () => import('./pages/assistants/assistants.component').then(m => m.AssistantsComponent)
+    },
+    { path: 'home', component: HomeComponent },
     { path: 'login', component: LoginComponent },
     { path: 'live', component: LiveComponent, canActivate: [authGuard] },
     { path: 'ar', component: ArPageComponent, canActivate: [authGuard] },
@@ -21,6 +27,11 @@ export const routes: Routes = [
     {
         path: 'gesture-studio',
         loadComponent: () => import('./pages/gesture-studio/gesture-studio.component').then(m => m.GestureStudioComponent)
+    },
+    {
+        path: 'rag-admin',
+        canActivate: [adminGuard],
+        loadComponent: () => import('./pages/rag-admin/rag-admin.component').then(m => m.RagAdminComponent)
     },
     { path: '**', redirectTo: '' }
 ];

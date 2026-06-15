@@ -1,0 +1,14 @@
+/**
+ * Cloud Functions entry point (strimearia).
+ *
+ * Exports:
+ *   - `ingestDocument` (callable): PDF -> chunks -> embeddings.
+ *   - `api` (HTTP Express router): mounts POST /chatRag (body-only RAG).
+ *
+ * Both run in the consolidated strimearia project (Admin SDK default creds,
+ * bucket strimearia.firebasestorage.app). See FUNCTIONS_README.md.
+ */
+import './admin'; // initialize Admin SDK (default creds, strimearia) on cold start
+
+export { ingestDocument } from './ingestDocument';
+export { api } from './api';

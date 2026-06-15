@@ -1,7 +1,16 @@
-import { Component, ElementRef, ViewChild, AfterViewChecked, inject } from '@angular/core';
+import { Component, ElementRef, ViewChild, AfterViewChecked, OnInit, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
+import { ActivatedRoute } from '@angular/router';
 import { AvatarTtsComponent, DEFAULT_AVATAR_URL } from '../../components/avatar-tts/avatar-tts.component';
+import { AvatarCatalogService } from '../../services/avatar-catalog.service';
+import { getCatalogEntry } from '../../lib/avatars/avatar-catalog';
+import { RigReport, Conformance, conformanceLabel } from '../../lib/avatars/rig-spec';
+import { MediaGalleryComponent } from '../../components/media-gallery/media-gallery.component';
+import { RagAvatarService } from '../../services/rag-avatar.service';
+import { AssistantConfigService } from '../../services/assistant-config.service';
+import { AssistantConfig } from '../../lib/rag/rag.models';
+import { getRagEndpoint, setRagEndpoint, getAssistantId, setAssistantId } from '../../lib/rag/rag.config';
 import { TtsLipsyncService, TtsProvider, TtsLang, PIPER_VOICES } from '../../services/tts-lipsync.service';
 import { SpeechRecognitionService } from '../../services/speech-recognition.service';
 import { LlmService, LlmProviderId, LLM_PROVIDER_LABELS } from '../../services/llm.service';
@@ -26,7 +35,7 @@ const CHIP_LABELS: Record<string, string> = {
 @Component({
     selector: 'app-text-avatar',
     standalone: true,
-    imports: [CommonModule, FormsModule, AvatarTtsComponent],
+    imports: [CommonModule, FormsModule, AvatarTtsComponent, MediaGalleryComponent],
     template: `
     <div class="app">
 
@@ -61,7 +70,7 @@ const CHIP_LABELS: Record<string, string> = {
         <section class="stage">
           <div class="viewport">
             <div class="glow"></div>
-            <app-avatar-tts [avatarUrl]="avatarUrl"></app-avatar-tts>
+            <app-avatar-tts [avatarUrl]="avatarUrl" (rigReport)="onRigReport($event)"></app-avatar-tts>
 
             <div class="statuspill" [ngSwitch]="conv.state()">
               <ng-container *ngSwitchCase="'listening'">
@@ -236,6 +245,7 @@ const CHIP_LABELS: Record<string, string> = {
                   <span class="chip" *ngIf="seg.kind === 'chip' && showMarkup">{{ seg.value }}</span>
                 </ng-container>
                 <span class="cursor" *ngIf="isRevealing(m)">▍</span>
+                <app-media-gallery *ngIf="m.media?.length" [media]="m.media!"></app-media-gallery>
                 <div class="botfoot">
                   <span class="meta" *ngIf="m.meta">{{ m.meta }}</span>
                   <button class="replay" *ngIf="m.replayable" (click)="replay(m.id)" title="Repetir (voz + gestos)">↻</button>
@@ -308,11 +318,50 @@ const CHIP_LABELS: Record<string, string> = {
         </label>
 
         <h4>Avatar</h4>
-        <label>Avatar GLB URL (con blendshapes ARKit)
+        <div class="avatar-grid">
+          <div *ngFor="let a of catalog.catalog()"
+               class="avatar-card" [class.selected]="catalog.selectedId() === a.id"
+               (click)="selectAvatar(a.id)" [title]="avatarCardTitle(a.id)">
+            <div class="avatar-thumb-wrapper">
+              <img *ngIf="thumbUrl(a.id)" [src]="thumbUrl(a.id)" [alt]="a.name" class="avatar-thumb" />
+              <span *ngIf="!thumbUrl(a.id)" class="avatar-thumb placeholder" aria-hidden="true">
+                <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6">
+                  <circle cx="12" cy="8" r="4" /><path d="M4 20c0-4 3.6-6 8-6s8 2 8 6" />
+                </svg>
+              </span>
+            </div>
+            <span class="avatar-name">{{ a.name }}</span>
+            <span class="conf-badge" *ngIf="confOf(a.id) as c" [ngClass]="'conf-' + c">{{ confDot(c) }}</span>
+          </div>
+        </div>
+        <p class="note err-text" *ngIf="avatarLoadError()">⚠️ {{ avatarLoadError() }}</p>
+        <div class="conf-detail" *ngIf="selectedReport() as r">
+          <b>{{ confLabel(r.conformance) }}</b> — {{ r.matchedArkit.length }}/52 ARKit, head bone: {{ r.hasHeadBone ? '✓' : '✕' }}
+          <div *ngFor="let w of r.warnings" class="conf-warn">⚠️ {{ w }}</div>
+        </div>
+
+        <label class="manual-label">…o carga un GLB manual (dev/fallback)
           <input type="text" [(ngModel)]="avatarUrlInput" placeholder="https://... .glb o /assets/models/avatar.glb" />
         </label>
-        <button class="ghost" (click)="loadAvatar()" [disabled]="!avatarUrlInput.trim()">🧑 Cargar avatar</button>
-        <p class="note">Ready Player Me cerró su hosting (2026-01-31); usa un GLB propio (Firebase o assets).</p>
+        <button class="ghost" (click)="loadAvatar()" [disabled]="!avatarUrlInput.trim()">🧑 Cargar avatar manual</button>
+        <p class="note">Los avatares del catálogo se resuelven desde Firebase Storage por ruta (sin tokens). Ready Player Me cerró su hosting (2026-01-31).</p>
+
+        <h4>Modo informativo (RAG)</h4>
+        <label class="chk"><input type="checkbox" [ngModel]="ragMode" (ngModelChange)="setRagMode($event)" /> Activar respuestas desde la base de conocimiento (Cloud Function)</label>
+        <p class="note">Con esto activado, cada pregunta (voz o texto) se responde vía la Cloud Function (Vertex AI + RAG), no el LLM del navegador. El lead-in cubre la latencia.</p>
+        <label>Endpoint de la Function
+          <input type="text" [ngModel]="ragEndpoint" (ngModelChange)="onRagEndpointChange($event)" placeholder="https://…cloudfunctions.net/api/rag/query" />
+        </label>
+        <label>Assistant ID
+          <input type="text" [ngModel]="assistantId" (ngModelChange)="onAssistantIdChange($event)" placeholder="default" />
+          <button class="ghost small" (click)="reloadAssistant()">↻ Cargar asistente</button>
+        </label>
+        <div class="conf-detail" *ngIf="assistant() as d">
+          <b>{{ d.name || d.id }}</b> — avatar: {{ d.avatarId }} · tema: {{ d.ragCollection }} · voz: {{ d.voice || '—' }}<br>
+          lead: {{ d.leadGestureId || '—' }} · tail: {{ d.tailGestureId || '—' }}<span *ngIf="d.activationCommand"> · “{{ d.activationCommand }}”</span>
+        </div>
+        <p class="note err-text" *ngIf="assistantSvc.error()">⚠️ {{ assistantSvc.error() }}</p>
+        <p class="note err-text" *ngIf="ragError()">⚠️ {{ ragError() }}</p>
       </div>
     </div>
   `,
@@ -558,6 +607,32 @@ const CHIP_LABELS: Record<string, string> = {
     .chk input { width: auto !important; }
     .note { font-size: 11.5px; color: #778; line-height: 1.45; margin: 2px 0; }
     .warn-text { color: #d9a440; }
+    .err-text { color: #ff9c9c; }
+
+    /* ---- Avatar catalog picker ---- */
+    .avatar-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin: 4px 0 8px; }
+    .avatar-card {
+      position: relative; display: flex; flex-direction: column; align-items: center; gap: 5px;
+      padding: 9px 6px; background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.1);
+      border-radius: 12px; cursor: pointer; transition: border-color .15s, background .15s;
+    }
+    .avatar-card:hover { background: rgba(139,92,246,.1); border-color: rgba(139,92,246,.4); }
+    .avatar-card.selected { border-color: var(--accent); background: rgba(139,92,246,.16); box-shadow: 0 0 0 1px var(--accent); }
+    .avatar-thumb-wrapper {
+      width: 52px; height: 52px; border-radius: 50%; overflow: hidden;
+      background: rgba(0,0,0,.25); border: 1px solid rgba(255,255,255,.1);
+      display: grid; place-items: center;
+    }
+    .avatar-thumb { width: 100%; height: 100%; object-fit: cover; }
+    .avatar-thumb.placeholder { color: #8a7fb0; display: grid; place-items: center; }
+    .avatar-name { font-size: 11.5px; color: #E8E9EE; text-align: center; line-height: 1.1; }
+    .conf-badge { font-size: 9px; line-height: 1; }
+    .conf-full { color: #34d399; } .conf-remapped { color: #8ab4f8; }
+    .conf-partial { color: #d9a440; } .conf-incompatible { color: #f87171; }
+    .conf-detail { font-size: 11px; color: #98a; background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 8px 10px; margin: 2px 0 6px; }
+    .conf-detail b { color: #c4b0f7; }
+    .conf-warn { color: #d9a440; margin-top: 3px; font-size: 10.5px; }
+    .manual-label { margin-top: 4px; }
     code { background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
 
     @media (max-width: 900px) {
@@ -566,14 +641,31 @@ const CHIP_LABELS: Record<string, string> = {
     }
   `]
 })
-export class TextAvatarComponent implements AfterViewChecked {
+export class TextAvatarComponent implements AfterViewChecked, OnInit {
     public tts = inject(TtsLipsyncService);
     public stt = inject(SpeechRecognitionService);
     public llm = inject(LlmService);
     public conv = inject(ConversationService);
     public gestureRegistry = inject(CustomGestureRegistryService);
+    public catalog = inject(AvatarCatalogService);
+    public rag = inject(RagAvatarService);
+    public assistantSvc = inject(AssistantConfigService);
     private store = inject(MotionStoreService);
     private player = inject(GesturePlayerService);
+    private route = inject(ActivatedRoute);
+
+    // avatar catalog picker state
+    thumbUrls = signal<Record<string, string | null>>({});
+    avatarLoadError = signal<string>('');
+    /** which catalog avatar (if any) is currently loaded — keys its rig report */
+    private currentLoadedAvatarId: string | null = this.catalog.selectedId();
+
+    // RAG / informational mode state
+    ragMode = false;
+    ragEndpoint = getRagEndpoint();
+    assistantId = getAssistantId();
+    assistant = signal<AssistantConfig | null>(null);
+    ragError = signal<string>('');
 
     @ViewChild('feedEl') feedEl?: ElementRef<HTMLDivElement>;
     @ViewChild('previewTextareaEl') previewTextareaEl?: ElementRef<HTMLTextAreaElement>;
@@ -614,11 +706,22 @@ export class TextAvatarComponent implements AfterViewChecked {
     }
 
     micPress() {
-        // Sync editor dropdowns so runTurn() picks up the right lead/tail gestures
-        this.conv.liveLeadGesture.set(this.previewLeadGestureId);
-        this.conv.liveTailGesture.set(this.previewTailGestureId);
+        // Sync lead/tail gestures (deployment in RAG mode, else editor dropdowns)
+        this.applyTurnGestures();
         // listening -> finish turn; speaking/thinking -> interrupt + listen; idle -> listen
         this.conv.startListening(this.opts());
+    }
+
+    /** Set the lead/tail gestures for the next turn from the deployment (RAG) or editor. */
+    private applyTurnGestures(): void {
+        if (this.ragMode) {
+            const d = this.assistant();
+            this.conv.liveLeadGesture.set(d?.leadGestureId ?? '');
+            this.conv.liveTailGesture.set(d?.tailGestureId ?? '');
+        } else {
+            this.conv.liveLeadGesture.set(this.previewLeadGestureId);
+            this.conv.liveTailGesture.set(this.previewTailGestureId);
+        }
     }
 
     micTitle(): string {
@@ -725,11 +828,38 @@ export class TextAvatarComponent implements AfterViewChecked {
         const t = this.convText.trim();
         if (!t) return;
         this.convText = '';
-        // Sync editor dropdowns to conversation service so runTurn() can
-        // trigger the lead gesture during LLM latency and the tail after body speech.
-        this.conv.liveLeadGesture.set(this.previewLeadGestureId);
-        this.conv.liveTailGesture.set(this.previewTailGestureId);
+        // Sync lead/tail gestures (deployment in RAG mode, else editor dropdowns).
+        // dispatchTurn() routes to the RAG Function or the client LLM accordingly.
+        this.applyTurnGestures();
         this.conv.sendText(t, this.opts());
+    }
+
+    // ------------------------------------------------------------ RAG mode
+
+    /** Toggle informational (RAG) mode: route every turn to the Cloud Function. */
+    async setRagMode(on: boolean): Promise<void> {
+        this.ragMode = on;
+        this.ragError.set('');
+        if (on) {
+            await this.reloadAssistant();
+            this.conv.ragFetcher = (q: string) =>
+                this.rag.ask(q, { assistantId: this.assistantId, language: this.lang, voice: this.voiceId });
+        } else {
+            this.conv.ragFetcher = null;
+        }
+    }
+
+    onRagEndpointChange(v: string): void { this.ragEndpoint = v; setRagEndpoint(v); }
+    onAssistantIdChange(v: string): void { this.assistantId = v; setAssistantId(v); }
+
+    /** Load the deployment config and apply its avatar/voice/language. */
+    async reloadAssistant(): Promise<void> {
+        const d = await this.assistantSvc.load(this.assistantId);
+        this.assistant.set(d);
+        if (!d) return;
+        if (d.language === 'es' || d.language === 'en') { this.lang = d.language; this.onProviderOrLangChange(); }
+        if (d.voice) this.applyDefaultVoice(d.voice);
+        if (d.avatarId) await this.selectAvatar(d.avatarId);
     }
 
     onConvEnter(event: Event) {
@@ -791,8 +921,87 @@ export class TextAvatarComponent implements AfterViewChecked {
     loadAvatar() {
         const url = this.avatarUrlInput.trim();
         if (!url) return;
+        // Manual load → leave the catalog (dev/fallback path).
+        this.catalog.select(null);
+        this.currentLoadedAvatarId = null;
+        this.avatarLoadError.set('');
         this.avatarUrl = url;
         localStorage.setItem('textAvatar.avatarUrl', url);
+    }
+
+    // --------------------------------------------------------- avatar catalog
+
+    async ngOnInit(): Promise<void> {
+        // Resolve preview thumbnails (best-effort; missing → person-icon fallback).
+        for (const a of this.catalog.catalog()) {
+            this.catalog.resolveThumbnailUrl(a)
+                .then(url => this.thumbUrls.update(m => ({ ...m, [a.id]: url })))
+                .catch(() => {});
+        }
+        // Restore a previously selected catalog avatar (hot-loads its GLB).
+        const sel = this.catalog.selected();
+        if (sel) await this.selectAvatar(sel.id);
+
+        // If launched from the /assistants selector (?assistant=ID), load that
+        // assistant fully configured and turn RAG mode on. Falls back silently if
+        // absent so direct /text-avatar access keeps working.
+        const dep = this.route.snapshot.queryParamMap.get('assistant');
+        if (dep) {
+            this.assistantId = dep;
+            setAssistantId(dep);
+            await this.setRagMode(true); // loads deployment (avatar/voice/lang/lead-tail) + wires RAG fetcher
+        }
+    }
+
+    /** Hot-swap to a catalog avatar: resolve its Storage URL and load it. */
+    async selectAvatar(id: string): Promise<void> {
+        const entry = getCatalogEntry(id);
+        if (!entry) return;
+        this.catalog.select(id);
+        this.avatarLoadError.set('');
+        try {
+            const url = await this.catalog.resolveGlbUrl(entry);
+            this.currentLoadedAvatarId = id;
+            this.avatarUrl = url;            // [avatarUrl] change → avatar-tts hot-reloads
+            this.avatarUrlInput = url;
+            localStorage.setItem('textAvatar.avatarUrl', url);
+            if (entry.defaultVoice) this.applyDefaultVoice(entry.defaultVoice);
+        } catch (e: any) {
+            this.avatarLoadError.set(`No se pudo cargar "${entry.name}" desde Storage: ${e?.message ?? e}`);
+        }
+    }
+
+    /** Preselect the avatar's default voice if it exists in the current voice list. */
+    private applyDefaultVoice(voiceId: string): void {
+        for (const l of ['es', 'en'] as TtsLang[]) {
+            if (PIPER_VOICES[l].some(v => v.id === voiceId)) {
+                this.lang = l;
+                this.voiceId = voiceId;
+                this.onProviderOrLangChange();
+                return;
+            }
+        }
+    }
+
+    /** Store the rig conformance report for whichever avatar just loaded. */
+    onRigReport(r: RigReport): void {
+        if (this.currentLoadedAvatarId) this.catalog.setReport(this.currentLoadedAvatarId, r);
+    }
+
+    /** Resolved thumbnail URL or '' (falsy → picker shows the person-icon placeholder). */
+    thumbUrl(id: string): string { return this.thumbUrls()[id] ?? ''; }
+    confOf(id: string): Conformance | undefined { return this.catalog.conformanceOf(id); }
+    confLabel(c: Conformance): string { return conformanceLabel(c); }
+    confDot(c: Conformance): string {
+        return c === 'full' ? '● full' : c === 'remapped' ? '● remap' : c === 'partial' ? '● partial' : '● n/a';
+    }
+    selectedReport(): RigReport | undefined {
+        const id = this.catalog.selectedId();
+        return id ? this.catalog.getReport(id) : undefined;
+    }
+    avatarCardTitle(id: string): string {
+        const c = this.confOf(id);
+        return c ? `${getCatalogEntry(id)?.name} — ${conformanceLabel(c)}` : (getCatalogEntry(id)?.name ?? id);
     }
 
     onEnter(event: Event) {
