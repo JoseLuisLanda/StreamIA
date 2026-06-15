@@ -33,11 +33,11 @@ interface VoiceOpt { id: string; label: string; }
       <header class="bar">
         <div class="brand"><span class="logo">AV</span> Avatar Manager</div>
         <nav class="topnav">
-          <a routerLink="/home">Home</a>
-          <a routerLink="/assistants">Assistants</a>
+          <a routerLink="/admin">&larr; Admin</a>
           <a routerLink="/assistant-manager">Assistant Mgr</a>
-          <a routerLink="/text-avatar">Text-Avatar</a>
           <a routerLink="/rag-admin">RAG Admin</a>
+          <a routerLink="/llm-admin">LLM Admin</a>
+          <a routerLink="/role-admin">Roles</a>
         </nav>
       </header>
 

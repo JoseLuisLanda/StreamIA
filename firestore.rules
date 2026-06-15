@@ -30,10 +30,22 @@ service cloud.firestore {
     }
 
     // --- Admin allowlist: self-read only; writes managed out-of-band ---
+    // Written ONLY by the role callables via the Admin SDK (bypasses rules).
     match /admins/{uid} {
       allow read: if isSignedIn() && request.auth.uid == uid;
       allow write: if false;
     }
+
+    // --- User registry (for the Role Admin list): email + lastLogin ---
+    // Populated on sign-in (self-write). The `role` field is NON-authoritative
+    // (a mirror); real admin status is the custom claim + admins/{uid}, both set
+    // server-side. So a self-write here cannot escalate privileges.
+    // DEV: signed-in read (listing) + self-write.
+    match /users/{uid} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn() && request.auth.uid == uid;
+    }
+    // PROD (restore): allow read: if isAdmin(); allow write: if isSignedIn() && request.auth.uid == uid;
 
     // --- Assistants (avatar + RAG namespace + persona + voice + lead/tail) ---
     // PUBLIC READ: /assistants + /text-avatar are public kiosk surfaces, so the
@@ -53,6 +65,16 @@ service cloud.firestore {
       allow write: if isSignedIn();
     }
     // PROD (restore): allow read: if true; allow write: if isAdmin();
+
+    // --- LLM config (NON-SECRET: provider/model/params + key STATUS only) ---
+    // The API key itself is NEVER stored here -- it lives in Secret Manager and is
+    // written by the setLlmApiKey callable (Admin SDK bypasses these rules).
+    // DEV: any signed-in user may read/write the non-secret config.
+    match /config/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
+    }
+    // PROD (restore): allow read: if isSignedIn(); allow write: if isAdmin();
 
     // --- RAG namespace registry ---
     // DEV:

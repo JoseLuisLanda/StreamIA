@@ -31,6 +31,11 @@ export const routes: Routes = [
         loadComponent: () => import('./pages/gesture-studio/gesture-studio.component').then(m => m.GestureStudioComponent)
     },
     {
+        path: 'admin',
+        canActivate: [adminGuard],
+        loadComponent: () => import('./pages/admin-hub/admin-hub.component').then(m => m.AdminHubComponent)
+    },
+    {
         path: 'rag-admin',
         canActivate: [adminGuard],
         loadComponent: () => import('./pages/rag-admin/rag-admin.component').then(m => m.RagAdminComponent)
@@ -44,6 +49,16 @@ export const routes: Routes = [
         path: 'assistant-manager',
         canActivate: [adminGuard],
         loadComponent: () => import('./pages/assistant-manager/assistant-manager.component').then(m => m.AssistantManagerComponent)
+    },
+    {
+        path: 'llm-admin',
+        canActivate: [adminGuard],
+        loadComponent: () => import('./pages/llm-admin/llm-admin.component').then(m => m.LlmAdminComponent)
+    },
+    {
+        path: 'role-admin',
+        canActivate: [adminGuard],
+        loadComponent: () => import('./pages/role-admin/role-admin.component').then(m => m.RoleAdminComponent)
     },
     { path: '**', redirectTo: '' }
 ];

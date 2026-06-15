@@ -1,8 +1,9 @@
-import { Component, inject } from '@angular/core';
+import { Component, OnInit, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { Router, RouterLink } from '@angular/router';
 import { AuthService } from '../../services/auth.service';
 import { AdminService } from '../../services/admin.service';
+import { environment } from '../../../environments/environment';
 
 @Component({
   selector: 'app-home',
@@ -21,7 +22,7 @@ import { AdminService } from '../../services/admin.service';
           <a *ngIf="!authService.user()" routerLink="/login" class="nav-btn nav-btn-solid">Login</a>
 
           <span *ngIf="authService.user() as user" class="user-pill">{{ user.email }}</span>
-          <a *ngIf="authService.user() && adminService.isAdmin()" routerLink="/rag-admin" class="nav-btn nav-btn-admin">📋 Admin</a>
+          <a *ngIf="canSeeAdmin()" routerLink="/admin" class="nav-btn nav-btn-admin">⚙ Admin</a>
           <button *ngIf="authService.user()" type="button" class="nav-btn nav-btn-ghost" (click)="logout()">Cerrar sesión</button>
         </nav>
       </header>
@@ -299,10 +300,24 @@ import { AdminService } from '../../services/admin.service';
     }
   `]
 })
-export class HomeComponent {
+export class HomeComponent implements OnInit {
   readonly authService = inject(AuthService);
   readonly adminService = inject(AdminService);
   private router = inject(Router);
+
+  async ngOnInit(): Promise<void> {
+    // Resolve admin status so the Admin entry shows for real admins in prod.
+    if (this.authService.user()) await this.adminService.check();
+  }
+
+  /**
+   * Show the Admin entry when signed in AND (role enforcement off [dev] OR the
+   * user is an admin). Mirrors the /admin hub + adminGuard gating, so any
+   * signed-in user can reach the hub in dev while prod stays admin-only.
+   */
+  canSeeAdmin(): boolean {
+    return !!this.authService.user() && (!environment.enforceAdminRole || this.adminService.isAdmin() === true);
+  }
 
   async logout() {
     await this.authService.logout();

@@ -25,11 +25,12 @@ export const environment = {
   functionsRegion: 'us-central1',
 
   /**
-   * DEV-PHASE GATING (mirror of the Functions ENFORCE_ADMIN_ROLE flag).
-   * false (now): adminGuard allows ANY signed-in user (still redirects to /login
-   *   when signed out). true (before production): restores admin-only.
+   * ADMIN-ROLE GATING (mirror of the Functions ENFORCE_ADMIN_ROLE flag).
+   * true (now): adminGuard validates the real `role:'admin'` custom claim /
+   *   admins allowlist (your account is provisioned). Non-admins are redirected.
+   * false: dev bypass -- any signed-in user passes (no claim required).
    */
-  enforceAdminRole: false,
+  enforceAdminRole: true,
 
   /** Local dev only: route all Firebase SDK calls to local emulators. */
   useEmulators: false,

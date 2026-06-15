@@ -17,7 +17,7 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { db } from './admin';
 import type { AuthedRequest } from './lib/http-auth';
 import { embedText } from './lib/embeddings';
-import { generateAnswer } from './lib/llm';
+import { generateAnswerWithMeta } from './lib/llm';
 import { annotateGestures } from './lib/gestures';
 
 const MAX_K = 8;
@@ -119,12 +119,29 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   const sources = matched.map((d) => ({ id: d.id, metadata: d.get('metadata') ?? {} }));
 
   // --- Generation (body-only). Hard-fail (500) if we can't produce a body. ---
+  // The provider/model come from config/llm (Secret-Manager key); default is
+  // Gemini-Vertex. On failure we surface the REAL provider error (status +
+  // message) to the logs AND the response so the 500 is diagnosable, instead of
+  // the old generic "generation failed" that hid the root cause.
   let answer: string;
   try {
-    answer = await generateAnswer(query, context, language, persona);
-  } catch (e) {
-    logger.error('chatRag generation failed', { namespace, error: String(e) });
-    res.status(500).json({ error: 'generation failed' });
+    const result = await generateAnswerWithMeta(query, context, language, persona);
+    answer = result.text;
+  } catch (e: any) {
+    const meta = e?.meta ?? {};
+    const detail = e?.message ?? String(e);
+    logger.error('chatRag generation failed', {
+      namespace,
+      provider: meta.provider,
+      model: meta.model,
+      error: detail,
+    });
+    res.status(500).json({
+      error: 'generation failed',
+      provider: meta.provider,
+      model: meta.model,
+      detail, // real underlying provider message (status + body), for diagnosis
+    });
     return;
   }
   if (!answer) {

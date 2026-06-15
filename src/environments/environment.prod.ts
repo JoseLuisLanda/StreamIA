@@ -10,7 +10,9 @@ export const environment = {
   ragChatPath: '/chatRag',
   ragMediaBucket: '',
   functionsRegion: 'us-central1',
-  enforceAdminRole: false,
+  // Admin claim is now provisioned -> enforce real role validation (the guard
+  // checks the `role:'admin'` claim / admins allowlist; non-admins are redirected).
+  enforceAdminRole: true,
   useEmulators: false,
   emulatorHost: 'localhost',
 };

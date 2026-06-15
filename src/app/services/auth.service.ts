@@ -8,7 +8,8 @@ import {
   signInWithPopup,
   signOut
 } from 'firebase/auth';
-import { getFirebaseAuth } from './firebase-client';
+import { doc, getFirestore, serverTimestamp, setDoc } from 'firebase/firestore';
+import { getFirebaseApp, getFirebaseAuth } from './firebase-client';
 
 @Injectable({
   providedIn: 'root'
@@ -24,6 +25,9 @@ export class AuthService {
       onAuthStateChanged(auth, (user) => {
         this.user.set(user);
         this.isReady.set(true);
+        // Maintain the users/{uid} registry so the Role Admin panel can list
+        // users without the broad Admin SDK listUsers(). Best-effort, non-blocking.
+        if (user) void this.upsertUserRegistry(user);
       });
     } catch (error) {
       this.initError.set(error instanceof Error ? error.message : 'Firebase Auth is not configured.');
@@ -70,6 +74,24 @@ export class AuthService {
     }
     const provider = new GoogleAuthProvider();
     await signInWithPopup(getFirebaseAuth(), provider);
+  }
+
+  /**
+   * Upsert a registry doc users/{uid} with email + last login. The `role` field
+   * is NOT written here (it is authoritative only via the admin claim/admins doc,
+   * set server-side by the role callables) -- self-writes can't escalate.
+   */
+  private async upsertUserRegistry(user: User): Promise<void> {
+    try {
+      const db = getFirestore(getFirebaseApp());
+      await setDoc(
+        doc(db, 'users', user.uid),
+        { email: user.email ?? null, lastLogin: serverTimestamp() },
+        { merge: true },
+      );
+    } catch {
+      /* best-effort; rules/offline may block -- not fatal for sign-in */
+    }
   }
 
   async logout(): Promise<void> {

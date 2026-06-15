@@ -35,7 +35,10 @@ type Tab = 'documents' | 'chunks' | 'media';
       <header class="topbar">
         <div class="brand"><span class="logo">DB</span> RAG Admin</div>
         <div class="topnav">
+          <a class="tlink" routerLink="/admin">&larr; Admin</a>
           <a class="tlink" routerLink="/text-avatar">Text-Avatar</a>
+          <a class="tlink" routerLink="/llm-admin">LLM Admin</a>
+          <a class="tlink" routerLink="/role-admin">Roles</a>
           <!-- PLACEHOLDER: decorative profile (no profile page) -->
           <span class="tprofile">
             <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="1.6">

@@ -1,1 +1,33 @@
 /* You can add global styles to this file, and also import other style files */
+
+/* =============================================================================
+ * GLOBAL DROPDOWN CONTRAST FIX
+ *
+ * The app is dark-themed and components render <select> text in near-white. When
+ * a native <select> opens, the browser draws the option list on its own LIGHT
+ * background, so near-white option text became invisible. We force readable
+ * contrast on BOTH the closed control and the open option list, app-wide, so
+ * every dropdown (LLM Admin, Assistant/Avatar/RAG Admin, Text-Avatar settings)
+ * is fixed at once.
+ *
+ * Chrome/Edge honor color/background-color set directly on <option>/<optgroup>,
+ * which is what makes the OPEN list legible (not just the collapsed value).
+ * ========================================================================== */
+select {
+  color: #e6e8ee;
+  background-color: #1a1622;
+}
+
+/* The open native list: dark background + light text so options are readable. */
+select option,
+select optgroup {
+  color: #e6e8ee;
+  background-color: #1a1622;
+}
+
+/* Highlighted/selected option in the open list (where browsers honor it). */
+select option:checked,
+select option:hover {
+  color: #ffffff;
+  background-color: #2a2438;
+}
