@@ -1,5 +1,5 @@
 import { Injectable, signal } from '@angular/core';
-import { collection, doc, getDoc, getDocs, getFirestore } from 'firebase/firestore';
+import { collection, deleteDoc, doc, getDoc, getDocs, getFirestore, serverTimestamp, setDoc } from 'firebase/firestore';
 import { getDownloadURL, listAll, ref } from 'firebase/storage';
 import { getFirebaseApp, getFirebaseStorageClient } from './firebase-client';
 import { AssistantConfig } from '../lib/rag/rag.models';
@@ -140,6 +140,52 @@ export class AssistantConfigService {
     }
   }
 
+  /** Create or update an assistant document (admin editor). */
+  async save(cfg: AssistantConfig): Promise<AssistantConfig> {
+    const id = (cfg.id || '').trim();
+    if (!id) throw new Error('Assistant id is required.');
+    if (!cfg.avatarId) throw new Error('Select an avatar.');
+    // 1:1 namespace ownership: default the owned namespace to the assistant id.
+    const ns = (cfg.ragCollection || cfg.ragNamespace || id).trim();
+    if (!ns) throw new Error('Select a RAG namespace.');
+    const db = getFirestore(getFirebaseApp());
+    const now = Date.now();
+    await setDoc(
+      doc(db, 'assistants', id),
+      {
+        name: cfg.name ?? id,
+        role: cfg.role ?? '',
+        description: cfg.description ?? '',
+        avatarId: cfg.avatarId,
+        ragCollection: ns,
+        ragNamespace: ns,
+        systemPrompt: cfg.systemPrompt ?? '',
+        greetingResponse: cfg.greetingResponse ?? null,
+        greetingKeywords: cfg.greetingKeywords ?? null,
+        queryVerbs: cfg.queryVerbs ?? null,
+        voice: cfg.voice ?? '',
+        language: cfg.language ?? 'es',
+        topicTag: cfg.topicTag ?? null,
+        leadGestureId: cfg.leadGestureId ?? null,
+        tailGestureId: cfg.tailGestureId ?? null,
+        activationCommand: cfg.activationCommand ?? null,
+        allowAvatarSwitch: cfg.allowAvatarSwitch ?? true,
+        enabled: cfg.enabled ?? true,
+        createdAt: cfg.createdAt ?? now,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
+    this.cache.set(id, { ...cfg, id, createdAt: cfg.createdAt ?? now, updatedAt: now });
+    return this.cache.get(id)!;
+  }
+
+  /** Delete an assistant document. */
+  async deleteAssistant(id: string): Promise<void> {
+    await deleteDoc(doc(getFirestore(getFirebaseApp()), 'assistants', id));
+    this.cache.delete(id);
+  }
+
   private mapDoc(id: string, data: Partial<AssistantConfig>): AssistantConfig {
     return {
       id,
@@ -147,8 +193,12 @@ export class AssistantConfigService {
       role: data.role,
       description: data.description,
       avatarId: data.avatarId ?? 'alex-ia',
-      ragCollection: data.ragCollection ?? id,
+      ragCollection: data.ragCollection ?? data.ragNamespace ?? id,
+      ragNamespace: data.ragNamespace ?? data.ragCollection ?? id,
       systemPrompt: data.systemPrompt,
+      greetingResponse: data.greetingResponse,
+      greetingKeywords: data.greetingKeywords,
+      queryVerbs: data.queryVerbs,
       language: data.language ?? 'es',
       voice: data.voice ?? '',
       thumbnail: data.thumbnail,
@@ -157,7 +207,18 @@ export class AssistantConfigService {
       leadGestureId: data.leadGestureId,
       tailGestureId: data.tailGestureId,
       allowAvatarSwitch: data.allowAvatarSwitch ?? true,
+      enabled: data.enabled ?? true,
+      createdAt: this.toMs((data as any).createdAt),
+      updatedAt: this.toMs((data as any).updatedAt),
     };
+  }
+
+  private toMs(v: any): number | undefined {
+    if (v == null) return undefined;
+    if (typeof v === 'number') return v;
+    if (typeof v?.toMillis === 'function') return v.toMillis();
+    if (typeof v?.seconds === 'number') return v.seconds * 1000;
+    return undefined;
   }
 }
 

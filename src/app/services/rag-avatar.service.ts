@@ -119,6 +119,7 @@ export class RagAvatarService {
     const payload: RagRequest = {
       query: q,
       assistantId: opts.assistantId ?? getAssistantId(),
+      namespace: opts.namespace,
       language: opts.language ?? 'es',
       voice: opts.voice,
       ragPath: opts.ragPath,

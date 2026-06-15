@@ -36,12 +36,23 @@ service cloud.firestore {
     }
 
     // --- Assistants (avatar + RAG namespace + persona + voice + lead/tail) ---
-    // DEV:
+    // PUBLIC READ: /assistants + /text-avatar are public kiosk surfaces, so the
+    // client must read these configs even when signed out. They hold no secrets
+    // (persona/namespace are also resolved server-side by chatRag via Admin SDK).
+    // DEV write: any signed-in user.
     match /assistants/{assistantId} {
-      allow read: if isSignedIn();
+      allow read: if true;
       allow write: if isSignedIn();
     }
-    // PROD (restore): allow read: if isSignedIn(); allow write: if isAdmin();
+    // PROD (restore): allow read: if true; allow write: if isAdmin();
+
+    // --- Avatars (reusable visual catalog; public-read like Storage avatars) ---
+    // DEV write: any signed-in user.
+    match /avatars/{avatarId} {
+      allow read: if true;
+      allow write: if isSignedIn();
+    }
+    // PROD (restore): allow read: if true; allow write: if isAdmin();
 
     // --- RAG namespace registry ---
     // DEV:

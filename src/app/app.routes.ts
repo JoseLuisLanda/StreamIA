@@ -12,6 +12,7 @@ export const routes: Routes = [
     { path: '', component: HomeComponent },
     {
         path: 'assistants',
+        canActivate: [authGuard],
         loadComponent: () => import('./pages/assistants/assistants.component').then(m => m.AssistantsComponent)
     },
     { path: 'home', component: HomeComponent },
@@ -22,6 +23,7 @@ export const routes: Routes = [
     { path: 'ar-face-tracking', component: ArFaceTrackingComponent, canActivate: [authGuard] },
     {
         path: 'text-avatar',
+        canActivate: [authGuard],
         loadComponent: () => import('./pages/text-avatar/text-avatar.component').then(m => m.TextAvatarComponent)
     },
     {
@@ -32,6 +34,16 @@ export const routes: Routes = [
         path: 'rag-admin',
         canActivate: [adminGuard],
         loadComponent: () => import('./pages/rag-admin/rag-admin.component').then(m => m.RagAdminComponent)
+    },
+    {
+        path: 'avatar-manager',
+        canActivate: [adminGuard],
+        loadComponent: () => import('./pages/avatar-manager/avatar-manager.component').then(m => m.AvatarManagerComponent)
+    },
+    {
+        path: 'assistant-manager',
+        canActivate: [adminGuard],
+        loadComponent: () => import('./pages/assistant-manager/assistant-manager.component').then(m => m.AssistantManagerComponent)
     },
     { path: '**', redirectTo: '' }
 ];

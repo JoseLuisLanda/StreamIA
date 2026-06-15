@@ -60,19 +60,22 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   // Resolve namespace + persona from the assistant (server-side, so the client
   // cannot tamper with the namespace or the persona). Explicit namespace wins for
   // retrieval scoping; persona comes from assistants/{assistantId}.systemPrompt.
-  let namespace = (body.namespace ?? '').trim();
+  let namespace = '';
   let persona = '';
   try {
     if (body.assistantId) {
       const dep = await db.collection('assistants').doc(body.assistantId).get();
       if (dep.exists) {
-        if (!namespace) namespace = (dep.get('ragCollection') || '').toString().trim();
+        namespace = (dep.get('ragCollection') || '').toString().trim(); // doc is authoritative
         persona = (dep.get('systemPrompt') || '').toString();
       }
     }
   } catch (e) {
     logger.warn('chatRag assistant lookup failed', { error: String(e) });
   }
+  // Fallback to the client-provided namespace hint (static/dev assistants that
+  // have no Firestore doc). When the assistant doc exists, its ragCollection wins.
+  if (!namespace) namespace = (body.namespace ?? '').trim();
   if (!namespace) {
     res.status(400).json({ error: 'namespace (or a assistantId resolving to one) is required' });
     return;

@@ -1,6 +1,6 @@
 import { Component, OnInit, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
-import { Router } from '@angular/router';
+import { Router, RouterLink } from '@angular/router';
 import { AssistantConfigService } from '../../services/assistant-config.service';
 import { AssistantConfig } from '../../lib/rag/rag.models';
 
@@ -16,11 +16,18 @@ import { AssistantConfig } from '../../lib/rag/rag.models';
 @Component({
   selector: 'app-assistants',
   standalone: true,
-  imports: [CommonModule],
+  imports: [CommonModule, RouterLink],
   template: `
     <div class="wrap">
       <header class="bar">
         <div class="brand"><span class="logo">A</span> Aetheris AI</div>
+        <nav class="topnav">
+          <a routerLink="/home">Home</a>
+          <a routerLink="/text-avatar">Text-Avatar</a>
+          <a routerLink="/rag-admin">RAG Admin</a>
+          <a routerLink="/avatar-manager">Avatar Manager</a>
+          <a routerLink="/assistant-manager">Assistant Mgr</a>
+        </nav>
       </header>
 
       <main class="main">
@@ -78,7 +85,10 @@ import { AssistantConfig } from '../../lib/rag/rag.models';
     * { box-sizing: border-box; }
     .wrap { min-height: 100vh; background: #0a0e14; color: #e6e8ee;
       font-family: 'Segoe UI', system-ui, -apple-system, sans-serif; --accent: #8b5cf6; }
-    .bar { height: 60px; display: flex; align-items: center; padding: 0 24px; border-bottom: 1px solid rgba(255,255,255,.07); }
+    .bar { height: 60px; display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 0 24px; border-bottom: 1px solid rgba(255,255,255,.07); }
+    .topnav { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
+    .topnav a { color: #c7ccd6; text-decoration: none; font-size: 13px; padding: 7px 12px; border-radius: 8px; border: 1px solid transparent; }
+    .topnav a:hover { background: rgba(255,255,255,.06); color: #fff; border-color: rgba(255,255,255,.1); }
     .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
     .logo { width: 28px; height: 28px; display: grid; place-items: center; border-radius: 8px;
       background: rgba(139,92,246,.22); color: #c4b0f7; font-weight: 700; }
@@ -140,7 +150,9 @@ export class AssistantsComponent implements OnInit {
   async ngOnInit(): Promise<void> {
     this.loading.set(true);
     try {
-      const list = await this.svc.listAssistants();
+      // Real enabled assistants win; the service already falls back to
+      // STATIC_ASSISTANTS only when the collection is empty/unreachable.
+      const list = (await this.svc.listAssistants()).filter((a) => a.enabled !== false);
       this.assistants.set(list);
       // Resolve card pictures from avatars/avatar_preview (matched by avatarId/id/
       // name), falling back to an explicit thumbnail, else the avatar-icon.

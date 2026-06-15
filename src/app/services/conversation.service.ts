@@ -8,6 +8,7 @@ import { GESTURE_MAP } from '../lib/gestures/gesture-library';
 import { PlanCache } from '../lib/performance/plan-cache';
 import { speechStartLine } from '../lib/performance/timing';
 import { MediaItem, RagResponse } from '../lib/rag/rag.models';
+import { classifyIntentLocal, Intent } from '../lib/intent/intent-router';
 
 /**
  * Conversation orchestrator: explicit state machine wiring
@@ -76,6 +77,17 @@ export class ConversationService {
      *  the Cloud Function via this fetcher instead of the client LLM. null = LLM. */
     public ragFetcher: ((q: string) => Promise<RagResponse>) | null = null;
 
+    // ---- Intent router (greeting vs RAG query). Active only in RAG mode. ----
+    /** Per-assistant instant reply spoken for greetings/small talk (no RAG call). */
+    public greetingResponse: string | null = null;
+    /** Per-assistant extra greeting triggers, merged with the global defaults. */
+    public greetingKeywords: string[] | undefined;
+    /** Per-assistant extra query verbs, merged with the global defaults. */
+    public queryVerbs: string[] | undefined;
+    /** Optional lightweight LLM fallback used ONLY when local classification is
+     *  ambiguous. Returns 'greeting' | 'query'. null => ambiguous defaults to query. */
+    public intentClassifier: ((q: string) => Promise<'greeting' | 'query'>) | null = null;
+
     /** generation token: bumping it makes any in-flight turn a no-op */
     private gen = 0;
     private lastOpts: ConvTtsOpts = { provider: 'piper', lang: 'es' };
@@ -136,8 +148,74 @@ export class ConversationService {
      * typed turn to RAG without changing call sites.
      */
     private dispatchTurn(text: string, opts: ConvTtsOpts): void {
-        if (this.ragFetcher) void this.runRagTurn(text, this.ragFetcher, opts);
+        if (this.ragFetcher) void this.dispatchRag(text, opts);
         else void this.runTurn(text, opts);
+    }
+
+    /**
+     * RAG-mode intent routing (phase one). Fast LOCAL classification first:
+     *  - greeting  -> speak the per-assistant instant reply, NO RAG call.
+     *  - query     -> hit the assistant's RAG namespace (runRagTurn).
+     *  - ambiguous -> optional lightweight LLM classifier; default to query
+     *                 (never silently drop a possible information request).
+     */
+    private async dispatchRag(text: string, opts: ConvTtsOpts): Promise<void> {
+        const fetcher = this.ragFetcher;
+        if (!fetcher) { void this.runTurn(text, opts); return; }
+
+        let intent: Intent = classifyIntentLocal(text, {
+            greetingKeywords: this.greetingKeywords,
+            queryVerbs: this.queryVerbs,
+        });
+        if (intent === 'ambiguous') {
+            intent = this.intentClassifier ? await this.intentClassifier(text) : 'query';
+        }
+
+        if (intent === 'greeting') { await this.speakGreeting(text, opts); return; }
+        await this.runRagTurn(text, fetcher, opts);
+    }
+
+    /**
+     * Instant greeting turn: echoes the user message, then speaks the
+     * per-assistant `greetingResponse` through the same lead/body/tail + lipsync
+     * pipeline as a real answer — but WITHOUT any RAG/Function round-trip.
+     */
+    private async speakGreeting(query: string, opts: ConvTtsOpts): Promise<void> {
+        this.stt.stop();
+        const gen = ++this.gen;
+
+        this.push({ role: 'user', content: query, at: Date.now() });
+
+        const reply = (this.greetingResponse && this.greetingResponse.trim())
+            ? this.greetingResponse.trim()
+            : (opts.lang === 'es' ? '¡Hola! ¿En qué puedo ayudarte?' : 'Hi! How can I help you?');
+
+        const leadId = this.liveLeadGesture();
+        const tailId = this.liveTailGesture();
+        const msg = this.push({
+            role: 'assistant', content: reply, at: Date.now(),
+            meta: 'saludo', replayable: true,
+            leadGesture: leadId || undefined, tailGesture: tailId || undefined,
+        });
+
+        this.setState('speaking');
+        this.speakingMsgId.set(msg.id);
+        if (opts.provider === 'piper') this.revealingMsgId.set(msg.id);
+
+        try {
+            if (leadId) this.gestures.trigger(leadId, undefined, undefined, true);
+            await this.tts.speak(reply, { ...opts, singlePass: !!leadId });
+            if (this.tts.lastPerformance) this.plans.set(msg.id, this.tts.lastPerformance);
+            if (gen !== this.gen) return;
+            this.speakingMsgId.set(null);
+            this.revealingMsgId.set(null);
+            if (tailId) this.gestures.trigger(tailId, undefined, undefined, true);
+            this.afterSpeaking(opts);
+        } catch (e: any) {
+            if (gen !== this.gen) return;
+            this.fail(e?.message ?? String(e));
+            if (gen === this.gen) this.setState('idle');
+        }
     }
 
     private async runRagTurn(query: string, fetcher: (q: string) => Promise<RagResponse>, optsOverride?: ConvTtsOpts): Promise<void> {

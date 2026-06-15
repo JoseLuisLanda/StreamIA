@@ -2,6 +2,7 @@ import { Component, ElementRef, ViewChild, AfterViewChecked, OnInit, inject, sig
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
+import { AvatarManagerService } from '../../services/avatar-manager.service';
 import { AvatarTtsComponent, DEFAULT_AVATAR_URL } from '../../components/avatar-tts/avatar-tts.component';
 import { AvatarCatalogService } from '../../services/avatar-catalog.service';
 import { getCatalogEntry } from '../../lib/avatars/avatar-catalog';
@@ -653,6 +654,7 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
     private store = inject(MotionStoreService);
     private player = inject(GesturePlayerService);
     private route = inject(ActivatedRoute);
+    private avatarMgr = inject(AvatarManagerService);
 
     // avatar catalog picker state
     thumbUrls = signal<Record<string, string | null>>({});
@@ -843,9 +845,28 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
         if (on) {
             await this.reloadAssistant();
             this.conv.ragFetcher = (q: string) =>
-                this.rag.ask(q, { assistantId: this.assistantId, language: this.lang, voice: this.voiceId });
+                this.rag.ask(q, {
+                    assistantId: this.assistantId,
+                    // namespace hint from the loaded assistant config; the Function
+                    // prefers the assistant doc's ragCollection when it exists.
+                    namespace: this.assistant()?.ragCollection,
+                    language: this.lang,
+                    voice: this.voiceId,
+                });
+            // Intent router: greetings answered instantly (no RAG); info queries
+            // go to the namespace. Per-assistant lists/reply override the defaults;
+            // ambiguous utterances fall back to a one-shot LLM classification.
+            const a = this.assistant();
+            this.conv.greetingResponse = a?.greetingResponse ?? null;
+            this.conv.greetingKeywords = a?.greetingKeywords ?? undefined;
+            this.conv.queryVerbs = a?.queryVerbs ?? undefined;
+            this.conv.intentClassifier = (q: string) => this.llm.classifyIntent(q);
         } else {
             this.conv.ragFetcher = null;
+            this.conv.greetingResponse = null;
+            this.conv.greetingKeywords = undefined;
+            this.conv.queryVerbs = undefined;
+            this.conv.intentClassifier = null;
         }
     }
 
@@ -953,22 +974,56 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
         }
     }
 
-    /** Hot-swap to a catalog avatar: resolve its Storage URL and load it. */
+    /**
+     * Resolve + load an avatar GLB. Resolution order:
+     *   1) avatars/{id} Firestore doc (Avatar Manager source of truth) -> glbPath
+     *   2) static avatar catalog entry (legacy avatars/models/{id}.glb)
+     * Surfaces a clear error + logs the attempted Storage path on a missing file
+     * (instead of a silent 404). This fixes assistant.avatarId references whose
+     * catalog path doesn't match the real file.
+     */
     async selectAvatar(id: string): Promise<void> {
-        const entry = getCatalogEntry(id);
-        if (!entry) return;
         this.catalog.select(id);
         this.avatarLoadError.set('');
+        let url: string | null = null;
+        let voice: string | undefined;
+        let attempted = '';
+
+        // 1) Avatars Firestore collection (authoritative glbPath).
         try {
-            const url = await this.catalog.resolveGlbUrl(entry);
-            this.currentLoadedAvatarId = id;
-            this.avatarUrl = url;            // [avatarUrl] change → avatar-tts hot-reloads
-            this.avatarUrlInput = url;
-            localStorage.setItem('textAvatar.avatarUrl', url);
-            if (entry.defaultVoice) this.applyDefaultVoice(entry.defaultVoice);
-        } catch (e: any) {
-            this.avatarLoadError.set(`No se pudo cargar "${entry.name}" desde Storage: ${e?.message ?? e}`);
+            const av = await this.avatarMgr.getAvatar(id);
+            if (av?.glbPath) {
+                attempted = av.glbPath;
+                url = await this.avatarMgr.resolveUrl(av.glbPath);
+                voice = av.defaultVoice;
+            }
+        } catch { /* fall through to catalog */ }
+
+        // 2) Static catalog fallback.
+        if (!url) {
+            const entry = getCatalogEntry(id);
+            if (entry) {
+                attempted = attempted || entry.storagePath;
+                try {
+                    url = await this.catalog.resolveGlbUrl(entry);
+                    voice = voice ?? entry.defaultVoice;
+                } catch { url = null; }
+            }
         }
+
+        if (!url) {
+            const msg = `Avatar "${id}" GLB not found (tried: ${attempted || 'no path'}). ` +
+                `Check avatars/${id}.glbPath points to an existing file under avatars/models/.`;
+            console.error('[text-avatar] ' + msg);
+            this.avatarLoadError.set(msg);
+            return;
+        }
+
+        this.currentLoadedAvatarId = id;
+        this.avatarUrl = url;            // [avatarUrl] change -> avatar-tts hot-reloads
+        this.avatarUrlInput = url;
+        localStorage.setItem('textAvatar.avatarUrl', url);
+        if (voice) this.applyDefaultVoice(voice);
     }
 
     /** Preselect the avatar's default voice if it exists in the current voice list. */

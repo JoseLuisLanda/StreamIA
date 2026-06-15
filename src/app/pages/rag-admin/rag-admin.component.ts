@@ -4,9 +4,11 @@ import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { RagAdminService } from '../../services/rag-admin.service';
 import { AdminService } from '../../services/admin.service';
+import { AssistantConfigService } from '../../services/assistant-config.service';
 import { RagChunkListComponent } from './components/rag-chunk-list.component';
 import { RagMediaManagerComponent } from './components/rag-media-manager.component';
 import { RagDocument, RagNamespace } from '../../lib/rag/rag-admin.models';
+import { AssistantConfig } from '../../lib/rag/rag.models';
 import { environment } from '../../../environments/environment';
 
 type Tab = 'documents' | 'chunks' | 'media';
@@ -49,33 +51,34 @@ type Tab = 'documents' | 'chunks' | 'media';
         <div class="denied" *ngIf="!allowed()">You do not have admin access to this panel.</div>
 
         <ng-container *ngIf="allowed()">
-          <!-- ---------- SIDEBAR ---------- -->
+          <!-- ---------- SIDEBAR (assistant selector) ---------- -->
           <aside class="sidebar">
-            <div class="side-label">Namespaces</div>
+            <div class="side-label">Assistants</div>
 
             <div class="ns-loading" *ngIf="loadingNs()"><span class="spin"></span> Loading...</div>
 
+            <!-- Each assistant owns a 1:1 RAG namespace (ragCollection). Selecting an
+                 assistant drives uploads/ingestion into THAT assistant's namespace. -->
             <div class="ns-list" *ngIf="!loadingNs()">
-              <button class="ns-row" *ngFor="let n of namespaces()"
-                      [class.sel]="n.id === selectedNs()" (click)="selectNs(n.id)">
-                <svg class="ic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.7">
-                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
-                </svg>
-                <span class="ns-name">{{ n.name || n.id }}</span>
-                <span class="ns-badge" *ngIf="n.chunkCount != null">{{ n.chunkCount }}</span>
+              <button class="as-row" *ngFor="let a of assistants()"
+                      [class.sel]="a.id === selectedAssistantId()" (click)="selectAssistant(a)">
+                <span class="as-thumb">
+                  <img *ngIf="thumbs()[a.id]; else asInitial" [src]="thumbs()[a.id]" alt="" />
+                  <ng-template #asInitial>{{ (a.name || a.id).charAt(0).toUpperCase() }}</ng-template>
+                </span>
+                <span class="as-meta">
+                  <span class="as-name">{{ a.name || a.id }}</span>
+                  <span class="as-role">{{ a.role || a.ragCollection }}</span>
+                </span>
                 <span class="ns-tab"></span>
               </button>
 
-              <div class="ns-empty" *ngIf="!namespaces().length">No namespaces yet - create your first one below.</div>
+              <div class="ns-empty" *ngIf="!assistants().length">
+                No assistants yet - create one in the Assistant Manager.
+              </div>
             </div>
 
-            <div class="ns-add">
-              <input type="text" [(ngModel)]="newNs" placeholder="New namespace..."
-                     (keydown.enter)="createNs()" />
-              <button class="btn primary block" (click)="createNs()" [disabled]="!newNs.trim() || busyNs()">
-                {{ busyNs() ? 'Adding...' : '+ Add Namespace' }}
-              </button>
-            </div>
+            <a class="btn ghost block mgr-link" routerLink="/assistant-manager">Manage assistants</a>
 
             <div class="side-sep"></div>
 
@@ -109,21 +112,18 @@ type Tab = 'documents' | 'chunks' | 'media';
             <!-- loading namespaces -->
             <div class="state" *ngIf="loadingNs()"><span class="spin big"></span><p>Loading namespaces...</p></div>
 
-            <!-- no namespace selected (covers fresh/empty DB) -->
+            <!-- no assistant selected (covers fresh/empty DB) -->
             <div class="hero-empty" *ngIf="!loadingNs() && !selectedNs()">
               <div class="he-icon">
                 <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6">
-                  <path d="M3 7a2 2 0 0 1 2-2h4l2 2h8a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>
+                  <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-6 8-6s8 2 8 6"/>
                 </svg>
               </div>
-              <h2>{{ namespaces().length ? 'Select a namespace' : 'No namespaces yet' }}</h2>
-              <p *ngIf="!namespaces().length">Create your first namespace to start uploading and ingesting PDFs.</p>
-              <p *ngIf="namespaces().length">Choose a namespace from the left to manage its documents, chunks and media.</p>
-              <div class="he-create" *ngIf="!namespaces().length">
-                <input type="text" [(ngModel)]="newNs" placeholder="namespace-id (e.g. terapia)" (keydown.enter)="createNs()" />
-                <button class="btn primary" (click)="createNs()" [disabled]="!newNs.trim() || busyNs()">
-                  {{ busyNs() ? 'Creating...' : 'Create namespace' }}
-                </button>
+              <h2>{{ assistants().length ? 'Select an assistant' : 'No assistants yet' }}</h2>
+              <p *ngIf="!assistants().length">Create an assistant in the Assistant Manager; each one owns its own RAG namespace for uploading and ingesting PDFs.</p>
+              <p *ngIf="assistants().length">Choose an assistant from the left to manage the documents, chunks and media in its namespace.</p>
+              <div class="he-create" *ngIf="!assistants().length">
+                <a class="btn primary" routerLink="/assistant-manager">Open Assistant Manager</a>
               </div>
               <p class="err" *ngIf="error()">{{ error() }}</p>
             </div>
@@ -132,9 +132,9 @@ type Tab = 'documents' | 'chunks' | 'media';
             <ng-container *ngIf="selectedNs() as ns">
               <!-- ====== DOCUMENTS ====== -->
               <section *ngIf="tab() === 'documents'" class="view">
-                <div class="crumb">Knowledge Base <i>&gt;</i> <b>{{ ns }}</b> <i>&gt;</i> Documents</div>
-                <h1 class="vtitle">Namespace: {{ ns }}</h1>
-                <p class="vsub">Manage and ingest documents into your vector database.</p>
+                <div class="crumb">{{ selectedAssistantName() }} <i>&gt;</i> <b>{{ ns }}</b> <i>&gt;</i> Documents</div>
+                <h1 class="vtitle">{{ selectedAssistantName() }}</h1>
+                <p class="vsub">Uploading and ingesting into namespace <b>{{ ns }}</b> (this assistant's knowledge base).</p>
 
                 <!-- Dropzone (PDF only; TXT/DOCX not supported in phase one) -->
                 <label class="dropzone" (dragover)="onDragOver($event)" (drop)="onDrop($event)">
@@ -301,6 +301,20 @@ type Tab = 'documents' | 'chunks' | 'media';
     .ns-row.sel .ns-tab { background: var(--accent); }
     .ns-empty { font-size: 12px; color: #6b7384; padding: 8px 2px; line-height: 1.5; }
 
+    /* assistant rows */
+    .as-row { position: relative; display: flex; align-items: center; gap: 10px; width: 100%; text-align: left;
+      padding: 8px 10px; border-radius: 10px; cursor: pointer; background: transparent;
+      border: 1px solid transparent; color: #c7ccd6; }
+    .as-row:hover { background: rgba(255,255,255,.04); }
+    .as-row.sel { background: rgba(139,92,246,.16); border-color: rgba(139,92,246,.4); color: #fff; }
+    .as-thumb { flex: none; width: 34px; height: 34px; border-radius: 9px; overflow: hidden; display: grid;
+      place-items: center; background: rgba(139,92,246,.18); color: var(--accent2); font-size: 14px; font-weight: 700; }
+    .as-thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .as-meta { display: flex; flex-direction: column; min-width: 0; }
+    .as-name { font-size: 13.5px; font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .as-role { font-size: 11px; color: #8b93a3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mgr-link { margin-top: 6px; text-decoration: none; }
+
     .ns-add { display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
     .ns-add input { background: rgba(255,255,255,.05); color: #e6e8ee; border: 1px solid var(--line);
       border-radius: 9px; padding: 9px 11px; font-size: 12.5px; }
@@ -419,6 +433,16 @@ type Tab = 'documents' | 'chunks' | 'media';
 export class RagAdminComponent implements OnInit {
   admin = inject(AdminService);
   private svc = inject(RagAdminService);
+  private assistantSvc = inject(AssistantConfigService);
+
+  /** Assistants drive the sidebar; each owns a 1:1 RAG namespace (ragCollection). */
+  readonly assistants = signal<AssistantConfig[]>([]);
+  readonly selectedAssistantId = signal<string>('');
+  readonly thumbs = signal<Record<string, string>>({});
+  readonly selectedAssistantName = computed(() => {
+    const a = this.assistants().find((x) => x.id === this.selectedAssistantId());
+    return a?.name || a?.id || this.selectedNs();
+  });
 
   readonly namespaces = signal<RagNamespace[]>([]);
   readonly selectedNs = signal<string>('');
@@ -452,19 +476,41 @@ export class RagAdminComponent implements OnInit {
 
   async ngOnInit(): Promise<void> {
     await this.admin.check();
-    if (this.allowed()) await this.loadNamespaces();
+    if (this.allowed()) await this.loadAssistants();
   }
 
-  async loadNamespaces(): Promise<void> {
+  /** Load the assistant list for the sidebar and resolve their thumbnails. */
+  async loadAssistants(): Promise<void> {
     this.loadingNs.set(true);
     try {
-      this.namespaces.set(await this.svc.listNamespaces());
-      if (!this.selectedNs() && this.namespaces().length) this.selectNs(this.namespaces()[0].id);
+      const list = await this.assistantSvc.listAssistants();
+      this.assistants.set(list);
+      // Resolve avatar thumbnails best-effort (non-blocking for selection).
+      void this.resolveThumbs(list);
+      if (!this.selectedAssistantId() && list.length) this.selectAssistant(list[0]);
     } catch (e: any) {
       this.error.set(e?.message ?? String(e));
     } finally {
       this.loadingNs.set(false);
     }
+  }
+
+  private async resolveThumbs(list: AssistantConfig[]): Promise<void> {
+    const map: Record<string, string> = {};
+    await Promise.all(list.map(async (a) => {
+      try {
+        const url = await this.assistantSvc.resolveCardThumbnail(a);
+        if (url) map[a.id] = url;
+      } catch { /* skip */ }
+    }));
+    this.thumbs.set(map);
+  }
+
+  /** Select an assistant -> drive the content area into its owned namespace. */
+  selectAssistant(a: AssistantConfig): void {
+    this.selectedAssistantId.set(a.id);
+    const ns = (a.ragCollection || a.ragNamespace || a.id).trim();
+    this.selectNs(ns);
   }
 
   async createNs(): Promise<void> {

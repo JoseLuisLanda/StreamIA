@@ -14,6 +14,9 @@ export interface RagRequest {
   query: string;
   /** locks server-side RAG retrieval to this assistant's collection/topic */
   assistantId?: string;
+  /** namespace hint; the Function prefers the assistant doc's ragCollection when
+   *  the assistant exists, and uses this only as a fallback (static/dev). */
+  namespace?: string;
   /** 'es' | 'en' (Spanish primary) */
   language?: string;
   /** optional voice id hint (the assistant's default is used otherwise) */
@@ -30,6 +33,8 @@ export interface RagRequest {
  */
 export interface RagAskOptions {
   assistantId?: string;
+  /** namespace hint (assistant's ragCollection); fallback when no assistant doc. */
+  namespace?: string;
   ragPath?: string;
   preview?: boolean;
   language?: string;
@@ -101,8 +106,21 @@ export interface AssistantConfig {
   description?: string;
   /** default avatar (catalog id) loaded for this deployment */
   avatarId: string;
-  /** RAG collection/topic the Function constrains retrieval to */
+  /**
+   * The RAG namespace this assistant OWNS (1:1). Canonical owned knowledge base;
+   * documents/chunks/media live under rag/{ragCollection}/... . Convention:
+   * usually equals the assistant id. `ragNamespace` is an explicit alias kept for
+   * clarity; the service treats ragCollection as authoritative.
+   */
   ragCollection: string;
+  /** Explicit alias of the owned namespace (optional; falls back to ragCollection). */
+  ragNamespace?: string;
+  /** Instant reply for greetings/small talk (no RAG call). Per-assistant override. */
+  greetingResponse?: string;
+  /** Extra greeting trigger words for the intent router (merged with global defaults). */
+  greetingKeywords?: string[];
+  /** Extra query-verb triggers for the intent router (merged with global defaults). */
+  queryVerbs?: string[];
   /**
    * Persona / behavior for the LLM. The chatRag Function reads this server-side
    * from assistants/{id}.systemPrompt (client cannot tamper). Shapes tone/role
@@ -125,6 +143,11 @@ export interface AssistantConfig {
   tailGestureId?: string;
   /** phase-one: may the public user switch the avatar (viz) only? */
   allowAvatarSwitch?: boolean;
+  /** whether this assistant shows in the public /assistants selector */
+  enabled?: boolean;
+  /** epoch ms */
+  createdAt?: number;
+  updatedAt?: number;
 }
 
 /** A media item plus its resolved object-URL + load state, for the gallery UI. */

@@ -137,6 +137,34 @@ export class LlmService {
         }
     }
 
+    /**
+     * One-shot intent classification for the intent router's ambiguous-case
+     * fallback. Does NOT touch conversation history. Returns 'greeting' | 'query';
+     * on any error defaults to 'query' (never drop a possible information request).
+     */
+    async classifyIntent(query: string): Promise<'greeting' | 'query'> {
+        const s = this.settings();
+        const cfg = s.providers[s.provider];
+        const system =
+            'You are an intent classifier. Reply with EXACTLY one lowercase word: ' +
+            '"greeting" or "query". greeting = a salutation or small talk (hi, thanks, how are you). ' +
+            'query = a request for information or action. No other words.';
+        const messages: ChatMessage[] = [{ role: 'user', content: query }];
+        let out = '';
+        try {
+            switch (s.provider) {
+                case 'ollama': out = await this.chatOllama(cfg, system, messages); break;
+                case 'openai': out = await this.chatOpenAiCompatible(cfg, system, messages, 'OpenAI'); break;
+                case 'deepseek': out = await this.chatOpenAiCompatible(cfg, system, messages, 'DeepSeek'); break;
+                case 'anthropic': out = await this.chatAnthropic(cfg, system, messages); break;
+                case 'gemini': out = await this.chatGemini(cfg, system, messages); break;
+            }
+        } catch {
+            return 'query';
+        }
+        return /greet/i.test(out || '') ? 'greeting' : 'query';
+    }
+
     // ------------------------------------------------------------- providers
 
     private async chatOllama(cfg: ProviderConfig, system: string, messages: ChatMessage[], onDelta?: (acc: string) => void): Promise<string> {
