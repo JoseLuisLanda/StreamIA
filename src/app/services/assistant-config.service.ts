@@ -4,6 +4,7 @@ import { getDownloadURL, listAll, ref } from 'firebase/storage';
 import { getFirebaseApp, getFirebaseStorageClient } from './firebase-client';
 import { AssistantConfig } from '../lib/rag/rag.models';
 import { getAssistantId } from '../lib/rag/rag.config';
+import { ASSISTANT_SCHEMA_VERSION, migrateAssistantData } from '../lib/rag/assistant-schema';
 
 /**
  * Loads public assistant configurations from Firestore (`assistants/{id}`).
@@ -89,7 +90,7 @@ export class AssistantConfigService {
         this.error.set(`Assistant "${assistantId}" not found.`);
         return null;
       }
-      const cfg = this.mapDoc(assistantId, snap.data() as Partial<AssistantConfig>);
+      const cfg = this.mapDoc(assistantId, this.lazyMigrate(assistantId, snap.data()) as Partial<AssistantConfig>);
       this.cache.set(assistantId, cfg);
       this.current.set(cfg);
       return cfg;
@@ -114,7 +115,7 @@ export class AssistantConfigService {
     try {
       const db = getFirestore(getFirebaseApp());
       const snap = await getDocs(collection(db, 'assistants'));
-      const list = snap.docs.map((d) => this.mapDoc(d.id, d.data() as Partial<AssistantConfig>));
+      const list = snap.docs.map((d) => this.mapDoc(d.id, this.lazyMigrate(d.id, d.data()) as Partial<AssistantConfig>));
       list.forEach((c) => this.cache.set(c.id, c));
       if (list.length) return list;
       return STATIC_ASSISTANTS;
@@ -159,9 +160,16 @@ export class AssistantConfigService {
         avatarId: cfg.avatarId,
         ragCollection: ns,
         ragNamespace: ns,
+        llmProfileId: cfg.llmProfileId ?? null,
+        // New docs are stamped at the current schema with all fields present.
+        schemaVersion: ASSISTANT_SCHEMA_VERSION,
+        useCustomResponses: cfg.useCustomResponses ?? {
+          greetings: false, infoAcknowledgements: false, farewells: false, suggestedPrompts: false,
+        },
         systemPrompt: cfg.systemPrompt ?? '',
         greetingResponse: cfg.greetingResponse ?? null,
         greetingKeywords: cfg.greetingKeywords ?? null,
+        farewellKeywords: cfg.farewellKeywords ?? null,
         queryVerbs: cfg.queryVerbs ?? null,
         voice: cfg.voice ?? '',
         language: cfg.language ?? 'es',
@@ -186,6 +194,31 @@ export class AssistantConfigService {
     this.cache.delete(id);
   }
 
+  /**
+   * Apply schema migrations to a raw doc on read. Returns the upgraded data for
+   * immediate use, and lazily WRITES BACK the patch so the doc self-heals
+   * permanently (fire-and-forget; ignored if the user can't write).
+   */
+  private lazyMigrate(id: string, raw: any): any {
+    const { data, changed } = migrateAssistantData(raw);
+    if (changed) void this.writeBackMigration(id, data);
+    return data;
+  }
+
+  private async writeBackMigration(id: string, data: any): Promise<void> {
+    try {
+      const db = getFirestore(getFirebaseApp());
+      const patch: any = {
+        useCustomResponses: data.useCustomResponses,
+        schemaVersion: ASSISTANT_SCHEMA_VERSION,
+      };
+      if (data.__needsContentModified) patch.contentModifiedAt = serverTimestamp();
+      await setDoc(doc(db, 'assistants', id), patch, { merge: true });
+    } catch {
+      /* read-only user / offline -> stays in-memory migrated, harmless */
+    }
+  }
+
   private mapDoc(id: string, data: Partial<AssistantConfig>): AssistantConfig {
     return {
       id,
@@ -195,9 +228,12 @@ export class AssistantConfigService {
       avatarId: data.avatarId ?? 'alex-ia',
       ragCollection: data.ragCollection ?? data.ragNamespace ?? id,
       ragNamespace: data.ragNamespace ?? data.ragCollection ?? id,
+      llmProfileId: data.llmProfileId ?? undefined,
+      useCustomResponses: data.useCustomResponses ?? undefined,
       systemPrompt: data.systemPrompt,
       greetingResponse: data.greetingResponse,
       greetingKeywords: data.greetingKeywords,
+      farewellKeywords: data.farewellKeywords,
       queryVerbs: data.queryVerbs,
       language: data.language ?? 'es',
       voice: data.voice ?? '',
@@ -208,6 +244,7 @@ export class AssistantConfigService {
       tailGestureId: data.tailGestureId,
       allowAvatarSwitch: data.allowAvatarSwitch ?? true,
       enabled: data.enabled ?? true,
+      schemaVersion: (data as any).schemaVersion,
       createdAt: this.toMs((data as any).createdAt),
       updatedAt: this.toMs((data as any).updatedAt),
     };

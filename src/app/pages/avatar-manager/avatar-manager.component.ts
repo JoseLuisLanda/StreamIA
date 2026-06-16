@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { AvatarManagerService } from '../../services/avatar-manager.service';
+import { ImageOptimizationService } from '../../services/image-optimization.service';
 import { AdminService } from '../../services/admin.service';
 import { GlbViewerComponent } from './components/glb-viewer.component';
 import { Avatar, AvatarMeshStats } from '../../lib/avatars/avatar.models';
@@ -282,6 +283,7 @@ interface VoiceOpt { id: string; label: string; }
 })
 export class AvatarManagerComponent implements OnInit {
   svc = inject(AvatarManagerService);
+  private imgOpt = inject(ImageOptimizationService);
   admin = inject(AdminService);
 
   readonly avatars = signal<Avatar[]>([]);
@@ -472,7 +474,17 @@ export class AvatarManagerComponent implements OnInit {
       }
       if (this.pendingThumb) {
         this.thumbUploading.set(true);
-        this.form.thumbnailPath = await this.svc.uploadThumbnail(id, this.pendingThumb);
+        // Reuse the global ImageOptimizationService (same path as RAG media):
+        // shrink card thumbnails to WebP before upload. Graceful fallback to the
+        // original on failure.
+        let thumb: File = this.pendingThumb;
+        if (this.imgOpt.isOptimizableImage(this.pendingThumb)) {
+          try {
+            const r = await this.imgOpt.optimizeImage(this.pendingThumb, { maxDimension: 512, quality: 0.8 });
+            thumb = new File([r.blob], `${id}.webp`, { type: r.blob.type || 'image/webp' });
+          } catch { /* keep original */ }
+        }
+        this.form.thumbnailPath = await this.svc.uploadThumbnail(id, thumb);
         this.thumbUploading.set(false);
         this.pendingThumb = null;
       }

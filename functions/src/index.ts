@@ -14,3 +14,15 @@ export { ingestDocument } from './ingestDocument';
 export { api } from './api';
 export { setLlmApiKey, testLlmConnection } from './llmAdmin';
 export { bootstrapFirstAdmin, setUserRole, listUsers } from './roleAdmin';
+export {
+  saveLlmProfile,
+  deleteLlmProfile,
+  setLlmProfileKey,
+  setActiveLlmKey,
+  deleteLlmProfileKey,
+  setSystemDefaultProfile,
+  testLlmProfile,
+  migrateLegacyLlmConfig,
+} from './llmProfiles';
+export { generateResponses } from './generateResponses';
+export { backfillAssistants } from './backfill';

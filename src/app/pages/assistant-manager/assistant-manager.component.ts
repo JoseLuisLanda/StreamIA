@@ -6,9 +6,20 @@ import { AssistantConfigService } from '../../services/assistant-config.service'
 import { AvatarManagerService } from '../../services/avatar-manager.service';
 import { RagAdminService } from '../../services/rag-admin.service';
 import { AdminService } from '../../services/admin.service';
+import { LlmProfileService } from '../../services/llm-profile.service';
+import { LlmProfileEditorComponent } from '../llm-admin/llm-profile-editor.component';
+import { ConversationContentService } from '../../services/conversation-content.service';
+import {
+  AssistantConvContent,
+  ConvKind,
+  PhraseEntry,
+  SuggestedPrompt as ConvPrompt,
+} from '../../lib/conversation-content/conv-content.models';
 import { AssistantConfig } from '../../lib/rag/rag.models';
 import { Avatar } from '../../lib/avatars/avatar.models';
 import { RagNamespace } from '../../lib/rag/rag-admin.models';
+import { LlmConfigProfile, TestProfileResult, activeKeyOf, newProfileDraft } from '../../lib/llm-admin/llm-profile.models';
+import { PROVIDER_LABELS } from '../../lib/llm-admin/llm-admin.models';
 import { GESTURE_MAP } from '../../lib/gestures/gesture-library';
 import { PIPER_VOICES, TtsLang } from '../../services/tts-lipsync.service';
 import { environment } from '../../../environments/environment';
@@ -27,7 +38,7 @@ interface VoiceOpt { id: string; label: string; }
 @Component({
   selector: 'app-assistant-manager',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterLink],
+  imports: [CommonModule, FormsModule, RouterLink, LlmProfileEditorComponent],
   template: `
     <div class="wrap">
       <header class="bar">
@@ -38,6 +49,7 @@ interface VoiceOpt { id: string; label: string; }
           <a routerLink="/rag-admin">RAG Admin</a>
           <a routerLink="/llm-admin">LLM Admin</a>
           <a routerLink="/role-admin">Roles</a>
+          <a routerLink="/llm-responses">Respuestas</a>
         </nav>
       </header>
 
@@ -129,6 +141,36 @@ interface VoiceOpt { id: string; label: string; }
               <label class="fld"><span>Persona (system prompt)</span>
                 <textarea rows="5" [(ngModel)]="form.systemPrompt" placeholder="Eres Sofia, una asesora experta de una tienda de muebles..."></textarea>
               </label>
+
+              <!-- ===== LLM config ===== -->
+              <div class="llmbox">
+                <div class="llmhead">LLM</div>
+                <label class="fld"><span>Config profile</span>
+                  <select [(ngModel)]="form.llmProfileId" (ngModelChange)="onProfilePicked()">
+                    <option [ngValue]="undefined">- system default (global) -</option>
+                    <optgroup label="Global">
+                      <option *ngFor="let p of globalProfiles()" [ngValue]="p.id">{{ p.name }} ({{ llmLabels[p.provider] }}/{{ p.model }})</option>
+                    </optgroup>
+                    <optgroup label="Privados de este asistente" *ngIf="privateProfiles().length">
+                      <option *ngFor="let p of privateProfiles()" [ngValue]="p.id">{{ p.name }} ({{ llmLabels[p.provider] }}/{{ p.model }})</option>
+                    </optgroup>
+                  </select>
+                </label>
+                <p class="hint">Efectivo: {{ effectiveLlm() }}</p>
+                <div class="llmbtns">
+                  <button class="btn ghost sm" type="button" (click)="newPrivateProfile()" [disabled]="!form.id">+ Perfil privado</button>
+                  <button class="btn ghost sm" type="button" (click)="editPickedProfile()" *ngIf="pickedProfile()">Editar perfil</button>
+                  <button class="btn ghost sm" type="button" (click)="testLlm()" [disabled]="!form.llmProfileId || llmTesting()">{{ llmTesting() ? 'Probando...' : 'Probar LLM' }}</button>
+                </div>
+                <p class="hint" *ngIf="form.id === ''">Guarda el asistente primero para crear perfiles privados.</p>
+                <p class="ok" *ngIf="llmTest()?.ok">OK — {{ llmTest()?.provider }}/{{ llmTest()?.model }} (llave: {{ llmTest()?.key }})</p>
+                <p class="err" *ngIf="llmTest() && !llmTest()?.ok">Fallo: {{ llmTest()?.error }}</p>
+
+                <div class="profedit" *ngIf="llmEditing()">
+                  <app-llm-profile-editor [p]="llmEditing()!" (changed)="onLlmProfileChanged($event)"></app-llm-profile-editor>
+                  <button class="btn ghost sm" type="button" (click)="llmEditing.set(null)">Cerrar editor</button>
+                </div>
+              </div>
             </section>
 
             <aside class="col side">
@@ -159,6 +201,63 @@ interface VoiceOpt { id: string; label: string; }
               <p class="err" *ngIf="error()">{{ error() }}</p>
             </aside>
           </div>
+
+          <!-- ============ CONVERSACION / PERSONALIDAD ============ -->
+          <section class="convsec" *ngIf="form.id">
+            <h2>Conversación / Personalidad</h2>
+            <p class="sub">Frases y sugerencias por asistente. Cada cambio actualiza el marcador de contenido.</p>
+            <div class="state sm" *ngIf="convLoading()"><span class="spin"></span> Cargando...</div>
+
+            <div class="convgrid" *ngIf="!convLoading() && convEdit() as c">
+              <!-- phrase lists -->
+              <div class="convcol" *ngFor="let kind of phraseKinds">
+                <div class="cvhead"><h3>{{ phraseTitle[kind] }}</h3>
+                  <button class="btn sm" type="button" (click)="genPhrases(kind)" [disabled]="convGen()">Generar con IA</button>
+                </div>
+                <div class="cvrow" *ngFor="let e of phraseList(c, kind); let i = index">
+                  <input type="checkbox" [checked]="e.enabled" (change)="togglePhrase(kind, e, $event)" title="Habilitado" />
+                  <input class="cvtext" type="text" [ngModel]="e.text" (blur)="savePhrase(kind, e, $event)" />
+                  <button class="ix" (click)="movePhrase(kind, i, -1)" [disabled]="i===0" title="Subir">↑</button>
+                  <button class="ix" (click)="movePhrase(kind, i, 1)" [disabled]="i===phraseList(c,kind).length-1" title="Bajar">↓</button>
+                  <button class="ix danger" (click)="delPhrase(kind, e)" title="Eliminar">✕</button>
+                </div>
+                <div class="cvadd">
+                  <input type="text" [(ngModel)]="newPhrase[kind]" placeholder="Nueva frase..." (keydown.enter)="addPhrase(kind)" />
+                  <button class="btn sm" (click)="addPhrase(kind)" [disabled]="!newPhrase[kind]?.trim()">+ Añadir</button>
+                </div>
+              </div>
+
+              <!-- suggested prompts -->
+              <div class="convcol wide">
+                <div class="cvhead"><h3>Sugerencias (chips)</h3>
+                  <button class="btn sm" type="button" (click)="genPromptsAI()" [disabled]="convGen()">Generar con IA</button>
+                  <a class="btn ghost sm" routerLink="/llm-responses">Editor avanzado</a>
+                </div>
+                <div class="cvrow" *ngFor="let p of c.suggestedPrompts; let i = index">
+                  <input type="checkbox" [checked]="p.enabled" (change)="togglePrompt(p, $event)" title="Habilitado" />
+                  <input class="cvtext" type="text" [ngModel]="p.label" (blur)="savePromptField(p, 'label', $event)" placeholder="Etiqueta" />
+                  <input class="cvtext" type="text" [ngModel]="p.prompt" (blur)="savePromptField(p, 'prompt', $event)" placeholder="Prompt enviado" />
+                  <button class="ix" (click)="movePrompt(i, -1)" [disabled]="i===0">↑</button>
+                  <button class="ix" (click)="movePrompt(i, 1)" [disabled]="i===c.suggestedPrompts.length-1">↓</button>
+                  <button class="ix danger" (click)="delPrompt(p)">✕</button>
+                </div>
+                <div class="cvadd">
+                  <input type="text" [(ngModel)]="newPromptLabel" placeholder="Etiqueta (ej. Becas)" />
+                  <input type="text" [(ngModel)]="newPromptText" placeholder="Prompt (ej. ¿Qué becas hay?)" />
+                  <button class="btn sm" (click)="addPrompt()" [disabled]="!newPromptLabel.trim() || !newPromptText.trim()">+ Añadir</button>
+                </div>
+
+                <h3 style="margin-top:14px">Palabras clave (opcional)</h3>
+                <label class="fld"><span>Saludo (separadas por coma)</span>
+                  <input type="text" [(ngModel)]="greetingKwText" (blur)="saveKeywords()" placeholder="hola, buenas, hey" />
+                </label>
+                <label class="fld"><span>Despedida (separadas por coma)</span>
+                  <input type="text" [(ngModel)]="farewellKwText" (blur)="saveKeywords()" placeholder="adios, hasta luego, chao" />
+                </label>
+              </div>
+            </div>
+            <p class="err" *ngIf="convErr()">{{ convErr() }}</p>
+          </section>
         </ng-container>
       </main>
     </div>
@@ -213,7 +312,27 @@ interface VoiceOpt { id: string; label: string; }
     .btn.ghost { background: rgba(255,255,255,.06); border-color: rgba(255,255,255,.12); color: #cdd; }
     .btn.danger { background: rgba(179,57,57,.2); border-color: rgba(179,57,57,.5); color: #ffb3b3; }
     .btn.sm { padding: 5px 11px; font-size: 11.5px; }
-    @media (max-width: 860px) { .editor { grid-template-columns: 1fr; } .col.side { position: static; } }
+    .ok { color: #6ee7b7; font-size: 12.5px; margin: 2px 0; }
+    .llmbox { border: 1px solid rgba(255,255,255,.1); border-radius: 12px; padding: 12px 14px; display: flex; flex-direction: column; gap: 8px; margin-top: 4px; }
+    .llmhead { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: #8b93a3; font-weight: 700; }
+    .llmbtns { display: flex; gap: 7px; flex-wrap: wrap; }
+    .profedit { border-top: 1px solid rgba(255,255,255,.08); padding-top: 10px; margin-top: 4px; display: flex; flex-direction: column; gap: 8px; }
+    .convsec { margin-top: 20px; background: #121823; border: 1px solid rgba(255,255,255,.08); border-radius: 14px; padding: 18px; }
+    .convsec h2 { margin: 0 0 2px; font-size: 18px; }
+    .convgrid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-top: 12px; }
+    .convcol { display: flex; flex-direction: column; gap: 7px; }
+    .convcol.wide { grid-column: 1 / -1; }
+    .convcol h3 { margin: 0 0 2px; font-size: 13.5px; color: #cbd0da; }
+    .cvhead { display: flex; align-items: center; justify-content: space-between; gap: 8px; flex-wrap: wrap; }
+    .cvrow { display: flex; align-items: center; gap: 6px; }
+    .cvtext { flex: 1; background: rgba(255,255,255,.05); color: #e6e8ee; border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 6px 9px; font-size: 12.5px; }
+    .cvadd { display: flex; gap: 6px; margin-top: 4px; flex-wrap: wrap; }
+    .cvadd input { flex: 1; min-width: 120px; background: rgba(255,255,255,.05); color: #e6e8ee; border: 1px solid rgba(255,255,255,.12); border-radius: 8px; padding: 6px 9px; font-size: 12.5px; }
+    .ix { width: 26px; height: 28px; border-radius: 7px; cursor: pointer; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12); color: #aeb4c0; font-size: 12px; }
+    .ix:hover:not(:disabled) { background: rgba(255,255,255,.1); color: #fff; } .ix:disabled { opacity: .35; cursor: default; }
+    .ix.danger:hover { background: rgba(179,57,57,.25); color: #ffb3b3; }
+    .state.sm { margin: 8px 0; }
+    @media (max-width: 860px) { .editor { grid-template-columns: 1fr; } .col.side { position: static; } .convgrid { grid-template-columns: 1fr; } }
   `]
 })
 export class AssistantManagerComponent implements OnInit {
@@ -222,6 +341,29 @@ export class AssistantManagerComponent implements OnInit {
   private ragSvc = inject(RagAdminService);
   admin = inject(AdminService);
   private router = inject(Router);
+  private profileSvc = inject(LlmProfileService);
+  private convContent = inject(ConversationContentService);
+
+  // ---- Conversational content editing ----
+  readonly phraseKinds: ConvKind[] = ['greetings', 'infoAcknowledgements', 'farewells'];
+  readonly phraseTitle: Record<string, string> = {
+    greetings: 'Saludos', infoAcknowledgements: 'Frases mientras busca', farewells: 'Despedidas',
+  };
+  readonly convEdit = signal<AssistantConvContent | null>(null);
+  readonly convLoading = signal(false);
+  readonly convGen = signal(false);
+  readonly convErr = signal('');
+  newPhrase: Record<string, string> = { greetings: '', infoAcknowledgements: '', farewells: '' };
+  newPromptLabel = '';
+  newPromptText = '';
+  greetingKwText = '';
+  farewellKwText = '';
+
+  readonly llmLabels = PROVIDER_LABELS;
+  readonly profiles = signal<LlmConfigProfile[]>([]);
+  readonly llmEditing = signal<LlmConfigProfile | null>(null);
+  readonly llmTesting = signal(false);
+  readonly llmTest = signal<TestProfileResult | null>(null);
 
   readonly assistants = signal<AssistantConfig[]>([]);
   readonly avatars = signal<Avatar[]>([]);
@@ -260,14 +402,16 @@ export class AssistantManagerComponent implements OnInit {
   async reload(): Promise<void> {
     this.loading.set(true);
     try {
-      const [list, avatars, namespaces] = await Promise.all([
+      const [list, avatars, namespaces, profiles] = await Promise.all([
         this.svc.listAssistants(),
         this.avatarSvc.listAvatars(),
         this.ragSvc.listNamespaces(),
+        this.profileSvc.listAll().catch(() => [] as LlmConfigProfile[]),
       ]);
       this.assistants.set(list);
       this.avatars.set(avatars);
       this.namespaces.set(namespaces);
+      this.profiles.set(profiles);
       // resolve avatar thumbnails (by avatarId) for list + picker
       for (const av of avatars) {
         this.avatarSvc.resolveUrl(av.thumbnailPath)
@@ -300,6 +444,61 @@ export class AssistantManagerComponent implements OnInit {
     if (av?.defaultVoice && !this.form.voice) this.form.voice = av.defaultVoice;
   }
 
+  // -------------------------------------------------------------- LLM profiles
+  globalProfiles(): LlmConfigProfile[] {
+    return this.profiles().filter((p) => p.scope === 'global');
+  }
+  privateProfiles(): LlmConfigProfile[] {
+    return this.profiles().filter((p) => p.scope === 'assistant' && p.ownerAssistantId === this.form.id);
+  }
+  pickedProfile(): LlmConfigProfile | null {
+    return this.profiles().find((p) => p.id === this.form.llmProfileId) ?? null;
+  }
+  private systemDefaultProfile(): LlmConfigProfile | null {
+    return this.profiles().find((p) => p.scope === 'global' && p.isSystemDefault) ?? null;
+  }
+  effectiveLlm(): string {
+    const p = this.pickedProfile();
+    if (p) {
+      const k = activeKeyOf(p);
+      const scope = p.scope === 'assistant' ? 'Propia' : 'Global';
+      return `${scope}: ${p.name} / ${p.model}${k ? ', llave: ' + k.label : ' (sin llave)'}`;
+    }
+    const d = this.systemDefaultProfile();
+    return d ? `Global (default): ${d.name} / ${d.model}` : 'Sin perfil — configura uno en LLM Admin';
+  }
+  onProfilePicked(): void {
+    this.llmTest.set(null);
+    this.llmEditing.set(null);
+  }
+  newPrivateProfile(): void {
+    if (!this.form.id) return;
+    this.llmEditing.set(newProfileDraft('assistant', this.form.id));
+  }
+  editPickedProfile(): void {
+    const p = this.pickedProfile();
+    if (p) this.llmEditing.set({ ...p, keys: [...p.keys] });
+  }
+  async onLlmProfileChanged(profileId: string): Promise<void> {
+    await this.reload();
+    // Auto-assign a freshly created private profile and keep its editor open for keys.
+    if (profileId) {
+      this.form.llmProfileId = profileId;
+      const fresh = this.profiles().find((x) => x.id === profileId);
+      if (fresh) this.llmEditing.set({ ...fresh, keys: [...fresh.keys] });
+    }
+  }
+  async testLlm(): Promise<void> {
+    if (!this.form.llmProfileId) return;
+    this.llmTesting.set(true);
+    this.llmTest.set(null);
+    try {
+      this.llmTest.set(await this.profileSvc.test(this.form.llmProfileId));
+    } finally {
+      this.llmTesting.set(false);
+    }
+  }
+
   newAssistant(): void {
     this.form = this.blank();
     this.error.set('');
@@ -310,6 +509,9 @@ export class AssistantManagerComponent implements OnInit {
     this.form = { ...a };
     this.error.set('');
     this.view.set('edit');
+    this.greetingKwText = (a.greetingKeywords ?? []).join(', ');
+    this.farewellKwText = (a.farewellKeywords ?? []).join(', ');
+    void this.loadConvEdit();
   }
 
   cancel(): void { this.view.set('list'); this.error.set(''); }
@@ -327,6 +529,9 @@ export class AssistantManagerComponent implements OnInit {
     this.error.set('');
     try {
       await this.svc.save(this.form);
+      // Ensure the editable GLOBAL defaults exist (assistants inherit them while
+      // their useCustomResponses flags are false). No per-assistant seeding.
+      await this.convContent.seedGlobals().catch(() => {});
       await this.reload();
       this.view.set('list');
     } catch (e: any) {
@@ -334,6 +539,136 @@ export class AssistantManagerComponent implements OnInit {
     } finally {
       this.saving.set(false);
     }
+  }
+
+  // ------------------------------------------------ conversational content CRUD
+  private async loadConvEdit(): Promise<void> {
+    if (!this.form.id) { this.convEdit.set(null); return; }
+    this.convLoading.set(true);
+    this.convErr.set('');
+    try {
+      this.convEdit.set(await this.convContent.listForEdit(this.form.id));
+    } catch (e: any) {
+      this.convErr.set(e?.message ?? String(e));
+    } finally {
+      this.convLoading.set(false);
+    }
+  }
+
+  phraseList(c: AssistantConvContent, kind: ConvKind): PhraseEntry[] {
+    return (c as any)[kind] as PhraseEntry[];
+  }
+
+  async addPhrase(kind: ConvKind): Promise<void> {
+    const text = (this.newPhrase[kind] || '').trim();
+    if (!text || !this.form.id) return;
+    const order = this.phraseList(this.convEdit()!, kind).length;
+    await this.guard(() => this.convContent.addPhrase(this.form.id, kind, text, order));
+    this.newPhrase[kind] = '';
+    await this.loadConvEdit();
+  }
+  async savePhrase(kind: ConvKind, e: PhraseEntry, ev: Event): Promise<void> {
+    const text = (ev.target as HTMLInputElement).value.trim();
+    if (text === e.text) return;
+    await this.guard(() => this.convContent.updateEntry(this.form.id, kind, e.id, { text }));
+    await this.loadConvEdit();
+  }
+  async togglePhrase(kind: ConvKind, e: PhraseEntry, ev: Event): Promise<void> {
+    const enabled = (ev.target as HTMLInputElement).checked;
+    await this.guard(() => this.convContent.updateEntry(this.form.id, kind, e.id, { enabled }));
+    await this.loadConvEdit();
+  }
+  async delPhrase(kind: ConvKind, e: PhraseEntry): Promise<void> {
+    await this.guard(() => this.convContent.deleteEntry(this.form.id, kind, e.id));
+    await this.loadConvEdit();
+  }
+  async movePhrase(kind: ConvKind, i: number, dir: -1 | 1): Promise<void> {
+    const list = [...this.phraseList(this.convEdit()!, kind)];
+    const j = i + dir;
+    if (j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    await this.guard(() => this.convContent.reorder(this.form.id, kind, list.map((x) => x.id)));
+    await this.loadConvEdit();
+  }
+
+  async addPrompt(): Promise<void> {
+    const label = this.newPromptLabel.trim();
+    const prompt = this.newPromptText.trim();
+    if (!label || !prompt || !this.form.id) return;
+    const order = this.convEdit()!.suggestedPrompts.length;
+    await this.guard(() => this.convContent.addPrompt(this.form.id, label, prompt, order));
+    this.newPromptLabel = ''; this.newPromptText = '';
+    await this.loadConvEdit();
+  }
+  async savePromptField(p: ConvPrompt, field: 'label' | 'prompt', ev: Event): Promise<void> {
+    const val = (ev.target as HTMLInputElement).value.trim();
+    if (val === (p as any)[field]) return;
+    await this.guard(() => this.convContent.updateEntry(this.form.id, 'suggestedPrompts', p.id, { [field]: val }));
+    await this.loadConvEdit();
+  }
+  async togglePrompt(p: ConvPrompt, ev: Event): Promise<void> {
+    const enabled = (ev.target as HTMLInputElement).checked;
+    await this.guard(() => this.convContent.updateEntry(this.form.id, 'suggestedPrompts', p.id, { enabled }));
+    await this.loadConvEdit();
+  }
+  async delPrompt(p: ConvPrompt): Promise<void> {
+    await this.guard(() => this.convContent.deleteEntry(this.form.id, 'suggestedPrompts', p.id));
+    await this.loadConvEdit();
+  }
+  async movePrompt(i: number, dir: -1 | 1): Promise<void> {
+    const list = [...this.convEdit()!.suggestedPrompts];
+    const j = i + dir;
+    if (j < 0 || j >= list.length) return;
+    [list[i], list[j]] = [list[j], list[i]];
+    await this.guard(() => this.convContent.reorder(this.form.id, 'suggestedPrompts', list.map((x) => x.id)));
+    await this.loadConvEdit();
+  }
+
+  async saveKeywords(): Promise<void> {
+    const parse = (s: string) => s.split(',').map((x) => x.trim()).filter(Boolean);
+    this.form.greetingKeywords = parse(this.greetingKwText);
+    this.form.farewellKeywords = parse(this.farewellKwText);
+    await this.guard(() => this.svc.save(this.form));
+  }
+
+  /** Run a content mutation, surfacing errors into convErr. */
+  private async guard(fn: () => Promise<unknown>): Promise<void> {
+    this.convErr.set('');
+    try { await fn(); } catch (e: any) { this.convErr.set(e?.message ?? String(e)); }
+  }
+
+  /** AI-generate phrases for a category and append them as editable entries (sets flag true). */
+  async genPhrases(kind: ConvKind): Promise<void> {
+    if (!this.form.id) return;
+    this.convGen.set(true); this.convErr.set('');
+    try {
+      const r = await this.convContent.generate({
+        scope: 'assistant', assistantId: this.form.id, category: kind, count: 5,
+        context: { name: this.form.name, role: this.form.role, description: this.form.description, topicTag: this.form.topicTag, language: this.form.language, persona: this.form.systemPrompt },
+      });
+      if (r.error) { this.convErr.set(r.error); return; }
+      const base = this.phraseList(this.convEdit()!, kind).length;
+      let i = base;
+      for (const text of r.phrases ?? []) await this.convContent.addPhrase(this.form.id, kind, text, i++);
+      await this.loadConvEdit();
+    } finally { this.convGen.set(false); }
+  }
+
+  /** AI-generate suggested prompts and append them (sets flag true). */
+  async genPromptsAI(): Promise<void> {
+    if (!this.form.id) return;
+    this.convGen.set(true); this.convErr.set('');
+    try {
+      const r = await this.convContent.generate({
+        scope: 'assistant', assistantId: this.form.id, category: 'suggestedPrompts', count: 4,
+        context: { name: this.form.name, role: this.form.role, description: this.form.description, topicTag: this.form.topicTag, language: this.form.language, persona: this.form.systemPrompt },
+      });
+      if (r.error) { this.convErr.set(r.error); return; }
+      const base = this.convEdit()!.suggestedPrompts.length;
+      let i = base;
+      for (const p of r.prompts ?? []) await this.convContent.addPrompt(this.form.id, p.label, p.prompt, i++);
+      await this.loadConvEdit();
+    } finally { this.convGen.set(false); }
   }
 
   async toggleEnabled(a: AssistantConfig, e: Event): Promise<void> {

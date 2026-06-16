@@ -21,6 +21,19 @@ import { ConvState, canTransition, interruptTarget } from '../lib/conversation/c
 export type { ConvState };
 export { canTransition, interruptTarget };
 
+/**
+ * LAST-RESORT code fallbacks (small lists, randomly picked) used only when neither
+ * custom nor global responses resolved to anything. Never a single fixed phrase.
+ */
+const CODE_GREETINGS: Record<'es' | 'en', string[]> = {
+    es: ['¡Hola! Qué gusto verte por aquí 😄', '¡Hey! ¿En qué te ayudo hoy?', '¡Hola! ¿Cómo te puedo apoyar?'],
+    en: ['Hi! Great to see you 😄', 'Hey! How can I help today?', 'Hello! What can I do for you?'],
+};
+const CODE_FAREWELLS: Record<'es' | 'en', string[]> = {
+    es: ['¡Hasta pronto! Aquí estaré cuando me necesites', '¡Cuídate! Vuelve cuando quieras'],
+    en: ['See you soon! I will be here when you need me', 'Take care! Come back anytime'],
+};
+
 export interface ConvMessage {
     /** unique per session — keys the replay plan cache */
     id: number;
@@ -39,6 +52,8 @@ export interface ConvMessage {
     tailGesture?: string;
     /** RAG informational mode: media references attached to this answer (lazy-fetched). */
     media?: MediaItem[];
+    /** RAG: full long-form detail shown on "Ver mas" (NOT spoken). Empty -> hide. */
+    detail?: string;
 }
 
 export interface ConvTtsOpts {
@@ -77,16 +92,38 @@ export class ConversationService {
      *  the Cloud Function via this fetcher instead of the client LLM. null = LLM. */
     public ragFetcher: ((q: string) => Promise<RagResponse>) | null = null;
 
-    // ---- Intent router (greeting vs RAG query). Active only in RAG mode. ----
-    /** Per-assistant instant reply spoken for greetings/small talk (no RAG call). */
+    // ---- Intent router (greeting/farewell vs RAG query). Active only in RAG mode. ----
+    /** Cached greeting phrases (random non-repeating pick). Falls back to greetingResponse. */
+    public greetings: string[] = [];
+    /** Cached farewell phrases (random non-repeating pick). */
+    public farewells: string[] = [];
+    /** Cached info-acknowledgement fillers spoken right before a RAG call. */
+    public infoAcks: string[] = [];
+    /** Legacy single greeting reply (fallback when `greetings` is empty). */
     public greetingResponse: string | null = null;
     /** Per-assistant extra greeting triggers, merged with the global defaults. */
     public greetingKeywords: string[] | undefined;
+    /** Per-assistant extra farewell triggers, merged with the global defaults. */
+    public farewellKeywords: string[] | undefined;
     /** Per-assistant extra query verbs, merged with the global defaults. */
     public queryVerbs: string[] | undefined;
     /** Optional lightweight LLM fallback used ONLY when local classification is
      *  ambiguous. Returns 'greeting' | 'query'. null => ambiguous defaults to query. */
     public intentClassifier: ((q: string) => Promise<'greeting' | 'query'>) | null = null;
+
+    /** Last-served index per phrase category, for non-repeating random picks. */
+    private lastPick: Record<string, number> = {};
+
+    /** Random pick that avoids repeating the previous one for this category. */
+    private pickNonRepeating(key: string, pool: string[]): string {
+        const list = pool.filter((s) => (s ?? '').trim());
+        if (!list.length) return '';
+        if (list.length === 1) return list[0];
+        let idx = Math.floor(Math.random() * list.length);
+        if (idx === this.lastPick[key]) idx = (idx + 1) % list.length;
+        this.lastPick[key] = idx;
+        return list[idx];
+    }
 
     /** generation token: bumping it makes any in-flight turn a no-op */
     private gen = 0;
@@ -165,36 +202,68 @@ export class ConversationService {
 
         let intent: Intent = classifyIntentLocal(text, {
             greetingKeywords: this.greetingKeywords,
+            farewellKeywords: this.farewellKeywords,
             queryVerbs: this.queryVerbs,
         });
         if (intent === 'ambiguous') {
             intent = this.intentClassifier ? await this.intentClassifier(text) : 'query';
         }
 
-        if (intent === 'greeting') { await this.speakGreeting(text, opts); return; }
+        // Greeting / farewell -> instant local reply (random non-repeating), NO RAG.
+        if (intent === 'greeting') {
+            await this.speakInstant(text, this.pickGreeting(opts), 'saludo', opts);
+            return;
+        }
+        if (intent === 'farewell') {
+            await this.speakInstant(text, this.pickFarewell(opts), 'despedida', opts);
+            return;
+        }
+        // Info query -> optional infoAck filler spoken first, then the real RAG answer.
         await this.runRagTurn(text, fetcher, opts);
     }
 
+    /** Force a chip-tapped suggested prompt straight to the RAG/info path. */
+    sendSuggestedPrompt(prompt: string, opts: ConvTtsOpts): void {
+        const fetcher = this.ragFetcher;
+        const trimmed = (prompt ?? '').trim();
+        if (!trimmed || !fetcher) return;
+        this.lastOpts = opts;
+        this.interruptInternals();
+        if (this.state() !== 'idle') this.setState(interruptTarget(this.state()));
+        void this.runRagTurn(trimmed, fetcher, opts);
+    }
+
+    private pickGreeting(opts: ConvTtsOpts): string {
+        // Defensive: resolved greetings (custom-or-global) -> else a small RANDOM
+        // code list. No single fixed phrase, so picks are always varied.
+        const pool = this.greetings.length ? this.greetings : CODE_GREETINGS[opts.lang === 'en' ? 'en' : 'es'];
+        return this.pickNonRepeating('greetings', pool);
+    }
+    private pickFarewell(opts: ConvTtsOpts): string {
+        const pool = this.farewells.length ? this.farewells : CODE_FAREWELLS[opts.lang === 'en' ? 'en' : 'es'];
+        return this.pickNonRepeating('farewells', pool);
+    }
+    /** Optional latency filler said right before a RAG call ('' if none configured). */
+    private pickInfoAck(): string {
+        return this.pickNonRepeating('infoAcks', this.infoAcks);
+    }
+
     /**
-     * Instant greeting turn: echoes the user message, then speaks the
-     * per-assistant `greetingResponse` through the same lead/body/tail + lipsync
-     * pipeline as a real answer — but WITHOUT any RAG/Function round-trip.
+     * Instant local turn (greeting or farewell): echoes the user message, then
+     * speaks `reply` through the same lead/body/tail + lipsync pipeline as a real
+     * answer — but WITHOUT any RAG/Function round-trip.
      */
-    private async speakGreeting(query: string, opts: ConvTtsOpts): Promise<void> {
+    private async speakInstant(query: string, reply: string, meta: string, opts: ConvTtsOpts): Promise<void> {
         this.stt.stop();
         const gen = ++this.gen;
 
         this.push({ role: 'user', content: query, at: Date.now() });
 
-        const reply = (this.greetingResponse && this.greetingResponse.trim())
-            ? this.greetingResponse.trim()
-            : (opts.lang === 'es' ? '¡Hola! ¿En qué puedo ayudarte?' : 'Hi! How can I help you?');
-
         const leadId = this.liveLeadGesture();
         const tailId = this.liveTailGesture();
         const msg = this.push({
             role: 'assistant', content: reply, at: Date.now(),
-            meta: 'saludo', replayable: true,
+            meta, replayable: true,
             leadGesture: leadId || undefined, tailGesture: tailId || undefined,
         });
 
@@ -238,7 +307,16 @@ export class ConversationService {
 
         const t0 = performance.now();
         try {
-            const payload = await fetcher(query);
+            // Start the RAG call immediately, then (optionally) speak a random
+            // info-acknowledgement as a latency filler that overlaps the fetch.
+            const fetchPromise = fetcher(query);
+            const ack = this.pickInfoAck();
+            if (ack) {
+                this.pushSystem(ack);
+                try { await this.tts.speak(ack, { ...opts, singlePass: true }); } catch { /* filler best-effort */ }
+                if (gen !== this.gen) return;
+            }
+            const payload = await fetchPromise;
             if (gen !== this.gen) return; // interrupted while waiting
             const tReplyReceived = performance.now();
             this.pushSystem(`Respuesta recibida (${((tReplyReceived - t0) / 1000).toFixed(1)} s)`);
@@ -252,6 +330,7 @@ export class ConversationService {
             const assistantMsg = this.push({
                 role: 'assistant', content: finalText, at: Date.now(),
                 meta: 'RAG', replayable: true, media: payload.media,
+                detail: (payload as any).detail || undefined, // full text for "Ver mas"
                 leadGesture: leadId || undefined, tailGesture: this.liveTailGesture() || undefined,
             });
             this.setState('speaking');

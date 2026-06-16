@@ -58,6 +58,16 @@ service cloud.firestore {
     }
     // PROD (restore): allow read: if true; allow write: if isAdmin();
 
+    // Conversational content subcollections (greetings / infoAcknowledgements /
+    // farewells / suggestedPrompts). Rules do NOT cascade, so this explicit nested
+    // match is required. Read by the (signed-in) Text-Avatar cache; DEV write any
+    // signed-in user. The parent contentModifiedAt marker is bumped on writes.
+    match /assistants/{assistantId}/{sub}/{docId} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
+    }
+    // PROD (restore): allow read: if isSignedIn(); allow write: if isAdmin();
+
     // --- Avatars (reusable visual catalog; public-read like Storage avatars) ---
     // DEV write: any signed-in user.
     match /avatars/{avatarId} {
@@ -75,6 +85,19 @@ service cloud.firestore {
       allow write: if isSignedIn();
     }
     // PROD (restore): allow read: if isSignedIn(); allow write: if isAdmin();
+
+    // --- LLM config profiles (global + assistant-private; NON-SECRET metadata) ---
+    // Key VALUES live in Secret Manager only. Profile docs hold provider/model/
+    // params + LlmKeyRef metadata (label/secretName/active). Private-profile
+    // OWNERSHIP is enforced server-side by chatRag (a private profile can't be used
+    // by another assistant); these rules are the dev-permissive access layer.
+    // DEV: signed-in read (for assignment dropdowns) + signed-in write.
+    match /llm_profiles/{id} {
+      allow read: if isSignedIn();
+      allow write: if isSignedIn();
+    }
+    // PROD (restore): allow read: if isSignedIn(); allow write: if isAdmin();
+    // (writes also go through admin-gated callables using the Admin SDK.)
 
     // --- RAG namespace registry ---
     // DEV:

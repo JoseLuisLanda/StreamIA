@@ -41,7 +41,7 @@ export interface RagAskOptions {
   voice?: string;
 }
 
-export type MediaType = 'image' | 'video';
+export type MediaType = 'image' | 'video' | 'document';
 
 /** Media metadata returned by the Function — NO signed/public URLs. */
 export interface MediaItem {
@@ -63,9 +63,13 @@ export interface RagSource {
 
 /** The single structured payload returned by the Function. */
 export interface RagResponse {
-  /** spoken/displayed answer, body only (no greeting/closing/CTA) */
+  /** spoken/displayed answer, body only (no greeting/closing/CTA). Equals `summary`. */
   body: string;
-  /** body with inline gesture tags the client parser consumes, e.g. "Texto [thinking]:[1] … [laugh]" */
+  /** concise ~120-word spoken summary (the avatar speaks this). */
+  summary?: string;
+  /** full long-form analysis shown only on "Ver mas" (NOT spoken). Empty -> hide. */
+  detail?: string;
+  /** body/summary with inline gesture tags the client parser consumes. */
   gestureCommands: string;
   /** media references (resolved lazily from Storage) */
   media?: MediaItem[];
@@ -115,10 +119,29 @@ export interface AssistantConfig {
   ragCollection: string;
   /** Explicit alias of the owned namespace (optional; falls back to ragCollection). */
   ragNamespace?: string;
+  /**
+   * Assigned LLM config profile id (llm_profiles/{id}) -- a GLOBAL profile or one
+   * of this assistant's OWN private profiles. Absent -> chatRag uses the
+   * system-default global profile. chatRag enforces private-profile ownership.
+   */
+  llmProfileId?: string;
+  /**
+   * Per-category resolution flags. true => read that assistant subcollection;
+   * false/absent => serve the global default responses (no subcollection read).
+   * Auto-set true on first explicit save of that category.
+   */
+  useCustomResponses?: {
+    greetings: boolean;
+    infoAcknowledgements: boolean;
+    farewells: boolean;
+    suggestedPrompts: boolean;
+  };
   /** Instant reply for greetings/small talk (no RAG call). Per-assistant override. */
   greetingResponse?: string;
   /** Extra greeting trigger words for the intent router (merged with global defaults). */
   greetingKeywords?: string[];
+  /** Extra farewell trigger words for the intent router (merged with global defaults). */
+  farewellKeywords?: string[];
   /** Extra query-verb triggers for the intent router (merged with global defaults). */
   queryVerbs?: string[];
   /**
@@ -145,6 +168,8 @@ export interface AssistantConfig {
   allowAvatarSwitch?: boolean;
   /** whether this assistant shows in the public /assistants selector */
   enabled?: boolean;
+  /** Document schema version (see lib/rag/assistant-schema.ts). */
+  schemaVersion?: number;
   /** epoch ms */
   createdAt?: number;
   updatedAt?: number;

@@ -3,6 +3,7 @@ import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
 import { AvatarManagerService } from '../../services/avatar-manager.service';
+import { AvatarService } from '../../services/avatar.service';
 import { AvatarTtsComponent, DEFAULT_AVATAR_URL } from '../../components/avatar-tts/avatar-tts.component';
 import { AvatarCatalogService } from '../../services/avatar-catalog.service';
 import { getCatalogEntry } from '../../lib/avatars/avatar-catalog';
@@ -10,6 +11,8 @@ import { RigReport, Conformance, conformanceLabel } from '../../lib/avatars/rig-
 import { MediaGalleryComponent } from '../../components/media-gallery/media-gallery.component';
 import { RagAvatarService } from '../../services/rag-avatar.service';
 import { AssistantConfigService } from '../../services/assistant-config.service';
+import { ConversationContentService } from '../../services/conversation-content.service';
+import { AssistantConvContent, SuggestedPrompt } from '../../lib/conversation-content/conv-content.models';
 import { AssistantConfig } from '../../lib/rag/rag.models';
 import { getRagEndpoint, setRagEndpoint, getAssistantId, setAssistantId } from '../../lib/rag/rag.config';
 import { TtsLipsyncService, TtsProvider, TtsLang, PIPER_VOICES } from '../../services/tts-lipsync.service';
@@ -69,9 +72,10 @@ const CHIP_LABELS: Record<string, string> = {
       <main class="main">
         <!-- center stage -->
         <section class="stage">
-          <div class="viewport">
+          <div class="viewport" [class.pip]="!!detailOpen()">
             <div class="glow"></div>
             <app-avatar-tts [avatarUrl]="avatarUrl" (rigReport)="onRigReport($event)"></app-avatar-tts>
+            <button class="pip-x" *ngIf="detailOpen()" (click)="closeDetail()" title="Expandir avatar">⤢</button>
 
             <div class="statuspill" [ngSwitch]="conv.state()">
               <ng-container *ngSwitchCase="'listening'">
@@ -246,6 +250,7 @@ const CHIP_LABELS: Record<string, string> = {
                   <span class="chip" *ngIf="seg.kind === 'chip' && showMarkup">{{ seg.value }}</span>
                 </ng-container>
                 <span class="cursor" *ngIf="isRevealing(m)">▍</span>
+                <button class="vermas" *ngIf="m.detail" (click)="openDetail(m)">Ver más detalles →</button>
                 <app-media-gallery *ngIf="m.media?.length" [media]="m.media!"></app-media-gallery>
                 <div class="botfoot">
                   <span class="meta" *ngIf="m.meta">{{ m.meta }}</span>
@@ -259,6 +264,23 @@ const CHIP_LABELS: Record<string, string> = {
             <div class="inline-err" *ngIf="stt.error()">{{ stt.error() }}</div>
           </div>
 
+          <!-- Suggested-prompt chips + content-sync row (RAG mode only) -->
+          <div class="conv-extras" *ngIf="ragMode">
+            <div class="chips" *ngIf="suggestedPrompts().length">
+              <button class="chip" *ngFor="let p of suggestedPrompts()" (click)="sendChip(p)"
+                      [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
+                      [title]="p.prompt">{{ p.label }}</button>
+            </div>
+            <div class="syncrow">
+              <span class="synced" *ngIf="lastSyncAt()">Contenido actualizado: {{ convLastSyncLabel() }}</span>
+              <span class="changes" *ngIf="syncState() === 'changes'">Hay cambios nuevos</span>
+              <button class="syncbtn" (click)="syncConvContent()" [disabled]="syncing()"
+                      [class.hot]="syncState() === 'changes'">
+                {{ syncing() ? 'Sincronizando…' : (syncState() === 'changes' ? 'Sincronizar' : 'Recargar contenido') }}
+              </button>
+            </div>
+          </div>
+
           <div class="chat-input">
             <textarea rows="1" [(ngModel)]="convText" maxlength="1000"
                       (keydown.enter)="onConvEnter($event)"
@@ -270,6 +292,23 @@ const CHIP_LABELS: Record<string, string> = {
           </div>
         </aside>
       </main>
+
+      <!-- ============================== FULL-SCREEN DETAIL ============================== -->
+      <div class="detail-overlay" *ngIf="detailOpen() as dm">
+        <header class="do-head">
+          <div>
+            <span class="do-kicker">Análisis detallado</span>
+            <h1>{{ detailTitle() }}</h1>
+          </div>
+          <button class="do-x" (click)="closeDetail()" title="Cerrar">✕</button>
+        </header>
+        <div class="do-scroll">
+          <!-- TEXT ONLY: media is handled separately via the chat carousel -->
+          <article class="do-text">
+            <p *ngFor="let p of detailParas()">{{ p }}</p>
+          </article>
+        </div>
+      </div>
 
       <!-- ============================== SETTINGS SLIDE-OVER ============================== -->
       <div class="backdrop" *ngIf="settingsOpen" (click)="settingsOpen = false"></div>
@@ -413,6 +452,31 @@ const CHIP_LABELS: Record<string, string> = {
     }
     .viewport app-avatar-tts { position: absolute; inset: 0; }
     .viewport ::ng-deep .canvas-container { background-color: transparent !important; }
+    /* Picture-in-picture: shrink to a bottom-right corner. The avatar-tts
+       ResizeObserver resizes the existing canvas -- no GLB reload. */
+    .viewport.pip {
+      position: fixed; right: 18px; bottom: 18px; left: auto; top: auto;
+      width: 220px; height: 165px; flex: none; z-index: 70;
+      border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.5);
+      transition: width .25s ease, height .25s ease;
+    }
+    .pip-x { position: absolute; top: 6px; right: 6px; z-index: 2; width: 26px; height: 26px;
+      border-radius: 8px; border: 1px solid rgba(255,255,255,.2); background: rgba(0,0,0,.45);
+      color: #fff; cursor: pointer; font-size: 13px; }
+    /* full-screen detail overlay */
+    .detail-overlay { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column;
+      background: radial-gradient(ellipse at 50% 0%, #15122a 0%, #0a0e14 70%); color: #e6e8ee;
+      font-family: 'Segoe UI', system-ui, sans-serif; }
+    .do-head { flex: none; display: flex; align-items: flex-start; justify-content: space-between;
+      gap: 16px; padding: 22px 28px; border-bottom: 1px solid rgba(255,255,255,.08); }
+    .do-kicker { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: #a78bfa; }
+    .do-head h1 { margin: 4px 0 0; font-size: 24px; font-weight: 700; max-width: 70ch; }
+    .do-x { width: 40px; height: 40px; border-radius: 999px; border: 1px solid rgba(255,255,255,.15);
+      background: rgba(255,255,255,.06); color: #cfd3dc; cursor: pointer; font-size: 16px; flex: none; }
+    .do-x:hover { background: rgba(255,255,255,.12); color: #fff; }
+    .do-scroll { flex: 1; overflow-y: auto; padding: 24px 28px 120px; max-width: 980px; width: 100%; margin: 0 auto; }
+    .do-text p { font-size: 15px; line-height: 1.7; color: #c7ccd6; margin: 0 0 16px; }
+    .do-text p:first-child { color: #e6e8ee; }
     .glow {
       position: absolute; left: 50%; top: 38%; width: 480px; height: 480px;
       transform: translate(-50%, -50%); pointer-events: none; z-index: 1;
@@ -568,6 +632,23 @@ const CHIP_LABELS: Record<string, string> = {
     }
     .bubble.bot:hover .replay { opacity: 1; }
     .replay:hover { background: rgba(139,92,246,.35); }
+    .vermas { display: inline-block; margin-top: 8px; padding: 7px 13px; border-radius: 9px; cursor: pointer;
+      background: var(--accent, #8b5cf6); border: 1px solid var(--accent, #8b5cf6); color: #fff; font-size: 12.5px; font-weight: 600; }
+    .vermas:hover { background: #7c4ff0; }
+    .conv-extras { flex: none; padding: 8px 12px 0; display: flex; flex-direction: column; gap: 6px; }
+    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+    .chip { background: rgba(139,92,246,.16); border: 1px solid rgba(139,92,246,.4); color: #cbb8f8;
+      border-radius: 999px; padding: 5px 11px; font-size: 12px; cursor: pointer; white-space: nowrap; }
+    .chip:hover:not(:disabled) { background: rgba(139,92,246,.3); }
+    .chip:disabled { opacity: .45; cursor: default; }
+    .syncrow { display: flex; align-items: center; gap: 10px; font-size: 11px; color: #6b7384; flex-wrap: wrap; }
+    .synced { color: #8b93a3; }
+    .changes { color: #f0c674; font-weight: 600; }
+    .syncbtn { background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12); color: #c7ccd6;
+      border-radius: 8px; padding: 4px 10px; font-size: 11px; cursor: pointer; }
+    .syncbtn:hover:not(:disabled) { background: rgba(255,255,255,.1); }
+    .syncbtn:disabled { opacity: .5; cursor: default; }
+    .syncbtn.hot { background: rgba(240,198,116,.18); border-color: rgba(240,198,116,.5); color: #f0c674; }
     .chat-input {
       flex: none; display: flex; gap: 8px; align-items: flex-end;
       padding: 10px 12px; border-top: 1px solid rgba(255,255,255,.06);
@@ -655,6 +736,44 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
     private player = inject(GesturePlayerService);
     private route = inject(ActivatedRoute);
     private avatarMgr = inject(AvatarManagerService);
+    private avatars = inject(AvatarService);
+    private convContent = inject(ConversationContentService);
+
+    // Per-assistant conversational content (chips + sync indicator)
+    suggestedPrompts = signal<SuggestedPrompt[]>([]);
+    lastSyncAt = signal<number>(0);
+    syncState = signal<'in-sync' | 'changes'>('in-sync');
+    syncing = signal<boolean>(false);
+
+    // Full-screen detail view ("Ver más detalles") + PiP avatar.
+    detailOpen = signal<ConvMessage | null>(null);
+
+    openDetail(m: ConvMessage): void {
+        // Setting this shrinks .viewport to PiP via CSS; avatar-tts' ResizeObserver
+        // resizes the existing canvas (camera aspect + renderer) -- no GLB reload.
+        this.detailOpen.set(m);
+    }
+    closeDetail(): void { this.detailOpen.set(null); }
+
+    /** Title of the detail view = the user question that produced this answer. */
+    detailTitle(): string {
+        const m = this.detailOpen();
+        if (!m) return '';
+        const msgs = this.conv.messages();
+        const idx = msgs.findIndex((x) => x.id === m.id);
+        for (let i = idx - 1; i >= 0; i--) {
+            if (msgs[i].role === 'user') return msgs[i].content;
+        }
+        return 'Detalle';
+    }
+
+    /** Detail text split into paragraphs (falls back to the summary content). */
+    detailParas(): string[] {
+        const m = this.detailOpen();
+        if (!m) return [];
+        const src = (m.detail && m.detail.trim()) ? m.detail : m.content;
+        return src.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
+    }
 
     // avatar catalog picker state
     thumbUrls = signal<Record<string, string | null>>({});
@@ -859,15 +978,78 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
             const a = this.assistant();
             this.conv.greetingResponse = a?.greetingResponse ?? null;
             this.conv.greetingKeywords = a?.greetingKeywords ?? undefined;
+            this.conv.farewellKeywords = (a as any)?.farewellKeywords ?? undefined;
             this.conv.queryVerbs = a?.queryVerbs ?? undefined;
             this.conv.intentClassifier = (q: string) => this.llm.classifyIntent(q);
+            // Load per-assistant conversational content (cache -> change-detect).
+            await this.loadConvContent();
         } else {
             this.conv.ragFetcher = null;
             this.conv.greetingResponse = null;
+            this.conv.greetings = [];
+            this.conv.farewells = [];
+            this.conv.infoAcks = [];
             this.conv.greetingKeywords = undefined;
+            this.conv.farewellKeywords = undefined;
             this.conv.queryVerbs = undefined;
             this.conv.intentClassifier = null;
+            this.suggestedPrompts.set([]);
         }
+    }
+
+    /**
+     * Load this assistant's conversational content via the read-through cache and
+     * feed the greeting/farewell/info-ack arrays to the conversation service.
+     * Also runs a cheap change check to surface the "changes to sync" indicator.
+     */
+    private async loadConvContent(): Promise<void> {
+        const id = this.assistantId;
+        if (!id) return;
+        try {
+            const env = await this.convContent.getContent(id);
+            this.applyConvContent(env.content);
+            this.lastSyncAt.set(env.lastSyncAt);
+            // Cheap single-doc check: are there unsynced server changes?
+            const state = await this.convContent.checkForUpdates(id);
+            this.syncState.set(state === 'changes' ? 'changes' : 'in-sync');
+        } catch (e: any) {
+            console.warn('[text-avatar] conv content load failed:', e?.message ?? e);
+        }
+    }
+
+    private applyConvContent(c: AssistantConvContent): void {
+        this.conv.greetings = c.greetings.map((g) => g.text);
+        this.conv.farewells = c.farewells.map((f) => f.text);
+        this.conv.infoAcks = c.infoAcknowledgements.map((i) => i.text);
+        this.suggestedPrompts.set(c.suggestedPrompts);
+    }
+
+    /** Manual sync: force a full re-fetch, overwrite cache, clear the indicator. */
+    async syncConvContent(): Promise<void> {
+        const id = this.assistantId;
+        if (!id || this.syncing()) return;
+        this.syncing.set(true);
+        try {
+            const env = await this.convContent.sync(id);
+            this.applyConvContent(env.content);
+            this.lastSyncAt.set(env.lastSyncAt);
+            this.syncState.set('in-sync');
+        } catch (e: any) {
+            console.warn('[text-avatar] sync failed:', e?.message ?? e);
+        } finally {
+            this.syncing.set(false);
+        }
+    }
+
+    /** Chip tap -> send the prompt straight to the info-query / RAG path. */
+    sendChip(p: SuggestedPrompt): void {
+        if (!p?.prompt) return;
+        this.conv.sendSuggestedPrompt(p.prompt, this.opts());
+    }
+
+    convLastSyncLabel(): string {
+        const ms = this.lastSyncAt();
+        return ms ? new Date(ms).toLocaleString() : '';
     }
 
     onRagEndpointChange(v: string): void { this.ragEndpoint = v; setRagEndpoint(v); }
@@ -989,12 +1171,12 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
         let voice: string | undefined;
         let attempted = '';
 
-        // 1) Avatars Firestore collection (authoritative glbPath).
+        // 1) Central AvatarService (avatars collection + global cache: mem -> IndexedDB -> Storage).
         try {
-            const av = await this.avatarMgr.getAvatar(id);
+            const av = await this.avatars.getAvatar(id);
             if (av?.glbPath) {
                 attempted = av.glbPath;
-                url = await this.avatarMgr.resolveUrl(av.glbPath);
+                url = await this.avatars.resolveModelUrl(id); // cached blob URL (no re-download)
                 voice = av.defaultVoice;
             }
         } catch { /* fall through to catalog */ }
@@ -1022,7 +1204,9 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
         this.currentLoadedAvatarId = id;
         this.avatarUrl = url;            // [avatarUrl] change -> avatar-tts hot-reloads
         this.avatarUrlInput = url;
-        localStorage.setItem('textAvatar.avatarUrl', url);
+        // Don't persist blob: URLs (they don't survive a reload); persist only
+        // real URLs. Cold loads re-resolve via the assistant's avatarId anyway.
+        if (!url.startsWith('blob:')) localStorage.setItem('textAvatar.avatarUrl', url);
         if (voice) this.applyDefaultVoice(voice);
     }
 

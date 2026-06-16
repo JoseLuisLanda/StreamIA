@@ -5,13 +5,28 @@ import { RouterLink } from '@angular/router';
 import { RagAdminService } from '../../services/rag-admin.service';
 import { AdminService } from '../../services/admin.service';
 import { AssistantConfigService } from '../../services/assistant-config.service';
+import { ImageOptimizationService } from '../../services/image-optimization.service';
 import { RagChunkListComponent } from './components/rag-chunk-list.component';
 import { RagMediaManagerComponent } from './components/rag-media-manager.component';
-import { RagDocument, RagNamespace } from '../../lib/rag/rag-admin.models';
+import { MediaType, RagDocument, RagMediaRecord, RagNamespace } from '../../lib/rag/rag-admin.models';
 import { AssistantConfig } from '../../lib/rag/rag.models';
 import { environment } from '../../../environments/environment';
 
 type Tab = 'documents' | 'chunks' | 'media';
+
+/** One editable + independently-uploadable media row in the per-document editor. */
+interface MediaRow {
+  id: string;
+  type: MediaType;
+  title: string;
+  description: string;
+  file: File | null;
+  keepOriginal: boolean;
+  status: 'idle' | 'optimizing' | 'thumbnailing' | 'uploading' | 'done' | 'error';
+  pct: number;
+  sizeInfo?: string;
+  error?: string;
+}
 
 /**
  * Admin-only RAG management panel (visual rebuild to match the new design).
@@ -187,7 +202,8 @@ type Tab = 'documents' | 'chunks' | 'media';
                       <tr><th>File name</th><th>Size</th><th>Created</th><th>Status</th><th>Chunks</th><th class="ar">Actions</th></tr>
                     </thead>
                     <tbody>
-                      <tr *ngFor="let d of filteredDocs()">
+                      <ng-container *ngFor="let d of filteredDocs()">
+                      <tr>
                         <td class="fn">
                           <svg class="fic" viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M14 3H7a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2V8z"/><path d="M14 3v5h5"/></svg>
                           <span [title]="d.storagePath">{{ d.filename }}</span>
@@ -206,11 +222,54 @@ type Tab = 'documents' | 'chunks' | 'media';
                           <button class="iconbtn" title="View chunks" (click)="inspect(d)">
                             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 6h16M4 12h16M4 18h10"/></svg>
                           </button>
+                          <button class="btn sm" [class.on]="openMediaDocId() === d.id" title="Attach media" (click)="toggleMedia(d)">Media ({{ (docMedia()[d.id] || []).length }})</button>
                           <button class="iconbtn danger" title="Delete" (click)="remove(d)" [disabled]="d.status === 'processing'">
                             <svg viewBox="0 0 24 24" width="15" height="15" fill="none" stroke="currentColor" stroke-width="1.7"><path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2M6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/></svg>
                           </button>
                         </td>
                       </tr>
+
+                      <!-- ===== per-document attached media ===== -->
+                      <tr class="mediarow" *ngIf="openMediaDocId() === d.id">
+                        <td colspan="6">
+                          <div class="mediapanel">
+                            <div class="mp-head">Media adjunta a <b>{{ d.filename }}</b>
+                              <span class="hint">se mostrara solo cuando este documento sea relevante y el LLM lo elija</span>
+                            </div>
+                            <div class="mp-list" *ngIf="(docMedia()[d.id] || []).length">
+                              <div class="mp-item" *ngFor="let m of docMedia()[d.id]">
+                                <span class="mp-type">{{ m.type }}</span>
+                                <span class="mp-title">{{ m.title }}</span>
+                                <span class="mp-desc" [title]="m.description || m.caption">{{ m.description || m.caption || '(sin descripcion)' }}</span>
+                                <label class="mp-en"><input type="checkbox" [checked]="m.enabled !== false" (change)="toggleMediaEnabled(d, m, $event)" /> activo</label>
+                                <button class="iconbtn danger" title="Eliminar" (click)="deleteDocMedia(d, m)">✕</button>
+                              </div>
+                            </div>
+                            <!-- one editable row per file to attach -->
+                            <div class="mp-editor">
+                              <div class="mp-erow" *ngFor="let r of mediaRows(); trackBy: trackRow">
+                                <select [(ngModel)]="r.type"><option value="image">Imagen</option><option value="video">Video</option><option value="document">Documento</option></select>
+                                <input type="text" [(ngModel)]="r.title" placeholder="Titulo" />
+                                <input type="text" [(ngModel)]="r.description" placeholder="Descripcion (la usa el LLM)" />
+                                <input type="file" (change)="onRowFile(r, $event)" />
+                                <label class="mp-en" *ngIf="r.type === 'image'" title="Subir sin comprimir"><input type="checkbox" [(ngModel)]="r.keepOriginal" /> Original</label>
+                                <span class="mp-st" [class.ok]="r.status==='done'" [class.bad]="r.status==='error'">{{ rowStatus(r) }}</span>
+                                <div class="mp-bar mini" *ngIf="r.status==='uploading'"><i [style.width.%]="r.pct"></i></div>
+                                <button class="btn xs primary" (click)="uploadRow(d, r)" [disabled]="!r.file || rowBusy(r) || r.status==='done'">{{ r.status==='error' ? 'Reintentar' : 'Adjuntar' }}</button>
+                                <button class="ix danger" title="Quitar fila" (click)="removeRow(r.id)">✕</button>
+                              </div>
+                              <div class="mp-erow empty" *ngIf="!mediaRows().length"><span class="hint">Agrega una fila o selecciona archivos.</span></div>
+                            </div>
+                            <div class="mp-rowbtns">
+                              <button class="btn ghost xs" (click)="addRow()">+ Agregar fila</button>
+                              <label class="btn ghost xs filepick">Seleccionar varios<input type="file" multiple hidden (change)="onMultiPick($event)" /></label>
+                              <button class="btn sm primary" (click)="uploadAll(d)" [disabled]="!hasPendingRows() || anyRowBusy()">Cargar todos</button>
+                            </div>
+                            <p class="err" *ngIf="mediaErr()">{{ mediaErr() }}</p>
+                          </div>
+                        </td>
+                      </tr>
+                      </ng-container>
                     </tbody>
                   </table>
 
@@ -416,6 +475,34 @@ type Tab = 'documents' | 'chunks' | 'media';
     .btn.ghost { background: rgba(255,255,255,.06); border-color: var(--line); color: #cdd2db; }
     .btn.block { width: 100%; text-align: center; }
     .btn.sm { padding: 5px 11px; font-size: 11.5px; }
+    .btn.on { background: rgba(139,92,246,.35); color: #fff; }
+    /* per-document media panel */
+    .mediarow > td { background: rgba(255,255,255,.02); padding: 0 16px 14px; }
+    .mediapanel { display: flex; flex-direction: column; gap: 10px; padding-top: 6px; }
+    .mp-head { font-size: 12.5px; color: #c7ccd6; display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; }
+    .mp-head .hint { font-size: 11px; color: #6b7384; }
+    .mp-list { display: flex; flex-direction: column; gap: 6px; }
+    .mp-item { display: flex; align-items: center; gap: 10px; background: var(--card); border: 1px solid var(--line); border-radius: 9px; padding: 7px 10px; font-size: 12px; }
+    .mp-type { font-size: 10.5px; text-transform: uppercase; color: #a78bfa; background: rgba(139,92,246,.16); padding: 2px 7px; border-radius: 999px; }
+    .mp-title { font-weight: 600; }
+    .mp-desc { flex: 1; color: #8b93a3; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .mp-en { display: flex; align-items: center; gap: 4px; color: #8b93a3; font-size: 11px; }
+    .mp-add { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+    .mp-add select, .mp-add input[type=text] { background: rgba(255,255,255,.05); color: #e6e8ee; border: 1px solid var(--line); border-radius: 8px; padding: 7px 9px; font-size: 12px; }
+    .mp-add input[type=text] { flex: 1; min-width: 160px; }
+    .mp-editor { display: flex; flex-direction: column; gap: 6px; }
+    .mp-erow { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; background: rgba(255,255,255,.02);
+      border: 1px solid rgba(255,255,255,.07); border-radius: 8px; padding: 6px 8px; }
+    .mp-erow.empty { justify-content: center; padding: 10px; }
+    .mp-erow select, .mp-erow input[type=text] { background: rgba(255,255,255,.05); color: #e6e8ee; border: 1px solid var(--line); border-radius: 7px; padding: 6px 8px; font-size: 12px; }
+    .mp-erow input[type=text] { flex: 1; min-width: 120px; }
+    .mp-st { font-size: 11px; color: #8b93a3; min-width: 110px; }
+    .mp-st.ok { color: #6ee7b7; } .mp-st.bad { color: #fca5a5; }
+    .mp-bar { height: 6px; background: rgba(255,255,255,.08); border-radius: 4px; overflow: hidden; }
+    .mp-bar.mini { width: 90px; }
+    .mp-bar i { display: block; height: 100%; background: var(--accent); transition: width .15s; }
+    .mp-rowbtns { display: flex; gap: 8px; align-items: center; margin-top: 8px; flex-wrap: wrap; }
+    .filepick { cursor: pointer; }
     .iconbtn { display: grid; place-items: center; width: 30px; height: 28px; border-radius: 8px; cursor: pointer;
       background: rgba(255,255,255,.05); border: 1px solid var(--line); color: #aeb4c0; }
     .iconbtn:hover:not(:disabled) { background: rgba(255,255,255,.1); color: #fff; }
@@ -437,6 +524,7 @@ export class RagAdminComponent implements OnInit {
   admin = inject(AdminService);
   private svc = inject(RagAdminService);
   private assistantSvc = inject(AssistantConfigService);
+  private imgOpt = inject(ImageOptimizationService);
 
   /** Assistants drive the sidebar; each owns a 1:1 RAG namespace (ragCollection). */
   readonly assistants = signal<AssistantConfig[]>([]);
@@ -470,6 +558,68 @@ export class RagAdminComponent implements OnInit {
 
   newNs = '';
   pendingFile: File | null = null;
+
+  // ---- per-document attached media ----
+  readonly openMediaDocId = signal<string>('');
+  readonly docMedia = signal<Record<string, RagMediaRecord[]>>({});
+  readonly mediaErr = signal('');
+  /** One editable/uploadable row per file to attach to the open document. */
+  readonly mediaRows = signal<MediaRow[]>([]);
+
+  trackRow = (_: number, r: MediaRow) => r.id;
+
+  private blobToFile(blob: Blob, name: string): File {
+    return new File([blob], name, { type: blob.type || 'application/octet-stream' });
+  }
+
+  private newRow(file: File | null = null): MediaRow {
+    const base = file ? file.name.replace(/\.[^.]+$/, '') : '';
+    const t = file?.type ?? '';
+    const type: MediaType = t.startsWith('video/') ? 'video' : t.startsWith('image/') ? 'image' : t ? 'document' : 'image';
+    return { id: Math.random().toString(36).slice(2), type, title: base, description: '', file, keepOriginal: false, status: 'idle', pct: 0 };
+  }
+
+  addRow(): void { this.mediaRows.update((rows) => [...rows, this.newRow()]); }
+  removeRow(id: string): void { this.mediaRows.update((rows) => rows.filter((r) => r.id !== id)); }
+
+  /** Patch one row immutably (keeps trackBy identity -> preserves input focus). */
+  private patchRow(id: string, patch: Partial<MediaRow>): void {
+    this.mediaRows.update((rows) => rows.map((r) => (r.id === id ? { ...r, ...patch } : r)));
+  }
+
+  /** Single-file picker on a row: set the file + auto type, prefill title if empty. */
+  onRowFile(r: MediaRow, e: Event): void {
+    const f = (e.target as HTMLInputElement).files?.[0] ?? null;
+    if (!f) return;
+    const t = f.type;
+    const type: MediaType = t.startsWith('video/') ? 'video' : t.startsWith('image/') ? 'image' : 'document';
+    this.patchRow(r.id, { file: f, type, title: r.title?.trim() ? r.title : f.name.replace(/\.[^.]+$/, ''), status: 'idle', error: undefined, pct: 0, sizeInfo: undefined });
+  }
+
+  /** Multi-select picker: one new row per chosen file (each independently editable). */
+  onMultiPick(e: Event): void {
+    const files = Array.from((e.target as HTMLInputElement).files ?? []);
+    if (!files.length) return;
+    this.mediaRows.update((rows) => [...rows, ...files.map((f) => this.newRow(f))]);
+    (e.target as HTMLInputElement).value = '';
+  }
+
+  rowBusy(r: MediaRow): boolean {
+    return r.status === 'optimizing' || r.status === 'thumbnailing' || r.status === 'uploading';
+  }
+  anyRowBusy(): boolean { return this.mediaRows().some((r) => this.rowBusy(r)); }
+  hasPendingRows(): boolean { return this.mediaRows().some((r) => r.file && r.status !== 'done'); }
+
+  rowStatus(r: MediaRow): string {
+    switch (r.status) {
+      case 'optimizing': return 'Optimizando imagen...';
+      case 'thumbnailing': return 'Generando miniatura...';
+      case 'uploading': return `Subiendo ${r.pct}%`;
+      case 'done': return r.sizeInfo ? `Adjuntado (${r.sizeInfo})` : 'Adjuntado';
+      case 'error': return 'Error: ' + (r.error ?? '');
+      default: return r.file ? 'Listo' : '';
+    }
+  }
 
   /**
    * Access allowed when role enforcement is off (dev) or the user is admin.
@@ -587,6 +737,94 @@ export class RagAdminComponent implements OnInit {
       this.error.set(e?.message ?? String(e));
     } finally {
       this.uploading.set(false);
+    }
+  }
+
+  // -------------------------------------------------- per-document media
+
+  async toggleMedia(d: RagDocument): Promise<void> {
+    if (this.openMediaDocId() === d.id) { this.openMediaDocId.set(''); return; }
+    this.openMediaDocId.set(d.id);
+    this.mediaErr.set('');
+    this.mediaRows.set([this.newRow()]); // start with one empty row
+    await this.loadDocMedia(d);
+  }
+
+  private async loadDocMedia(d: RagDocument): Promise<void> {
+    try {
+      const list = await this.svc.listMediaByDoc(this.selectedNs(), d.id);
+      this.docMedia.update((m) => ({ ...m, [d.id]: list }));
+    } catch (e: any) {
+      this.mediaErr.set(e?.message ?? String(e));
+    }
+  }
+
+  /** Upload + save a SINGLE row independently (optimize -> thumbnail -> upload -> save). */
+  async uploadRow(d: RagDocument, row: MediaRow): Promise<void> {
+    const ns = this.selectedNs();
+    if (!ns || !row.file) { this.patchRow(row.id, { status: 'error', error: 'Selecciona un archivo.' }); return; }
+    const f = row.file;
+    const base = f.name.replace(/\.[^.]+$/, '');
+    this.patchRow(row.id, { status: 'uploading', pct: 0, error: undefined });
+
+    let fullFile: File = f;
+    let thumbFile: File | undefined;
+    let sizeInfo: string | undefined;
+
+    // Images: optimize (stage 1) + thumbnail (stage 2). Graceful fallback to original.
+    if (row.type === 'image' && !row.keepOriginal && this.imgOpt.isOptimizableImage(f)) {
+      try {
+        this.patchRow(row.id, { status: 'optimizing' });
+        const full = await this.imgOpt.optimizeImage(f);
+        fullFile = this.blobToFile(full.blob, `${base}.webp`);
+        this.patchRow(row.id, { status: 'thumbnailing' });
+        const thumb = await this.imgOpt.generateThumbnail(f);
+        thumbFile = this.blobToFile(thumb.blob, `${base}-thumb.webp`);
+        sizeInfo = `${this.fmtSize(f.size)} -> ${this.fmtSize(full.bytes)}`;
+      } catch (e: any) {
+        console.warn('[rag-admin] optimization failed, uploading original:', e?.message ?? e);
+        fullFile = f; thumbFile = undefined; sizeInfo = undefined;
+      }
+    }
+
+    this.patchRow(row.id, { status: 'uploading', pct: 0, sizeInfo });
+    const order = (this.docMedia()[d.id] || []).length;
+    const meta = { type: row.type, title: row.title.trim() || base, description: row.description.trim() || undefined, linkedDocId: d.id, order };
+    try {
+      await this.svc.uploadMedia(ns, fullFile, meta, thumbFile, (p) => this.patchRow(row.id, { pct: p.percent }));
+      this.patchRow(row.id, { status: 'done' });
+      await this.loadDocMedia(d); // refreshes the Media (N) count + list
+    } catch (e: any) {
+      this.patchRow(row.id, { status: 'error', error: e?.message ?? String(e) });
+    }
+  }
+
+  /** Process every pending row sequentially (failures isolated per row). */
+  async uploadAll(d: RagDocument): Promise<void> {
+    for (const r of this.mediaRows()) {
+      if (r.file && r.status !== 'done' && !this.rowBusy(r)) {
+        await this.uploadRow(d, r);
+      }
+    }
+  }
+
+  async deleteDocMedia(d: RagDocument, m: RagMediaRecord): Promise<void> {
+    if (!confirm(`Eliminar "${m.title}"?`)) return;
+    try {
+      await this.svc.deleteMedia(m);
+      await this.loadDocMedia(d);
+    } catch (e: any) {
+      this.mediaErr.set(e?.message ?? String(e));
+    }
+  }
+
+  async toggleMediaEnabled(d: RagDocument, m: RagMediaRecord, e: Event): Promise<void> {
+    const enabled = (e.target as HTMLInputElement).checked;
+    try {
+      await this.svc.updateMedia(this.selectedNs(), m.id, { enabled });
+      await this.loadDocMedia(d);
+    } catch (err: any) {
+      this.mediaErr.set(err?.message ?? String(err));
     }
   }
 

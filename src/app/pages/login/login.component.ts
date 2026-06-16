@@ -197,7 +197,8 @@ export class LoginComponent implements OnInit {
   }
 
   private async navigateAfterLogin() {
-    const redirect = this.route.snapshot.queryParamMap.get('redirect') || '/live';
+    // Honor an explicit ?redirect= (e.g. a guarded deep link); otherwise always /home.
+    const redirect = this.route.snapshot.queryParamMap.get('redirect') || '/home';
     await this.router.navigateByUrl(redirect);
   }
 

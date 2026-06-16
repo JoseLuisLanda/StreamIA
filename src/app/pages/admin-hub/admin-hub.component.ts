@@ -47,6 +47,12 @@ export const ADMIN_MODULES: AdminModule[] = [
     description: 'Otorga o revoca el rol admin de los usuarios.',
     icon: 'M16 11a4 4 0 1 0 0-0.01 M8 14c-3 0-5 1.6-5 4 M14 19l2 2 4-4',
   },
+  {
+    title: 'LLM Responses',
+    route: '/llm-responses',
+    description: 'Respuestas globales + por asistente (saludos, despedidas, sugerencias) con IA.',
+    icon: 'M4 5h16v10H7l-3 3z M8 9h8 M8 12h5',
+  },
 ];
 
 /**

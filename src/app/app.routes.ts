@@ -60,5 +60,10 @@ export const routes: Routes = [
         canActivate: [adminGuard],
         loadComponent: () => import('./pages/role-admin/role-admin.component').then(m => m.RoleAdminComponent)
     },
+    {
+        path: 'llm-responses',
+        canActivate: [adminGuard],
+        loadComponent: () => import('./pages/llm-responses/llm-responses.component').then(m => m.LlmResponsesComponent)
+    },
     { path: '**', redirectTo: '' }
 ];

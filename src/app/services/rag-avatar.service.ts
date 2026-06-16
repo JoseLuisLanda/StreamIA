@@ -207,12 +207,16 @@ export class RagAvatarService {
   private normalize(data: unknown): RagAvatarResponse {
     const obj = (data ?? {}) as Record<string, any>;
 
-    // Structured shape: has body or gestureCommands.
-    if (typeof obj['body'] === 'string' || typeof obj['gestureCommands'] === 'string') {
-      const body = (obj['body'] ?? obj['gestureCommands'] ?? '').toString();
-      const gestureCommands = (obj['gestureCommands'] ?? obj['body'] ?? '').toString();
+    // Structured shape: has summary/body or gestureCommands.
+    if (typeof obj['summary'] === 'string' || typeof obj['body'] === 'string' || typeof obj['gestureCommands'] === 'string') {
+      const summary = (obj['summary'] ?? obj['body'] ?? obj['gestureCommands'] ?? '').toString();
+      const body = summary;
+      const gestureCommands = (obj['gestureCommands'] ?? summary).toString();
+      const detail = (obj['detail'] ?? '').toString();
       return {
         body,
+        summary,
+        detail,
         gestureCommands,
         media: Array.isArray(obj['media']) ? (obj['media'] as MediaItem[]) : [],
         sources: Array.isArray(obj['sources']) ? (obj['sources'] as RagSource[]) : [],

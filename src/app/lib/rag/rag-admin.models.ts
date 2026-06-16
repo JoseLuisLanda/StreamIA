@@ -68,7 +68,7 @@ export interface RagChunk {
   hasVector?: boolean;
 }
 
-export type MediaType = 'image' | 'video';
+export type MediaType = 'image' | 'video' | 'document';
 
 /**
  * Media metadata record (rag/{ns}/media/{mediaId}).
@@ -83,13 +83,25 @@ export interface RagMediaRecord {
   type: MediaType;
   title: string;
   caption?: string;
+  /**
+   * Description used by the LLM to decide relevance (and as a fallback caption).
+   * This is the field that lets chatRag choose which media to surface.
+   */
+  description?: string;
   /** Storage object path to the full asset */
   storagePath: string;
   /** Storage object path to a small thumbnail (optional) */
   thumbnailPath?: string;
   namespace: string;
-  /** optional association to a source document */
+  /**
+   * Association to the source DOCUMENT (the PDF) this media belongs to. This is
+   * the doc-scoping link: chatRag gathers media whose linkedDocId is among the
+   * retrieved chunks' docIds. (Model: flat rag/{ns}/media/{id} with linkedDocId.)
+   */
   linkedDocId?: string;
+  /** display + LLM ordering within a document */
+  order?: number;
+  enabled?: boolean;
   createdAt?: number;
 }
 

@@ -25,9 +25,10 @@ type LoadState = 'idle' | 'loading' | 'ready' | 'unauthorized' | 'error';
           <span class="mg-thumb">
             <img *ngIf="thumbs()[m.id]?.url as u" [src]="u" [alt]="m.title" />
             <span *ngIf="!thumbs()[m.id]?.url" class="mg-thumb-ph" [class.err]="thumbs()[m.id]?.state === 'unauthorized' || thumbs()[m.id]?.state === 'error'">
-              {{ m.type === 'video' ? '🎬' : (thumbs()[m.id]?.state === 'loading' ? '…' : '🖼️') }}
+              {{ m.type === 'video' ? '🎬' : (m.type === 'document' ? '📄' : (thumbs()[m.id]?.state === 'loading' ? '…' : '🖼️')) }}
             </span>
             <span class="mg-type" *ngIf="m.type === 'video'">▶</span>
+            <span class="mg-type" *ngIf="m.type === 'document'">DOC</span>
           </span>
           <span class="mg-label">{{ m.title || m.id }}</span>
         </button>
@@ -48,8 +49,13 @@ type LoadState = 'idle' | 'loading' | 'ready' | 'unauthorized' | 'error';
             <div class="mg-status err" *ngIf="fullState() === 'error'">⚠️ {{ fullError() }}</div>
 
             <ng-container *ngIf="fullState() === 'ready' && current() as m">
-              <img *ngIf="m.type === 'image'" [src]="fullUrl()!" [alt]="m.title" class="mg-full" />
+              <img *ngIf="m.type === 'image'" [src]="fullUrl()!" [alt]="m.title" class="mg-full" [class.zoomed]="zoomed()" (click)="zoomed.set(!zoomed())" title="Click para zoom" />
               <video *ngIf="m.type === 'video'" [src]="fullUrl()!" class="mg-full" controls autoplay></video>
+              <div *ngIf="m.type === 'document'" class="mg-doc">
+                <div class="mg-doc-ic">📄</div>
+                <div class="mg-doc-name">{{ m.title }}</div>
+                <a class="mg-doc-btn" [href]="fullUrl()!" [download]="m.title" target="_blank" rel="noopener">Abrir / Descargar</a>
+              </div>
             </ng-container>
           </div>
 
@@ -59,7 +65,13 @@ type LoadState = 'idle' | 'loading' | 'ready' | 'unauthorized' | 'error';
         <div class="mg-meta" *ngIf="current() as m">
           <div class="mg-title">{{ m.title }}</div>
           <div class="mg-caption" *ngIf="m.caption">{{ m.caption }}</div>
-          <div class="mg-counter" *ngIf="media.length > 1">{{ (openIndex() ?? 0) + 1 }} / {{ media.length }}</div>
+          <div class="mg-metafoot">
+            <span class="mg-counter" *ngIf="media.length > 1">{{ (openIndex() ?? 0) + 1 }} / {{ media.length }}</span>
+            <span class="mg-ctrls" *ngIf="fullUrl()">
+              <button class="mg-cbtn" *ngIf="m.type === 'image'" (click)="zoomed.set(!zoomed())">{{ zoomed() ? 'Reducir' : 'Zoom' }}</button>
+              <a class="mg-cbtn" [href]="fullUrl()!" [download]="m.title || 'media'" target="_blank" rel="noopener">Descargar</a>
+            </span>
+          </div>
         </div>
       </div>
     </div>
@@ -67,7 +79,10 @@ type LoadState = 'idle' | 'loading' | 'ready' | 'unauthorized' | 'error';
   styles: [`
     :host { display: block; }
     .mg { margin-top: 8px; }
-    .mg-strip { display: flex; gap: 8px; flex-wrap: wrap; }
+    /* Compact horizontal CAROUSEL preview (not stacked/wrapped). */
+    .mg-strip { display: flex; gap: 8px; flex-wrap: nowrap; overflow-x: auto; scroll-snap-type: x mandatory;
+      padding-bottom: 4px; scrollbar-width: thin; }
+    .mg-strip > * { scroll-snap-align: start; flex: 0 0 auto; }
     .mg-chip {
       display: flex; flex-direction: column; align-items: center; gap: 4px; width: 84px;
       background: rgba(255,255,255,.04); border: 1px solid rgba(255,255,255,.1);
@@ -93,7 +108,18 @@ type LoadState = 'idle' | 'loading' | 'ready' | 'unauthorized' | 'error';
     .mg-x:hover { background: rgba(0,0,0,.7); }
     .mg-stage { display: flex; align-items: center; gap: 6px; min-height: 240px; padding: 12px; }
     .mg-media { flex: 1; display: grid; place-items: center; min-height: 240px; max-height: 76vh; }
-    .mg-full { max-width: 100%; max-height: 76vh; border-radius: 10px; display: block; }
+    .mg-full { max-width: 100%; max-height: 76vh; border-radius: 10px; display: block; cursor: zoom-in; transition: transform .2s ease; }
+    .mg-full.zoomed { transform: scale(1.8); cursor: zoom-out; }
+    .mg-metafoot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 6px; flex-wrap: wrap; }
+    .mg-ctrls { display: flex; gap: 8px; }
+    .mg-cbtn { font-size: 12px; padding: 5px 11px; border-radius: 8px; cursor: pointer; text-decoration: none;
+      background: rgba(139,92,246,.18); border: 1px solid rgba(139,92,246,.4); color: #cbb8f8; }
+    .mg-cbtn:hover { background: rgba(139,92,246,.3); }
+    .mg-doc { display: flex; flex-direction: column; align-items: center; gap: 12px; padding: 30px 24px; }
+    .mg-doc-ic { font-size: 48px; }
+    .mg-doc-name { font-size: 14px; color: #e6e8ee; text-align: center; }
+    .mg-doc-btn { background: #8b5cf6; color: #fff; text-decoration: none; padding: 9px 16px; border-radius: 9px; font-size: 13px; }
+    .mg-doc-btn:hover { background: #7c4ff0; }
     .mg-nav { flex: none; width: 40px; height: 40px; border-radius: 50%; border: 1px solid rgba(255,255,255,.15);
       background: rgba(255,255,255,.06); color: #fff; font-size: 22px; cursor: pointer; }
     .mg-nav:hover { background: rgba(139,92,246,.25); }
@@ -118,6 +144,7 @@ export class MediaGalleryComponent implements OnChanges, OnDestroy {
   readonly fullUrl = signal<string | null>(null);
   readonly fullState = signal<LoadState>('idle');
   readonly fullError = signal<string>('');
+  readonly zoomed = signal(false);
 
   /** blob: object URLs we created and must revoke */
   private blobUrls = new Set<string>();
@@ -164,11 +191,13 @@ export class MediaGalleryComponent implements OnChanges, OnDestroy {
 
   async open(i: number): Promise<void> {
     this.openIndex.set(i);
+    this.zoomed.set(false); // reset zoom on each item
     await this.loadFull();
   }
 
   close(): void {
     this.openIndex.set(null);
+    this.zoomed.set(false);
     this.revokeFull();
     this.fullUrl.set(null);
     this.fullState.set('idle');

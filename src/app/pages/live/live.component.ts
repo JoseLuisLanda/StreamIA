@@ -18,6 +18,7 @@ import { BackgroundManagerComponent } from './components/background-manager.comp
 import { AvatarOption, ImageCollection, AvatarSize, Scene } from './live.models';
 import { LiveStorageService } from './live-storage.service';
 import { ModelCacheService } from '../../services/model-cache.service';
+import { AvatarService } from '../../services/avatar.service';
 import { FirebaseAvatarStorageService } from '../../services/firebase-avatar-storage.service';
 
 @Component({
@@ -43,6 +44,7 @@ export class LiveComponent implements OnInit, OnDestroy {
 
   private storageService = inject(LiveStorageService);
   private modelCache = inject(ModelCacheService);
+  private avatarService = inject(AvatarService);
   private firebaseAvatarStorage = inject(FirebaseAvatarStorageService);
   private cdr = inject(ChangeDetectorRef);
   private ngZone = inject(NgZone);
@@ -80,7 +82,9 @@ export class LiveComponent implements OnInit, OnDestroy {
   // State
   avatarPosition: 'left' | 'center' | 'right' = 'center';
   currentAvatar: AvatarOption | null = null;
-  currentAvatarUrl = this.defaultAvatars[0]?.url || '';
+  // Empty until the catalog resolves -> avoids loading the legacy readyplayer URL
+  // first (which 404s) and the NG0100 expression-changed warning.
+  currentAvatarUrl = '';
   isPanelOpen = false;
   avatarSize: AvatarSize = 'medium';
 
@@ -162,7 +166,12 @@ export class LiveComponent implements OnInit, OnDestroy {
     this.collections = collections;
     this.scenes = scenes;
     this.hiddenAvatarIds = new Set(hiddenAvatarIds);
-    this.avatars = [...this.defaultAvatars, ...this.getUniqueCustomAvatars(savedCustomAvatars)]
+    // Primary source = the `avatars` Firestore collection via the central
+    // AvatarService (resolved + cached). Falls back to the legacy defaults only
+    // if the catalog is empty. This fixes "error al cargar el avatar".
+    const catalog = await this.loadCatalogAvatars();
+    const base = catalog.length ? catalog : this.defaultAvatars;
+    this.avatars = [...base, ...this.getUniqueCustomAvatars(savedCustomAvatars)]
       .filter(avatar => !this.hiddenAvatarIds.has(avatar.id));
     await this.storageService.loadAvatarSettings(this.avatars);
 
@@ -187,6 +196,28 @@ export class LiveComponent implements OnInit, OnDestroy {
         this.avatarViewer.forceResize();
       }
     }, 350);
+  }
+
+  /**
+   * Build /live's avatar options from the `avatars` collection via the central
+   * AvatarService (resolved download URLs + global cache). Each entry's `url` is
+   * a cached (blob) URL ready for the viewer's GLTFLoader.
+   */
+  private async loadCatalogAvatars(): Promise<AvatarOption[]> {
+    try {
+      const list = await this.avatarService.listAvatars();
+      const out: AvatarOption[] = [];
+      for (const a of list) {
+        try {
+          const url = await this.avatarService.resolveModelUrl(a.id);
+          const thumbnail = (await this.avatarService.resolveThumb(a.id)) ?? '';
+          out.push({ id: a.id, name: a.name || a.id, url, thumbnail });
+        } catch { /* skip avatars whose GLB can't resolve */ }
+      }
+      return out;
+    } catch {
+      return [];
+    }
   }
 
   // --- Avatar Logic ---

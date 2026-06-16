@@ -269,20 +269,33 @@ export class RagAdminService {
   async listMedia(namespace: string): Promise<RagMediaRecord[]> {
     const col = collection(this.db(), 'rag', namespace, 'media');
     const snap = await getDocs(query(col, orderBy('createdAt', 'desc')));
-    return snap.docs.map((d) => {
-      const data = d.data() as Partial<RagMediaRecord>;
-      return {
-        id: d.id,
-        type: (data.type as MediaType) ?? 'image',
-        title: data.title ?? d.id,
-        caption: data.caption,
-        storagePath: data.storagePath ?? '',
-        thumbnailPath: data.thumbnailPath,
-        namespace,
-        linkedDocId: data.linkedDocId,
-        createdAt: this.toMs(data.createdAt),
-      };
-    });
+    return snap.docs.map((d) => this.toMedia(namespace, d.id, d.data()));
+  }
+
+  /** Media attached to a specific document (the PDF), sorted by order. */
+  async listMediaByDoc(namespace: string, docId: string): Promise<RagMediaRecord[]> {
+    const col = collection(this.db(), 'rag', namespace, 'media');
+    const snap = await getDocs(query(col, where('linkedDocId', '==', docId)));
+    return snap.docs
+      .map((d) => this.toMedia(namespace, d.id, d.data()))
+      .sort((a, b) => (a.order ?? 0) - (b.order ?? 0));
+  }
+
+  private toMedia(namespace: string, id: string, data: any): RagMediaRecord {
+    return {
+      id,
+      type: (data.type as MediaType) ?? 'image',
+      title: data.title ?? id,
+      caption: data.caption,
+      description: data.description,
+      storagePath: data.storagePath ?? '',
+      thumbnailPath: data.thumbnailPath,
+      namespace,
+      linkedDocId: data.linkedDocId,
+      order: typeof data.order === 'number' ? data.order : undefined,
+      enabled: data.enabled !== false,
+      createdAt: this.toMs(data.createdAt),
+    };
   }
 
   /**
@@ -292,35 +305,52 @@ export class RagAdminService {
   async uploadMedia(
     namespace: string,
     file: File,
-    meta: { type: MediaType; title: string; caption?: string; linkedDocId?: string },
+    meta: { type: MediaType; title: string; caption?: string; description?: string; linkedDocId?: string; order?: number },
     thumbnail?: File,
     onProgress?: (p: UploadProgress) => void,
   ): Promise<RagMediaRecord> {
     const id = doc(collection(this.db(), 'rag', namespace, 'media')).id;
-    const storagePath = `rag-media/${namespace}/${id}__${this.sanitizeFilename(file.name)}`;
+    // Doc-scoped storage path: rag-media/{namespace}/{docId}/{file} when linked.
+    const folder = meta.linkedDocId ? `${namespace}/${meta.linkedDocId}` : namespace;
+    const storagePath = `rag-media/${folder}/${id}__${this.sanitizeFilename(file.name)}`;
     await this.uploadResumable(storagePath, file, onProgress);
 
     let thumbnailPath: string | undefined;
     if (thumbnail) {
-      thumbnailPath = `rag-media/${namespace}/${id}__thumb__${this.sanitizeFilename(thumbnail.name)}`;
+      thumbnailPath = `rag-media/${folder}/${id}__thumb__${this.sanitizeFilename(thumbnail.name)}`;
       await this.uploadResumable(thumbnailPath, thumbnail);
     }
 
+    // caption maps to description (used by the LLM + as the preview caption).
+    const description = meta.description?.trim() || meta.caption?.trim() || '';
     const record: RagMediaRecord = {
       id,
       type: meta.type,
       title: meta.title?.trim() || file.name,
-      caption: meta.caption?.trim() || undefined,
+      caption: description,
+      description,
       storagePath,
       thumbnailPath,
       namespace,
       linkedDocId: meta.linkedDocId || undefined,
+      order: meta.order ?? 0,
+      enabled: true,
       createdAt: Date.now(),
     };
-    await setDoc(doc(this.db(), 'rag', namespace, 'media', id), {
-      ...record,
-      createdAt: serverTimestamp(),
-    });
+    try {
+      // stripUndefined: Firestore rejects `undefined` (e.g. absent thumbnailPath /
+      // linkedDocId). Omit undefined keys rather than writing them.
+      await setDoc(
+        doc(this.db(), 'rag', namespace, 'media', id),
+        stripUndefined({ ...record, createdAt: serverTimestamp() }),
+      );
+    } catch (e: any) {
+      // Save failed AFTER the bytes uploaded -> clean up the orphaned objects.
+      for (const p of [storagePath, thumbnailPath].filter(Boolean) as string[]) {
+        try { await deleteObject(ref(getFirebaseStorageClient(), p)); } catch { /* best-effort */ }
+      }
+      throw new Error(`No se pudo guardar el registro de media: ${e?.message ?? String(e)}`);
+    }
     return record;
   }
 
@@ -328,9 +358,9 @@ export class RagAdminService {
   async updateMedia(
     namespace: string,
     id: string,
-    patch: Partial<Pick<RagMediaRecord, 'title' | 'caption' | 'type' | 'linkedDocId'>>,
+    patch: Partial<Pick<RagMediaRecord, 'title' | 'caption' | 'description' | 'type' | 'linkedDocId' | 'order' | 'enabled'>>,
   ): Promise<void> {
-    await updateDoc(doc(this.db(), 'rag', namespace, 'media', id), { ...patch });
+    await updateDoc(doc(this.db(), 'rag', namespace, 'media', id), stripUndefined({ ...patch }));
   }
 
   async deleteMedia(m: RagMediaRecord): Promise<void> {
@@ -423,4 +453,18 @@ export class RagAdminService {
       .replace(/\s+/g, '_')
       .replace(/[^a-zA-Z0-9._-]/g, '');
   }
+}
+
+/**
+ * Remove keys whose value is `undefined` from a Firestore write payload.
+ * Firestore rejects `undefined` ("Unsupported field value"); omit such keys so
+ * an empty optional field (caption/thumbnailPath/linkedDocId/order/...) never
+ * breaks the write. `null` and '' are valid and kept.
+ */
+function stripUndefined<T extends Record<string, any>>(obj: T): Partial<T> {
+  const out: Record<string, any> = {};
+  for (const k of Object.keys(obj)) {
+    if (obj[k] !== undefined) out[k] = obj[k];
+  }
+  return out as Partial<T>;
 }
