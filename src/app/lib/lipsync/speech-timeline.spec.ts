@@ -6,13 +6,15 @@ import { parseGestureMarkup } from '../gestures/gesture-markup';
 const IDS = new Set(['yes', 'no', 'surprise', 'thinking', 'sigh', 'laugh']);
 
 describe('buildSpeechTimeline', () => {
-    it('turns comma into a 1s pause boundary', () => {
+    it('does NOT inject a pause at a comma — speech flows continuously through it', () => {
+        // Commas must not produce a 'pause' silence segment; that made the avatar
+        // freeze briefly at every comma. The comma stays inside one speech segment
+        // and Piper's audio carries the natural prosody.
         const plan = buildSpeechTimeline('Bueno, seguimos', []);
 
+        expect(plan.segments.some(s => s.kind === 'pause')).toBe(false);
         expect(plan.segments).toEqual([
-            { kind: 'speech', text: 'Bueno', sourceStart: 0, sourceEnd: 5 },
-            { kind: 'pause', symbol: ',', durationMs: PAUSE_MAP[','], sourceIndex: 5 },
-            { kind: 'speech', text: 'seguimos', sourceStart: 7, sourceEnd: 15 },
+            { kind: 'speech', text: 'Bueno, seguimos', sourceStart: 0, sourceEnd: 15 },
         ]);
     });
 
@@ -60,9 +62,12 @@ describe('buildSpeechTimeline', () => {
         );
         const plan = buildSpeechTimeline(parsed.cleanText, parsed.gestures);
 
+        // Commas no longer split into 'pause' segments (adjacent speech merges);
+        // only the two ellipses remain as pauses.
         expect(plan.segments.map(s => s.kind)).toEqual([
-            'speech', 'pause', 'speech', 'pause', 'expression', 'speech', 'pause', 'speech', 'expression', 'speech', 'pause',
+            'speech', 'pause', 'expression', 'speech', 'expression', 'speech', 'pause',
         ]);
+        expect(plan.segments.filter(s => s.kind === 'pause').every(s => (s as any).symbol !== ',')).toBe(true);
         expect(plan.segments.filter(s => s.kind === 'expression').map(s => (s as any).id)).toEqual(['sigh', 'laugh']);
         expect(plan.segments.filter(s => s.kind === 'speech').map(s => (s as any).text).join(' ')).not.toContain('jaja');
         expect(plan.gestures).toHaveLength(1);

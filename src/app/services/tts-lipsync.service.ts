@@ -289,9 +289,17 @@ export class TtsLipsyncService {
         const deps = this.makeDeps(ctx, voiceId);
 
         // hybrid: short replies -> ONE fully precompiled plan; long replies ->
-        // per-segment units compiled in the worker while the previous unit plays
+        // per-segment units compiled in the worker while the previous unit plays.
+        //
+        // singlePass is the RAG-summary path: a lead-in/filler already covers the
+        // synth latency, so we FULLY pre-synthesize the whole summary as ONE unit
+        // before playback. This avoids the first-play "freeze at every comma" — the
+        // per-segment route stalls at clause boundaries when the worker can't
+        // compile the next unit before the current one finishes. Replay (cached
+        // lastPerformance) was always smooth; now the first play matches it.
         const totalSpeechChars = expanded.reduce((a, s) => a + (s.kind === 'speech' ? s.text.length : 0), 0);
-        const units: ExpandedSegment[][] = totalSpeechChars <= FULL_PRECOMPILE_MAX_CHARS
+        const fullPrecompile = opts.singlePass === true || totalSpeechChars <= FULL_PRECOMPILE_MAX_CHARS;
+        const units: ExpandedSegment[][] = fullPrecompile
             ? [expanded]
             : expanded.map(s => [s]);
         const unitGestures = this.assignGesturesToUnits(units, gestures);

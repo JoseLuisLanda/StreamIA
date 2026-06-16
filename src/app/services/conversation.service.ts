@@ -33,6 +33,19 @@ const CODE_FAREWELLS: Record<'es' | 'en', string[]> = {
     es: ['¡Hasta pronto! Aquí estaré cuando me necesites', '¡Cuídate! Vuelve cuando quieras'],
     en: ['See you soon! I will be here when you need me', 'Take care! Come back anytime'],
 };
+/** Contextual latency fillers spoken at t=0 while the RAG response generates. */
+const CODE_INFOACKS: Record<'es' | 'en', string[]> = {
+    es: [
+        'En cuanto a tu solicitud, déjame revisar lo que tengo...',
+        'Un momento, estoy consultando mi base de conocimiento...',
+        'Buena pregunta, déjame buscar la información...',
+    ],
+    en: [
+        'About your request, let me check what I have...',
+        'One moment, I am looking that up in my knowledge base...',
+        'Good question — let me find the information...',
+    ],
+};
 
 export interface ConvMessage {
     /** unique per session — keys the replay plan cache */
@@ -243,10 +256,16 @@ export class ConversationService {
         const pool = this.farewells.length ? this.farewells : CODE_FAREWELLS[opts.lang === 'en' ? 'en' : 'es'];
         return this.pickNonRepeating('farewells', pool);
     }
-    /** Optional latency filler said right before a RAG call ('' if none configured). */
-    private pickInfoAck(): string {
-        return this.pickNonRepeating('infoAcks', this.infoAcks);
+    /**
+     * Contextual latency filler spoken at t=0 while a RAG query generates. Uses
+     * the per-assistant infoAcknowledgements; falls back to a built-in contextual
+     * list so there is ALWAYS something to say (never dead silence).
+     */
+    private pickInfoAck(opts?: ConvTtsOpts): string {
+        const pool = this.infoAcks.length ? this.infoAcks : (opts ? CODE_INFOACKS[opts.lang === 'en' ? 'en' : 'es'] : []);
+        return this.pickNonRepeating('infoAcks', pool);
     }
+
 
     /**
      * Instant local turn (greeting or farewell): echoes the user message, then
@@ -306,17 +325,37 @@ export class ConversationService {
         }
 
         const t0 = performance.now();
+        let keepAlive: any = null;
         try {
-            // Start the RAG call immediately, then (optionally) speak a random
-            // info-acknowledgement as a latency filler that overlaps the fetch.
-            const fetchPromise = fetcher(query);
-            const ack = this.pickInfoAck();
+            // Start the RAG call in the BACKGROUND immediately. Track completion so
+            // we can keep the avatar moving until it returns.
+            let pending = true;
+            const fetchPromise = fetcher(query).finally(() => { pending = false; });
+
+            // Speak a contextual filler at t=0 (overlaps the fetch); the lead-in
+            // gesture (above) already runs in parallel. The filler's TTS finishes
+            // BEFORE the answer is synthesized, so answer encoding never competes
+            // with the filler's animation/lipsync.
+            const ack = this.pickInfoAck(opts);
             if (ack) {
-                this.pushSystem(ack);
+                this.setState('speaking');
+                this.speakingMsgId.set(null);
                 try { await this.tts.speak(ack, { ...opts, singlePass: true }); } catch { /* filler best-effort */ }
                 if (gen !== this.gen) return;
+                this.setState('waiting_llm');
             }
+
+            // After the filler, keep gentle motion alive while generation finishes
+            // so there is no silent/frozen gap (falls back to gesture-only if the
+            // filler was empty). Stops as soon as the response arrives.
+            if (pending && this.tts.waitingAnimsEnabled()) {
+                keepAlive = setInterval(() => {
+                    if (gen === this.gen && pending) this.gestures.triggerTransient('thinking', 1, 'slow');
+                }, 2600);
+            }
+
             const payload = await fetchPromise;
+            if (keepAlive) { clearInterval(keepAlive); keepAlive = null; }
             if (gen !== this.gen) return; // interrupted while waiting
             const tReplyReceived = performance.now();
             this.pushSystem(`Respuesta recibida (${((tReplyReceived - t0) / 1000).toFixed(1)} s)`);
@@ -352,6 +391,7 @@ export class ConversationService {
             if (tailId) this.gestures.trigger(tailId, undefined, undefined, true);
             this.afterSpeaking(opts);
         } catch (e: any) {
+            if (keepAlive) { clearInterval(keepAlive); keepAlive = null; }
             if (gen !== this.gen) return;
             this.fail(e?.message ?? String(e));
             const fallback = opts.lang === 'es'

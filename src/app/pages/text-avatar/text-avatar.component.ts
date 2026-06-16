@@ -1,4 +1,4 @@
-import { Component, ElementRef, ViewChild, AfterViewChecked, OnInit, inject, signal } from '@angular/core';
+import { Component, ElementRef, ViewChild, AfterViewChecked, OnInit, computed, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute } from '@angular/router';
@@ -13,6 +13,7 @@ import { RagAvatarService } from '../../services/rag-avatar.service';
 import { AssistantConfigService } from '../../services/assistant-config.service';
 import { ConversationContentService } from '../../services/conversation-content.service';
 import { AssistantConvContent, SuggestedPrompt } from '../../lib/conversation-content/conv-content.models';
+import { MediaItem } from '../../lib/rag/rag.models';
 import { AssistantConfig } from '../../lib/rag/rag.models';
 import { getRagEndpoint, setRagEndpoint, getAssistantId, setAssistantId } from '../../lib/rag/rag.config';
 import { TtsLipsyncService, TtsProvider, TtsLang, PIPER_VOICES } from '../../services/tts-lipsync.service';
@@ -72,10 +73,10 @@ const CHIP_LABELS: Record<string, string> = {
       <main class="main">
         <!-- center stage -->
         <section class="stage">
-          <div class="viewport" [class.pip]="!!detailOpen()">
+          <div class="viewport" [class.pip]="pipActive()">
             <div class="glow"></div>
             <app-avatar-tts [avatarUrl]="avatarUrl" (rigReport)="onRigReport($event)"></app-avatar-tts>
-            <button class="pip-x" *ngIf="detailOpen()" (click)="closeDetail()" title="Expandir avatar">⤢</button>
+            <button class="pip-x" *ngIf="pipActive()" (click)="closeDetail(); closeMediaViewer()" title="Expandir avatar">⤢</button>
 
             <div class="statuspill" [ngSwitch]="conv.state()">
               <ng-container *ngSwitchCase="'listening'">
@@ -251,7 +252,8 @@ const CHIP_LABELS: Record<string, string> = {
                 </ng-container>
                 <span class="cursor" *ngIf="isRevealing(m)">▍</span>
                 <button class="vermas" *ngIf="m.detail" (click)="openDetail(m)">Ver más detalles →</button>
-                <app-media-gallery *ngIf="m.media?.length" [media]="m.media!"></app-media-gallery>
+                <app-media-gallery *ngIf="m.media?.length" [media]="m.media!" mode="preview"
+                                   (openViewer)="openMediaViewer(m, $event)"></app-media-gallery>
                 <div class="botfoot">
                   <span class="meta" *ngIf="m.meta">{{ m.meta }}</span>
                   <button class="replay" *ngIf="m.replayable" (click)="replay(m.id)" title="Repetir (voz + gestos)">↻</button>
@@ -309,6 +311,11 @@ const CHIP_LABELS: Record<string, string> = {
           </article>
         </div>
       </div>
+
+      <!-- ============ FULL-SCREEN IMAGE VIEWER (root-level, image-only) ============ -->
+      <app-media-gallery *ngIf="mediaViewer() as mv" mode="viewer"
+                         [media]="mv.media" [startIndex]="mv.index"
+                         (closed)="closeMediaViewer()"></app-media-gallery>
 
       <!-- ============================== SETTINGS SLIDE-OVER ============================== -->
       <div class="backdrop" *ngIf="settingsOpen" (click)="settingsOpen = false"></div>
@@ -747,6 +754,16 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
 
     // Full-screen detail view ("Ver más detalles") + PiP avatar.
     detailOpen = signal<ConvMessage | null>(null);
+    // Full-screen image-only viewer (root-level overlay).
+    mediaViewer = signal<{ media: MediaItem[]; index: number } | null>(null);
+
+    /** Avatar shrinks to PiP whenever ANY full-screen overlay is open. */
+    pipActive = computed(() => !!this.detailOpen() || !!this.mediaViewer());
+
+    openMediaViewer(m: ConvMessage, index: number): void {
+        if (m.media?.length) this.mediaViewer.set({ media: m.media, index });
+    }
+    closeMediaViewer(): void { this.mediaViewer.set(null); }
 
     openDetail(m: ConvMessage): void {
         // Setting this shrinks .viewport to PiP via CSS; avatar-tts' ResizeObserver

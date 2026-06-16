@@ -8,7 +8,21 @@
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-capable" content="yes">
   <link rel="icon" type="image/x-icon" href="favicon.ico">
-  
+
+  <!-- Resolve the Node built-ins referenced (but never executed) by the Piper TTS
+       dependency (@diffusionstudio/vits-web) to an empty module. They are marked
+       external at build time (angular.json) and mapped here so the browser's ESM
+       loader doesn't fail on the bare "fs"/"path" specifiers. MUST appear before
+       any other module script. -->
+  <script type="importmap">
+  {
+    "imports": {
+      "fs": "/assets/empty-module.js",
+      "path": "/assets/empty-module.js"
+    }
+  }
+  </script>
+
   <!-- Google Model Viewer for AR support -->
   <script type="module" src="https://unpkg.com/@google/model-viewer/dist/model-viewer.min.js"></script>
 </head>

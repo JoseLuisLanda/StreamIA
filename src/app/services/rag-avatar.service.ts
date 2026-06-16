@@ -158,6 +158,17 @@ export class RagAvatarService {
 
     const normalized = this.normalize(data);
     this.lastMedia.set(normalized.media);
+    // Analysis logging: full structured response (summary/detail lengths + media).
+    console.info('[RagAvatar] response', {
+      assistantId: payload.assistantId,
+      query: q,
+      summaryLen: (normalized.summary ?? normalized.body ?? '').length,
+      detailLen: (normalized.detail ?? '').length,
+      mediaCount: normalized.media.length,
+      media: normalized.media,
+      sources: normalized.sources,
+      raw: data,
+    });
     return normalized;
   }
 

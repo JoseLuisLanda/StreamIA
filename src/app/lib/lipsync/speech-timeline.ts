@@ -1,8 +1,13 @@
 import type { ParsedGesture } from '../gestures/gesture-markup';
 import type { SpeedParam } from '../gestures/gesture-library';
 
+// NOTE: commas are intentionally NOT mapped to a pause. Injecting a hard
+// silence at every comma made the avatar "freeze" briefly at each comma on
+// playback (mouth held closed, no movement) on top of the audio. Piper's own
+// synthesis already produces the natural prosodic dip at commas, so we let the
+// speech flow continuously through commas and rely on the audio's own timing.
+// Only explicit ellipses keep a deliberate pause.
 export const PAUSE_MAP: Record<string, number> = {
-    ',': 100,
     '...': 300,
     '…': 300,
 };
@@ -111,9 +116,9 @@ export function buildSpeechTimeline(text: string, gestures: ParsedGesture[]): Sp
             events.push({ index: i, order: 2000 + i, length: 1, segment: { kind: 'pause', symbol: '…', durationMs: PAUSE_MAP['…'], sourceIndex: i } });
             continue;
         }
-        if (text[i] === ',') {
-            events.push({ index: i, order: 2000 + i, length: 1, segment: { kind: 'pause', symbol: ',', durationMs: PAUSE_MAP[','], sourceIndex: i } });
-        }
+        // Commas: no injected pause. The speech segment continues uninterrupted
+        // so the avatar keeps lip-syncing/moving through commas; Piper's audio
+        // already carries the natural comma prosody.
     }
 
     events.sort((a, b) => a.index - b.index || b.length - a.length || a.order - b.order);
