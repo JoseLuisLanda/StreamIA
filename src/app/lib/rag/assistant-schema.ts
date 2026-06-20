@@ -17,7 +17,7 @@
  */
 
 /** Current assistant schema version. Bump when adding a migrated field. */
-export const ASSISTANT_SCHEMA_VERSION = 2;
+export const ASSISTANT_SCHEMA_VERSION = 4;
 
 export interface MigrationStep {
   /** The version this step upgrades a doc TO. */
@@ -43,6 +43,24 @@ export const ASSISTANT_MIGRATIONS: MigrationStep[] = [
         };
       }
       if (d.contentModifiedAt == null) d.__needsContentModified = true; // service stamps serverTimestamp
+    },
+  },
+  {
+    // v3 adds the capabilities/purpose flag (false => inherit the global default
+    // capabilities config). The capabilities map itself is optional/absent until set.
+    to: 3,
+    apply: (d) => {
+      if (!d.useCustomResponses || typeof d.useCustomResponses !== 'object') d.useCustomResponses = {};
+      if (d.useCustomResponses.capabilities !== true) d.useCustomResponses.capabilities = false;
+    },
+  },
+  {
+    // v4 adds per-stage LLM profile overrides (summary/detail). null => unset =>
+    // fall back to the global default (config/ragModels) then legacy profile.
+    to: 4,
+    apply: (d) => {
+      if (d.summaryProfileId === undefined) d.summaryProfileId = null;
+      if (d.detailProfileId === undefined) d.detailProfileId = null;
     },
   },
 ];

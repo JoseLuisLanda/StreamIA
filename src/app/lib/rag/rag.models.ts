@@ -25,6 +25,15 @@ export interface RagRequest {
   ragPath?: string;
   /** preview mode — Function may gate premium content (403) when true */
   preview?: boolean;
+  /**
+   * Answer mode.
+   *  - absent/'rag'   = STAGE 1 summary-only (+ media). Fast; detail is empty.
+   *  - 'capabilities' = metadata-only answer (no retrieval/media).
+   *  - 'detail'       = STAGE 2 detail-only, reusing stage-1 chunks via `chunkIds`.
+   */
+  mode?: 'rag' | 'capabilities' | 'detail';
+  /** STAGE 2: chunk ids from stage 1's `sources`, so the detail reuses the same context. */
+  chunkIds?: string[];
 }
 
 /**
@@ -39,6 +48,10 @@ export interface RagAskOptions {
   preview?: boolean;
   language?: string;
   voice?: string;
+  /** 'capabilities' = metadata-only; 'detail' = stage-2 detail-only. Default = stage-1 summary. */
+  mode?: 'rag' | 'capabilities' | 'detail';
+  /** STAGE 2: chunk ids from stage 1's sources (reuses the same context). */
+  chunkIds?: string[];
 }
 
 export type MediaType = 'image' | 'video' | 'document';
@@ -126,6 +139,13 @@ export interface AssistantConfig {
    */
   llmProfileId?: string;
   /**
+   * Per-stage LLM profile OVERRIDES (chatRag summary vs detail). Empty/unset ->
+   * fall back to the global default (config/ragModels), then to llmProfileId /
+   * system default. Independent: summary and detail may use different models.
+   */
+  summaryProfileId?: string;
+  detailProfileId?: string;
+  /**
    * Per-category resolution flags. true => read that assistant subcollection;
    * false/absent => serve the global default responses (no subcollection read).
    * Auto-set true on first explicit save of that category.
@@ -135,7 +155,16 @@ export interface AssistantConfig {
     infoAcknowledgements: boolean;
     farewells: boolean;
     suggestedPrompts: boolean;
+    /** true => use this assistant's own capabilities config; false/absent => global. */
+    capabilities?: boolean;
   };
+  /**
+   * Capabilities/purpose config (singleton). Optional pre-written `answer`
+   * (spoken directly, NO chatRag) and/or a `promptTemplate` used server-side by
+   * chatRag's metadata-only capabilities mode. Resolved global-vs-custom by the
+   * `useCustomResponses.capabilities` flag.
+   */
+  capabilities?: { answer?: string; promptTemplate?: string };
   /** Instant reply for greetings/small talk (no RAG call). Per-assistant override. */
   greetingResponse?: string;
   /** Extra greeting trigger words for the intent router (merged with global defaults). */

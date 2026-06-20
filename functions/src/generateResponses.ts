@@ -14,7 +14,7 @@ import { ENFORCE_ADMIN_ROLE } from './lib/flags';
 import { loadProfile, loadSystemDefault, resolveProfileForAssistant } from './lib/llm-profiles';
 import { generateRawFromProfile } from './lib/llm';
 
-type Category = 'greetings' | 'infoAcknowledgements' | 'farewells' | 'suggestedPrompts';
+type Category = 'greetings' | 'infoAcknowledgements' | 'farewells' | 'suggestedPrompts' | 'capabilities';
 
 interface GenReq {
   scope: 'global' | 'assistant';
@@ -32,6 +32,8 @@ interface GenRes {
   category: Category;
   phrases?: string[];
   prompts?: Array<{ label: string; prompt: string }>;
+  /** capabilities: a single concise purpose/capabilities answer draft. */
+  answer?: string;
   provider?: string;
   model?: string;
   error?: string;
@@ -44,6 +46,7 @@ const CATEGORY_INTENT: Record<Category, string> = {
   infoAcknowledgements: 'frases cortas para decir mientras se busca informacion (relleno de espera)',
   farewells: 'despedidas amables y breves',
   suggestedPrompts: 'sugerencias de preguntas que el asistente puede responder desde su base de conocimiento',
+  capabilities: 'una descripcion del proposito del asistente y de los temas en los que puede ayudar, basada SOLO en su rol/descripcion/tema',
 };
 
 export const generateResponses = onCall<GenReq, Promise<GenRes>>(
@@ -103,6 +106,11 @@ export const generateResponses = onCall<GenReq, Promise<GenRes>>(
         return { ok: true, category, prompts, provider, model };
       }
       const phrases = parsed.map((x: any) => (typeof x === 'string' ? x : String(x?.text ?? ''))).map((s) => s.trim()).filter(Boolean).slice(0, count);
+      if (category === 'capabilities') {
+        // Single concise answer draft (first element); also returned as phrases[0].
+        const answer = phrases[0] ?? '';
+        return { ok: true, category, answer, phrases: answer ? [answer] : [], provider, model };
+      }
       return { ok: true, category, phrases, provider, model };
     } catch (e: any) {
       const meta = e?.meta ?? {};
@@ -135,7 +143,9 @@ function buildGenUser(category: Category, count: number, ctx: GenReq['context'],
   const want = CATEGORY_INTENT[category];
   const shape = category === 'suggestedPrompts'
     ? `un arreglo JSON de ${count} objetos {"label","prompt"}`
-    : `un arreglo JSON de ${count} cadenas de texto`;
+    : category === 'capabilities'
+      ? 'un arreglo JSON con UNA sola cadena de texto de 2-3 frases (40-70 palabras), ignorando el limite de 8-18 palabras'
+      : `un arreglo JSON de ${count} cadenas de texto`;
   return `Contexto del asistente:\n${ctxLines || '(sin contexto)'}\n\nGenera ${shape}: ${want}. Idioma: ${lang}.`;
 }
 

@@ -50,6 +50,30 @@ import { environment } from '../../../environments/environment';
           <p class="ok" *ngIf="msg()">{{ msg() }}</p>
           <p class="err" *ngIf="error()">{{ error() }}</p>
 
+          <!-- GLOBAL per-stage default models (config/ragModels). -->
+          <section class="card stagecard" *ngIf="!loading()">
+            <h3>RAG stage models (global defaults)</h3>
+            <p class="vsub">Which profile serves each chatRag stage by default. Assistants can override per stage in the Assistant Manager.</p>
+            <div class="stagerow">
+              <label class="fld"><span>Default Summary model</span>
+                <select [ngModel]="stageSummaryId()" (ngModelChange)="stageSummaryId.set($event)">
+                  <option value="">- system default profile -</option>
+                  <option *ngFor="let p of profiles()" [value]="p.id">{{ p.name }} ({{ labels[p.provider] }}/{{ p.model }})</option>
+                </select>
+              </label>
+              <label class="fld"><span>Default Detail model</span>
+                <select [ngModel]="stageDetailId()" (ngModelChange)="stageDetailId.set($event)">
+                  <option value="">- system default profile -</option>
+                  <option *ngFor="let p of profiles()" [value]="p.id">{{ p.name }} ({{ labels[p.provider] }}/{{ p.model }})</option>
+                </select>
+              </label>
+            </div>
+            <div class="row">
+              <button class="btn primary" (click)="saveStageDefaults()" [disabled]="stageSaving()">{{ stageSaving() ? 'Saving...' : 'Save stage defaults' }}</button>
+              <span class="ok" *ngIf="stageMsg()">{{ stageMsg() }}</span>
+            </div>
+          </section>
+
           <div class="state" *ngIf="loading()"><span class="spin"></span> Loading...</div>
 
           <div class="empty" *ngIf="!loading() && !profiles().length">
@@ -113,6 +137,10 @@ import { environment } from '../../../environments/environment';
     .pactions { display: flex; gap: 7px; }
     .card { background: var(--card); border: 1px solid var(--line); border-radius: 14px; padding: 18px 20px; margin-top: 18px; }
     .card h3 { margin: 0 0 12px; font-size: 16px; }
+    .stagecard { margin-top: 0; margin-bottom: 18px; }
+    .stagerow { display: flex; gap: 14px; flex-wrap: wrap; margin: 6px 0 12px; }
+    .fld { display: flex; flex-direction: column; gap: 5px; flex: 1; min-width: 220px; font-size: 12px; color: #aeb4c0; }
+    .fld select { background: rgba(255,255,255,.05); color: #e6e8ee; border: 1px solid rgba(255,255,255,.12); border-radius: 9px; padding: 8px 10px; font-size: 13px; }
     .row { display: flex; gap: 10px; margin-top: 12px; }
     .btn { padding: 8px 13px; border-radius: 8px; cursor: pointer; font-size: 12.5px; background: rgba(139,92,246,.18); border: 1px solid rgba(139,92,246,.4); color: #cbb8f8; }
     .btn:hover:not(:disabled) { background: rgba(139,92,246,.3); } .btn:disabled { opacity: .45; cursor: default; }
@@ -140,6 +168,12 @@ export class LlmAdminComponent implements OnInit {
   readonly msg = signal('');
   readonly error = signal('');
 
+  // GLOBAL per-stage default models (config/ragModels).
+  readonly stageSummaryId = signal('');
+  readonly stageDetailId = signal('');
+  readonly stageSaving = signal(false);
+  readonly stageMsg = signal('');
+
   readonly allowed = computed(() => !environment.enforceAdminRole || this.admin.isAdmin() === true);
 
   activeKey = activeKeyOf;
@@ -152,9 +186,23 @@ export class LlmAdminComponent implements OnInit {
 
   async refresh(): Promise<void> {
     this.loading.set(true); this.error.set('');
-    try { this.profiles.set(await this.svc.listGlobal()); }
+    try {
+      const [profiles, stage] = await Promise.all([this.svc.listGlobal(), this.svc.getStageDefaults()]);
+      this.profiles.set(profiles);
+      this.stageSummaryId.set(stage.summaryProfileId);
+      this.stageDetailId.set(stage.detailProfileId);
+    }
     catch (e: any) { this.error.set(e?.message ?? String(e)); }
     finally { this.loading.set(false); }
+  }
+
+  async saveStageDefaults(): Promise<void> {
+    this.stageSaving.set(true); this.stageMsg.set(''); this.error.set('');
+    try {
+      await this.svc.saveStageDefaults({ summaryProfileId: this.stageSummaryId(), detailProfileId: this.stageDetailId() });
+      this.stageMsg.set('Saved.');
+    } catch (e: any) { this.error.set(e?.message ?? String(e)); }
+    finally { this.stageSaving.set(false); }
   }
 
   newProfile(): void { this.editing.set(newProfileDraft('global')); }

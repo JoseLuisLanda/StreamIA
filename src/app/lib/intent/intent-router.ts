@@ -10,7 +10,7 @@
  * tokenization, multilingual lists, ML). The lists are overridable per assistant
  * (merged with the global defaults below).
  */
-export type Intent = 'greeting' | 'farewell' | 'query' | 'ambiguous';
+export type Intent = 'greeting' | 'farewell' | 'capabilities' | 'query' | 'ambiguous';
 
 /** Global default greeting / small-talk triggers (es + en). */
 export const DEFAULT_GREETING_KEYWORDS: string[] = [
@@ -24,6 +24,30 @@ export const DEFAULT_GREETING_KEYWORDS: string[] = [
 export const DEFAULT_FAREWELL_KEYWORDS: string[] = [
   'adios', 'hasta luego', 'hasta pronto', 'nos vemos', 'hasta la vista', 'chao', 'chau',
   'me voy', 'bye', 'goodbye', 'see you', 'see ya', 'farewell', 'good night', 'buenas noches me voy',
+];
+
+/**
+ * Global default "capabilities / purpose" triggers (es + en). These are mostly
+ * multi-word PHRASES so they win over the generic query rule (they contain
+ * query-verbs like "que"/"what" and often a "?") without swallowing real info
+ * questions like "que informacion tienes sobre los precios".
+ */
+export const DEFAULT_CAPABILITY_KEYWORDS: string[] = [
+  // ES (primary)
+  'que puedes hacer', 'que sabes hacer', 'que puedes hacer por mi', 'que haces',
+  'para que sirves', 'para que eres', 'para que estas', 'para que fuiste',
+  'en que me puedes ayudar', 'en que me ayudas', 'en que puedes ayudarme', 'en que puedes ayudar',
+  'como me puedes ayudar', 'como me ayudas', 'como puedes ayudarme',
+  'que temas puedes', 'que temas manejas', 'que temas cubres', 'sobre que temas', 'de que temas',
+  'que puedo preguntarte', 'que te puedo preguntar', 'que puedo preguntar',
+  'cual es tu proposito', 'cual es tu funcion', 'cual es tu objetivo',
+  'que informacion puedes', 'que informacion me puedes', 'que informacion manejas',
+  'quien eres', 'que eres',
+  // EN (secondary)
+  'what can you do', 'what do you do', 'what are you for', 'what is your purpose',
+  'how can you help', 'how do you help', 'how can you assist',
+  'what topics', 'what can i ask', 'what info can you', 'what information can you',
+  'who are you', 'what are you',
 ];
 
 /** Global default query-verb / question triggers (es + en). */
@@ -60,15 +84,21 @@ function hasAny(haystack: string, needles: string[]): string | null {
 export interface IntentLists {
   greetingKeywords?: string[];
   farewellKeywords?: string[];
+  capabilityKeywords?: string[];
   queryVerbs?: string[];
 }
 
 /**
  * Local fast classification. Returns 'greeting' | 'farewell' | 'query' | 'ambiguous'.
+ *  - A "capabilities/purpose" phrase -> capabilities (answered metadata-only, NO RAG).
  *  - Question mark or a query verb -> query (info must reach RAG).
  *  - A farewell word and NO query verb on a short utterance -> farewell.
  *  - A greeting word and NO query verb on a short utterance -> greeting.
  *  - Otherwise ambiguous (caller may LLM-classify).
+ *
+ * Capabilities is checked BEFORE the generic query rule on purpose: phrases like
+ * "que puedes hacer?" contain a query-verb + "?" and would otherwise be classified
+ * as a query. The phrases are specific enough not to swallow real info questions.
  */
 export function classifyIntentLocal(text: string, lists: IntentLists = {}): Intent {
   const t = normalize(text);
@@ -76,7 +106,11 @@ export function classifyIntentLocal(text: string, lists: IntentLists = {}): Inte
 
   const greetings = [...DEFAULT_GREETING_KEYWORDS, ...(lists.greetingKeywords ?? [])];
   const farewells = [...DEFAULT_FAREWELL_KEYWORDS, ...(lists.farewellKeywords ?? [])];
+  const capabilities = [...DEFAULT_CAPABILITY_KEYWORDS, ...(lists.capabilityKeywords ?? [])];
   const verbs = [...DEFAULT_QUERY_VERBS, ...(lists.queryVerbs ?? [])];
+
+  // Capabilities/purpose wins over the generic query rule (see doc note above).
+  if (hasAny(t, capabilities) !== null) return 'capabilities';
 
   const isQuery = t.includes('?') || hasAny(t, verbs) !== null;
   const wordCount = t.split(' ').length;

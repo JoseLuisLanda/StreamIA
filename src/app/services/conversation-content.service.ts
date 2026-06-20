@@ -17,6 +17,7 @@ import {
   AssistantConvContent,
   CACHE_SCHEMA,
   CachedConvContent,
+  CapabilitiesConfig,
   ConvKind,
   GlobalResponses,
   PhraseEntry,
@@ -25,6 +26,7 @@ import {
   UseCustomResponses,
   defaultUseCustom,
   emptyContent,
+  normalizeCapabilities,
   normalizeUseCustom,
   seedPhrases,
   seedSuggestedPrompts,
@@ -106,11 +108,14 @@ export class ConversationContentService {
       flags.farewells ? this.fetchPhrases(assistantId, 'farewells') : Promise.resolve(globals.farewells),
       flags.suggestedPrompts ? this.fetchPrompts(assistantId) : Promise.resolve(globals.suggestedPrompts),
     ]);
+    // Capabilities (singleton) is resolved from the already-read assistant doc
+    // (custom) or the already-loaded global doc -- NO extra Firestore reads.
+    const capabilities: CapabilitiesConfig = flags.capabilities ? meta.capabilities : (globals.capabilities ?? {});
 
     const envelope: CachedConvContent = {
       assistantId,
       cacheSchema: CACHE_SCHEMA,
-      content: { greetings, infoAcknowledgements: infoAcks, farewells, suggestedPrompts: suggested },
+      content: { greetings, infoAcknowledgements: infoAcks, farewells, suggestedPrompts: suggested, capabilities },
       syncedModifiedAt: meta.contentModifiedAt,
       syncedGlobalAt: globals.modifiedAt,
       flags,
@@ -124,6 +129,11 @@ export class ConversationContentService {
   /** Which categories are currently resolving to global (for UI indicators). */
   async resolutionFlags(assistantId: string): Promise<UseCustomResponses> {
     return (await this.readAssistantMeta(assistantId)).flags;
+  }
+
+  /** ADMIN: read this assistant's OWN capabilities config (for the editor). */
+  async getAssistantCapabilities(assistantId: string): Promise<CapabilitiesConfig> {
+    return (await this.readAssistantMeta(assistantId)).capabilities;
   }
 
   // ============================================================ global layer
@@ -140,6 +150,7 @@ export class ConversationContentService {
           infoAcknowledgements: mapPhrases(d.infoAcknowledgements).filter((p) => p.enabled).sort(byOrder),
           farewells: mapPhrases(d.farewells).filter((p) => p.enabled).sort(byOrder),
           suggestedPrompts: mapPrompts(d.suggestedPrompts).filter((p) => p.enabled).sort(byOrder),
+          capabilities: normalizeCapabilities(d.capabilities),
           modifiedAt: toMs(d.modifiedAt) ?? 0,
         };
         this.globalCache = g;
@@ -159,6 +170,7 @@ export class ConversationContentService {
       infoAcknowledgements: seedPhrases('infoAcknowledgements').map(mk),
       farewells: seedPhrases('farewells').map(mk),
       suggestedPrompts: seedSuggestedPrompts().map((p, i) => ({ id: `code-${i}`, ...p, order: i, enabled: true })),
+      capabilities: {},
       modifiedAt: 0,
     };
   }
@@ -173,6 +185,7 @@ export class ConversationContentService {
       infoAcknowledgements: mapPhrases(d.infoAcknowledgements).sort(byOrder),
       farewells: mapPhrases(d.farewells).sort(byOrder),
       suggestedPrompts: mapPrompts(d.suggestedPrompts).sort(byOrder),
+      capabilities: normalizeCapabilities(d.capabilities),
       modifiedAt: toMs(d.modifiedAt) ?? 0,
     };
   }
@@ -198,6 +211,16 @@ export class ConversationContentService {
     await setDoc(
       doc(this.db(), 'config', GLOBAL_DOC),
       { [kind]: items, modifiedAt: serverTimestamp() },
+      { merge: true },
+    );
+    this.globalCache = null;
+  }
+
+  /** Save the GLOBAL capabilities/purpose config (config/responses.capabilities). */
+  async saveGlobalCapabilities(cfg: CapabilitiesConfig): Promise<void> {
+    await setDoc(
+      doc(this.db(), 'config', GLOBAL_DOC),
+      { capabilities: normalizeCapabilities(cfg), modifiedAt: serverTimestamp() },
       { merge: true },
     );
     this.globalCache = null;
@@ -292,6 +315,29 @@ export class ConversationContentService {
     await this.invalidate(assistantId);
   }
 
+  /**
+   * Save a per-assistant capabilities config (answer and/or promptTemplate) and
+   * flip the capabilities flag to custom. Empty config still marks custom (so the
+   * assistant intentionally overrides global with "nothing extra").
+   */
+  async saveAssistantCapabilities(assistantId: string, cfg: CapabilitiesConfig): Promise<void> {
+    await setDoc(doc(this.db(), 'assistants', assistantId), {
+      capabilities: normalizeCapabilities(cfg),
+      useCustomResponses: { capabilities: true },
+      contentModifiedAt: serverTimestamp(),
+    }, { merge: true });
+    await this.invalidate(assistantId);
+  }
+
+  /** Revert capabilities to the global default (flag -> false). */
+  async revertCapabilities(assistantId: string): Promise<void> {
+    await setDoc(doc(this.db(), 'assistants', assistantId), {
+      useCustomResponses: { capabilities: false },
+      contentModifiedAt: serverTimestamp(),
+    }, { merge: true });
+    await this.invalidate(assistantId);
+  }
+
   /** Set the category flag true + bump the content marker (idempotent). */
   private async markCustom(assistantId: string, kind: ConvKind): Promise<void> {
     await setDoc(doc(this.db(), 'assistants', assistantId), {
@@ -311,13 +357,17 @@ export class ConversationContentService {
 
   // ============================================================== internals
 
-  private async readAssistantMeta(assistantId: string): Promise<{ contentModifiedAt: number; flags: UseCustomResponses }> {
+  private async readAssistantMeta(assistantId: string): Promise<{ contentModifiedAt: number; flags: UseCustomResponses; capabilities: CapabilitiesConfig }> {
     try {
       const snap = await getDoc(doc(this.db(), 'assistants', assistantId));
       const d = (snap.data() as any) ?? {};
-      return { contentModifiedAt: toMs(d.contentModifiedAt) ?? 0, flags: normalizeUseCustom(d.useCustomResponses) };
+      return {
+        contentModifiedAt: toMs(d.contentModifiedAt) ?? 0,
+        flags: normalizeUseCustom(d.useCustomResponses),
+        capabilities: normalizeCapabilities(d.capabilities),
+      };
     } catch {
-      return { contentModifiedAt: 0, flags: defaultUseCustom() };
+      return { contentModifiedAt: 0, flags: defaultUseCustom(), capabilities: {} };
     }
   }
 
@@ -363,18 +413,19 @@ export class ConversationContentService {
   async generate(req: {
     scope: 'global' | 'assistant';
     assistantId?: string;
-    category: ConvKind;
+    category: ConvKind | 'capabilities';
     count?: number;
     context?: { name?: string; role?: string; description?: string; topicTag?: string; language?: string; persona?: string };
-  }): Promise<{ phrases?: string[]; prompts?: Array<{ label: string; prompt: string }>; error?: string }> {
-    const fn = httpsCallable<typeof req, { ok: boolean; phrases?: string[]; prompts?: Array<{ label: string; prompt: string }>; error?: string }>(
+  }): Promise<{ phrases?: string[]; prompts?: Array<{ label: string; prompt: string }>; answer?: string; error?: string }> {
+    const fn = httpsCallable<typeof req, { ok: boolean; phrases?: string[]; prompts?: Array<{ label: string; prompt: string }>; answer?: string; error?: string }>(
       getFirebaseFunctionsClient(),
       'generateResponses',
     );
     try {
       const res = (await fn(req)).data;
       if (!res.ok) return { error: res.error ?? 'Generation failed.' };
-      return { phrases: res.phrases, prompts: res.prompts };
+      // capabilities returns a single answer (also tolerated as phrases[0]).
+      return { phrases: res.phrases, prompts: res.prompts, answer: res.answer ?? res.phrases?.[0] };
     } catch (e: any) {
       const code = e?.code ? ` (${e.code})` : '';
       return { error: `${e?.message ?? String(e)}${code}` };
@@ -402,7 +453,7 @@ function validEnvelope(c: CachedConvContent | null | undefined): c is CachedConv
 }
 
 function CONV_KINDS_changed(a: UseCustomResponses, b: UseCustomResponses): boolean {
-  return (['greetings', 'infoAcknowledgements', 'farewells', 'suggestedPrompts'] as (keyof UseCustomResponses)[])
+  return (['greetings', 'infoAcknowledgements', 'farewells', 'suggestedPrompts', 'capabilities'] as (keyof UseCustomResponses)[])
     .some((k) => !!a[k] !== !!b[k]);
 }
 

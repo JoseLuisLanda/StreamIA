@@ -124,6 +124,10 @@ export class RagAvatarService {
       voice: opts.voice,
       ragPath: opts.ragPath,
       preview: opts.preview,
+      // 'capabilities' = metadata-only; 'detail' = stage-2 detail-only (reuses
+      // stage-1 chunks via chunkIds). Absent = stage-1 summary (normal RAG).
+      mode: opts.mode,
+      chunkIds: opts.chunkIds,
     };
 
     let res: Response;

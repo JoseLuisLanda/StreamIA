@@ -1,7 +1,8 @@
 import { Component, ElementRef, ViewChild, AfterViewChecked, OnInit, computed, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
-import { ActivatedRoute } from '@angular/router';
+import { ActivatedRoute, Router } from '@angular/router';
+import { AdminService } from '../../services/admin.service';
 import { AvatarManagerService } from '../../services/avatar-manager.service';
 import { AvatarService } from '../../services/avatar.service';
 import { AvatarTtsComponent, DEFAULT_AVATAR_URL } from '../../components/avatar-tts/avatar-tts.component';
@@ -44,85 +45,48 @@ const CHIP_LABELS: Record<string, string> = {
     template: `
     <div class="app">
 
-      <!-- ============================== TOP BAR ============================== -->
-      <header class="topbar">
+      <!-- ===================== FLOATING TOP BAR (over avatar) ===================== -->
+      <header class="topbar floating">
         <div class="brand">
-          <span class="logo">🧑‍🎤</span>
-          <span class="name">Avatar <em>Live</em></span>
+          <button class="backbtn" (click)="goBack()" title="Volver a asistentes" aria-label="Volver a asistentes">←</button>
+          <div class="brandtext">
+            <span class="name">{{ assistantName() }}</span>
+            <span class="status-line"><i class="dot-online"></i> Active Instance</span>
+          </div>
         </div>
         <div class="topctl">
-          <div class="pill provider-pill" [title]="'Proveedor LLM'">
-            <span class="dot" [class.ok]="!lastError()" [class.err]="lastError()"></span>
-            <select [ngModel]="llm.settings().provider" (ngModelChange)="setLlmProvider($event)">
-              <option *ngFor="let p of providerIds" [value]="p">{{ providerLabels[p] }}</option>
-            </select>
-          </div>
-          <button class="pill lang" (click)="toggleLang()" title="Idioma">
-            <b [class.on]="lang === 'es'">ES</b><span>/</span><b [class.on]="lang === 'en'">EN</b>
-          </button>
-          <div class="pill" title="Voz">
-            <select [(ngModel)]="voiceId">
-              <option *ngFor="let v of piperVoices[lang]" [value]="v.id">{{ v.label }}</option>
-            </select>
-          </div>
-          <button class="iconbtn" (click)="settingsOpen = !settingsOpen" title="Ajustes">⚙️</button>
+          <!-- Admin-only: Response Editor (studio) + settings gear. Non-admins see nothing. -->
+          <button class="iconbtn" *ngIf="admin.isAdmin()" (click)="studioOpen = !studioOpen" title="Response Editor">🎭</button>
+          <button class="iconbtn" *ngIf="admin.isAdmin()" (click)="settingsOpen = !settingsOpen" title="Ajustes">⚙️</button>
         </div>
       </header>
 
-      <!-- ============================== MAIN ============================== -->
-      <main class="main">
-        <!-- center stage -->
-        <section class="stage">
-          <div class="viewport" [class.pip]="pipActive()">
-            <div class="glow"></div>
-            <app-avatar-tts [avatarUrl]="avatarUrl" (rigReport)="onRigReport($event)"></app-avatar-tts>
-            <button class="pip-x" *ngIf="pipActive()" (click)="closeDetail(); closeMediaViewer()" title="Expandir avatar">⤢</button>
+      <!-- ===================== BASE LAYER: full-screen avatar ===================== -->
+      <!-- Canvas is resized via avatar-tts' ResizeObserver (camera aspect + renderer),
+           never recreated — the cached GLB, WebGL context, and avatar state persist. -->
+      <div class="viewport" [class.pip]="pipActive()">
+        <div class="glow"></div>
+        <app-avatar-tts [avatarUrl]="avatarUrl" (rigReport)="onRigReport($event)"></app-avatar-tts>
+        <button class="pip-x" *ngIf="pipActive()" (click)="closeDetail(); closeMediaViewer()" title="Expandir avatar">⤢</button>
+      </div>
 
-            <div class="statuspill" [ngSwitch]="conv.state()">
-              <ng-container *ngSwitchCase="'listening'">
-                <span class="wave"><i></i><i></i><i></i><i></i><i></i></span> Escuchando…
-              </ng-container>
-              <ng-container *ngSwitchCase="'sending'">
-                <span class="dots"><i></i><i></i><i></i></span> Pensando…
-              </ng-container>
-              <ng-container *ngSwitchCase="'waiting_llm'">
-                <span class="dots"><i></i><i></i><i></i></span> Pensando…
-              </ng-container>
-              <ng-container *ngSwitchCase="'speaking'">
-                <span class="spk"></span> {{ tts.bridging() ? '…' : 'Hablando…' }}
-              </ng-container>
-              <ng-container *ngSwitchCase="'error'">⚠️ Error</ng-container>
-              <ng-container *ngSwitchDefault>🕐 Esperando…</ng-container>
-            </div>
+      <!-- floating toasts (top-center) -->
+      <div class="toastwrap">
+        <div class="toast warn" *ngIf="tts.gestureWarnings().length">
+          <div *ngFor="let w of tts.gestureWarnings()">⚠️ {{ w }}</div>
+        </div>
+        <div class="toast err" *ngIf="tts.error()">⚠️ {{ tts.error() }}</div>
+      </div>
 
-            <div class="toast warn" *ngIf="tts.gestureWarnings().length">
-              <div *ngFor="let w of tts.gestureWarnings()">⚠️ {{ w }}</div>
-            </div>
-            <div class="toast err" *ngIf="tts.error()">⚠️ {{ tts.error() }}</div>
-          </div>
+      <!-- ===================== ADMIN STUDIO OVERLAY (hidden until opened) ===================== -->
+      <div class="studio-overlay" *ngIf="admin.isAdmin() && studioOpen">
+        <div class="studio-head">
+          <span class="studio-title">🎭 Studio</span>
+          <button class="iconbtn" (click)="studioOpen = false" title="Cerrar">✕</button>
+        </div>
 
-          <div class="microw">
-            <button class="ctl small" (click)="conv.interrupt()"
-                    [disabled]="conv.state() === 'idle'" title="Detener / interrumpir">⏹</button>
-            <button class="micbtn"
-                    [class.listening]="conv.state() === 'listening'"
-                    [class.processing]="conv.state() === 'sending' || conv.state() === 'waiting_llm'"
-                    (click)="micPress()" [disabled]="!stt.isSupported || conv.muted"
-                    [title]="micTitle()">
-              <span class="rings" *ngIf="conv.state() === 'listening'"></span>
-              <span class="spinner" *ngIf="conv.state() === 'sending' || conv.state() === 'waiting_llm'"></span>
-              🎤
-            </button>
-            <button class="ctl small" [class.active]="conv.muted" (click)="toggleMute()" title="Silenciar micrófono">
-              {{ conv.muted ? '🔇' : '🎙️' }}
-            </button>
-          </div>
-          <p class="stt-unsupported" *ngIf="!stt.isSupported">
-            Este navegador no soporta reconocimiento de voz — usa Chrome o Edge, o el Modo texto.
-          </p>
-
-          <!-- Preview Editor Panel — authors responses with inline gesture markup -->
-          <div class="preview-panel" [class.open]="previewMode">
+          <!-- Preview Editor Panel — admin-only, collapsed by default (previewMode=false). -->
+          <div class="preview-panel" *ngIf="admin.isAdmin()" [class.open]="previewMode">
             <button class="drawer-toggle preview-toggle" (click)="previewMode = !previewMode"
                     [class.active]="previewMode" title="Author and preview avatar responses with gesture markup">
               🎭 Response Editor {{ previewMode ? '▾' : '▸' }}
@@ -224,13 +188,19 @@ const CHIP_LABELS: Record<string, string> = {
               </div>
             </div>
           </div>
-        </section>
+      </div>
 
-        <!-- right: conversation feed -->
-        <aside class="chat">
+      <!-- ===================== FLOATING CHAT OVERLAY (upper-right, glass) ===================== -->
+      <aside class="chat floating">
           <div class="chat-head">
             <h2>Conversación</h2>
-            <button class="iconbtn" (click)="conv.clear()" [disabled]="!conv.messages().length" title="Limpiar conversación">🧹</button>
+            <div class="chat-head-ctl">
+              <!-- Icon-only content reload; tooltip shows last-updated; click runs the per-assistant sync. -->
+              <button class="reload-icon" *ngIf="ragMode" (click)="syncConvContent()" [disabled]="syncing()"
+                      [class.spin]="syncing()" [class.hot]="syncState() === 'changes'"
+                      [title]="syncTooltip()" aria-label="Recargar contenido">↻</button>
+              <button class="iconbtn-sm" (click)="conv.clear()" [disabled]="!conv.messages().length" title="Limpiar conversación">🧹</button>
+            </div>
           </div>
 
           <div class="feed" #feedEl (scroll)="onFeedScroll()">
@@ -251,9 +221,9 @@ const CHIP_LABELS: Record<string, string> = {
                   <span class="chip" *ngIf="seg.kind === 'chip' && showMarkup">{{ seg.value }}</span>
                 </ng-container>
                 <span class="cursor" *ngIf="isRevealing(m)">▍</span>
-                <button class="vermas" *ngIf="m.detail" (click)="openDetail(m)">Ver más detalles →</button>
-                <app-media-gallery *ngIf="m.media?.length" [media]="m.media!" mode="preview"
-                                   (openViewer)="openMediaViewer(m, $event)"></app-media-gallery>
+                <!-- Appears only when detail exists AND the typing/paint reveal of this message has finished. -->
+                <button class="vermas" *ngIf="canShowDetail(m)" (click)="openDetail(m)">Ver más</button>
+                <!-- Media is NOT shown inline (chat is text-only); it lives in the left "Contenido relacionado" panel. -->
                 <div class="botfoot">
                   <span class="meta" *ngIf="m.meta">{{ m.meta }}</span>
                   <button class="replay" *ngIf="m.replayable" (click)="replay(m.id)" title="Repetir (voz + gestos)">↻</button>
@@ -266,34 +236,85 @@ const CHIP_LABELS: Record<string, string> = {
             <div class="inline-err" *ngIf="stt.error()">{{ stt.error() }}</div>
           </div>
 
-          <!-- Suggested-prompt chips + content-sync row (RAG mode only) -->
-          <div class="conv-extras" *ngIf="ragMode">
-            <div class="chips" *ngIf="suggestedPrompts().length">
-              <button class="chip" *ngFor="let p of suggestedPrompts()" (click)="sendChip(p)"
-                      [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
-                      [title]="p.prompt">{{ p.label }}</button>
-            </div>
-            <div class="syncrow">
-              <span class="synced" *ngIf="lastSyncAt()">Contenido actualizado: {{ convLastSyncLabel() }}</span>
-              <span class="changes" *ngIf="syncState() === 'changes'">Hay cambios nuevos</span>
-              <button class="syncbtn" (click)="syncConvContent()" [disabled]="syncing()"
-                      [class.hot]="syncState() === 'changes'">
-                {{ syncing() ? 'Sincronizando…' : (syncState() === 'changes' ? 'Sincronizar' : 'Recargar contenido') }}
-              </button>
-            </div>
-          </div>
+      </aside>
 
-          <div class="chat-input">
-            <textarea rows="1" [(ngModel)]="convText" maxlength="1000"
-                      (keydown.enter)="onConvEnter($event)"
-                      [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
-                      placeholder="Escribe un mensaje…"></textarea>
-            <button class="send" (click)="sendTyped()"
-                    [disabled]="!convText.trim() || conv.state() === 'waiting_llm' || conv.state() === 'sending'"
-                    title="Enviar (Enter)">➤</button>
+      <!-- ===================== LEFT "CONTENIDO RELACIONADO" MEDIA PANEL ===================== -->
+      <!-- Compact, scrollable media history: newest carousel shown by default (auto-scrolled
+           to bottom), scroll up to revisit earlier responses' media. Hidden when empty. -->
+      <aside class="media-panel floating" *ngIf="mediaMessages().length">
+        <div class="media-head">
+          <h2>Contenido relacionado</h2>
+        </div>
+        <div class="media-feed" #mediaFeedEl>
+          <div class="media-entry" *ngFor="let m of mediaMessages(); trackBy: trackMsg">
+            <app-media-gallery [media]="m.media!" mode="preview"
+                               (openViewer)="openMediaViewer(m, $event)"></app-media-gallery>
           </div>
-        </aside>
-      </main>
+        </div>
+      </aside>
+
+      <!-- ===================== FLOATING BOTTOM CLUSTER (center, over avatar) ===================== -->
+      <div class="bottom-cluster">
+        <!-- status pill -->
+        <div class="statuspill" [ngSwitch]="conv.state()">
+          <ng-container *ngSwitchCase="'listening'">
+            <span class="wave"><i></i><i></i><i></i><i></i><i></i></span> Escuchando…
+          </ng-container>
+          <ng-container *ngSwitchCase="'sending'">
+            <span class="dots"><i></i><i></i><i></i></span> Pensando…
+          </ng-container>
+          <ng-container *ngSwitchCase="'waiting_llm'">
+            <span class="dots"><i></i><i></i><i></i></span> Pensando…
+          </ng-container>
+          <ng-container *ngSwitchCase="'speaking'">
+            <span class="spk"></span> {{ tts.bridging() ? '…' : 'Hablando…' }}
+          </ng-container>
+          <ng-container *ngSwitchCase="'error'">⚠️ Error</ng-container>
+          <ng-container *ngSwitchDefault>🕐 Esperando…</ng-container>
+        </div>
+
+        <!-- circular controls: Stop↔Repeat toggle / mic / mute -->
+        <div class="microw">
+          <!-- Speaking → Stop (clean halt + neutral pose). Otherwise → Repeat last response. -->
+          <button class="ctl small stop" *ngIf="conv.state() === 'speaking'"
+                  (click)="stopSpeech()" title="Detener voz">■</button>
+          <button class="ctl small" *ngIf="conv.state() !== 'speaking'"
+                  (click)="repeatLast()" [disabled]="!lastReplayable()" title="Repetir última respuesta">↻</button>
+          <button class="micbtn"
+                  [class.listening]="conv.state() === 'listening'"
+                  [class.processing]="conv.state() === 'sending' || conv.state() === 'waiting_llm'"
+                  (click)="micPress()" [disabled]="!stt.isSupported || conv.muted"
+                  [title]="micTitle()">
+            <span class="rings" *ngIf="conv.state() === 'listening'"></span>
+            <span class="spinner" *ngIf="conv.state() === 'sending' || conv.state() === 'waiting_llm'"></span>
+            🎤
+          </button>
+          <button class="ctl small" [class.active]="conv.muted" (click)="toggleMute()" title="Silenciar micrófono">
+            {{ conv.muted ? '🔇' : '🎙️' }}
+          </button>
+        </div>
+        <p class="stt-unsupported" *ngIf="!stt.isSupported">
+          Este navegador no soporta reconocimiento de voz — usa Chrome o Edge, o el Modo texto.
+        </p>
+
+        <!-- suggested-prompt chips -->
+        <div class="chips" *ngIf="ragMode && suggestedPrompts().length">
+          <button class="chip" *ngFor="let p of suggestedPrompts()" (click)="sendChip(p)"
+                  [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
+                  [title]="p.prompt">{{ p.label }}</button>
+        </div>
+
+        <!-- message input -->
+        <div class="chat-input">
+          <textarea rows="1" [(ngModel)]="convText" maxlength="1000"
+                    (keydown.enter)="onConvEnter($event)"
+                    [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
+                    [placeholder]="'Envía un mensaje a ' + assistantName() + '…'"></textarea>
+          <button class="send" (click)="sendTyped()"
+                  [disabled]="!convText.trim() || conv.state() === 'waiting_llm' || conv.state() === 'sending'"
+                  title="Enviar (Enter)">➤</button>
+        </div>
+      </div>
 
       <!-- ============================== FULL-SCREEN DETAIL ============================== -->
       <div class="detail-overlay" *ngIf="detailOpen() as dm">
@@ -305,8 +326,13 @@ const CHIP_LABELS: Record<string, string> = {
           <button class="do-x" (click)="closeDetail()" title="Cerrar">✕</button>
         </header>
         <div class="do-scroll">
+          <!-- STAGE 2 loading: detail is generated on demand when "Ver mas" is clicked. -->
+          <div class="do-loading" *ngIf="detailLoading()">
+            <span class="do-spin"></span> Generando el detalle...
+          </div>
+          <p class="do-err" *ngIf="detailError() && !detailLoading()">No se pudo generar el detalle: {{ detailError() }}</p>
           <!-- TEXT ONLY: media is handled separately via the chat carousel -->
-          <article class="do-text">
+          <article class="do-text" *ngIf="!detailLoading()">
             <p *ngFor="let p of detailParas()">{{ p }}</p>
           </article>
         </div>
@@ -326,6 +352,11 @@ const CHIP_LABELS: Record<string, string> = {
         </div>
 
         <h4>Proveedor LLM — {{ providerLabels[llm.settings().provider] }}</h4>
+        <label>Proveedor
+          <select [ngModel]="llm.settings().provider" (ngModelChange)="setLlmProvider($event)">
+            <option *ngFor="let p of providerIds" [value]="p">{{ providerLabels[p] }}</option>
+          </select>
+        </label>
         <label>Modelo
           <input type="text" [ngModel]="activeCfg.model" (ngModelChange)="setCfg('model', $event)" />
         </label>
@@ -361,6 +392,17 @@ const CHIP_LABELS: Record<string, string> = {
           <select [(ngModel)]="provider" (ngModelChange)="onProviderOrLangChange()">
             <option value="piper">Piper (local, neural)</option>
             <option value="webspeech">Web Speech (voces del SO)</option>
+          </select>
+        </label>
+        <label>Idioma
+          <select [ngModel]="lang" (ngModelChange)="setLang($event)">
+            <option value="es">Español (ES)</option>
+            <option value="en">English (EN)</option>
+          </select>
+        </label>
+        <label>Voz
+          <select [(ngModel)]="voiceId">
+            <option *ngFor="let v of piperVoices[lang]" [value]="v.id">{{ v.label }}</option>
           </select>
         </label>
 
@@ -416,18 +458,32 @@ const CHIP_LABELS: Record<string, string> = {
     :host { display: block; height: 100vh; }
     * { box-sizing: border-box; }
     .app {
-      height: 100%; display: flex; flex-direction: column;
+      position: relative; height: 100%; overflow: hidden;
       background: #0E0F13; color: #E8E9EE;
       font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
       --accent: #8B5CF6; --accent-soft: rgba(139, 92, 246, .18);
     }
-    .topbar {
-      display: flex; align-items: center; justify-content: space-between;
-      padding: 10px 18px; flex: none; border-bottom: 1px solid rgba(255,255,255,.06);
+    /* Floating top bar: faint gradient scrim for legibility, no solid bar. */
+    .topbar.floating {
+      position: absolute; top: 0; left: 0; right: 0; z-index: 20;
+      display: flex; align-items: flex-start; justify-content: space-between;
+      padding: 14px 18px 28px; pointer-events: none;
+      background: linear-gradient(to bottom, rgba(8,8,12,.55) 0%, rgba(8,8,12,.18) 55%, transparent 100%);
     }
-    .brand { display: flex; align-items: center; gap: 10px; font-size: 17px; font-weight: 700; letter-spacing: .3px; }
-    .brand .logo { width: 32px; height: 32px; display: grid; place-items: center; background: var(--accent-soft); border-radius: 10px; font-size: 16px; }
-    .brand em { color: var(--accent); font-style: normal; }
+    .topbar.floating .brand, .topbar.floating .topctl { pointer-events: auto; }
+    .brand { display: flex; align-items: center; gap: 11px; font-size: 17px; font-weight: 700; letter-spacing: .3px; }
+    .brandtext { display: flex; flex-direction: column; line-height: 1.15; }
+    .brandtext .name { font-size: 17px; font-weight: 700; color: #f3f0ff; text-shadow: 0 1px 6px rgba(0,0,0,.7); }
+    .status-line { font-size: 10.5px; letter-spacing: 1.2px; text-transform: uppercase; color: #b9b2d6;
+      font-family: 'JetBrains Mono', ui-monospace, monospace; text-shadow: 0 1px 4px rgba(0,0,0,.7);
+      display: flex; align-items: center; gap: 6px; margin-top: 2px; }
+    .dot-online { width: 7px; height: 7px; border-radius: 50%; background: #34d399; box-shadow: 0 0 7px #34d399; }
+    .backbtn {
+      width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(255,255,255,.14);
+      background: rgba(20,18,30,.45); backdrop-filter: blur(8px); color: #E8E9EE; cursor: pointer;
+      font-size: 18px; line-height: 1; display: grid; place-items: center; transition: background .15s; flex: none;
+    }
+    .backbtn:hover { background: rgba(40,36,60,.65); }
     .topctl { display: flex; align-items: center; gap: 10px; }
     .pill {
       display: flex; align-items: center; gap: 7px; padding: 6px 12px;
@@ -443,19 +499,24 @@ const CHIP_LABELS: Record<string, string> = {
     .lang b { color: #666; font-weight: 600; }
     .lang b.on { color: var(--accent); }
     .iconbtn {
-      width: 34px; height: 34px; border-radius: 10px; border: 1px solid rgba(255,255,255,.08);
-      background: rgba(255,255,255,.05); color: #E8E9EE; cursor: pointer; font-size: 15px;
+      width: 36px; height: 36px; border-radius: 50%; border: 1px solid rgba(255,255,255,.14);
+      background: rgba(20,18,30,.45); backdrop-filter: blur(8px); color: #E8E9EE; cursor: pointer; font-size: 15px;
       display: grid; place-items: center; transition: background .15s;
     }
-    .iconbtn:hover:not(:disabled) { background: rgba(255,255,255,.1); }
+    .iconbtn:hover:not(:disabled) { background: rgba(40,36,60,.65); }
     .iconbtn:disabled { opacity: .35; cursor: default; }
+    .iconbtn-sm {
+      width: 26px; height: 26px; border-radius: 50%; border: 1px solid rgba(255,255,255,.12);
+      background: rgba(255,255,255,.06); color: #cfd3dc; cursor: pointer; font-size: 12px;
+      display: grid; place-items: center; transition: background .15s; flex: none;
+    }
+    .iconbtn-sm:hover:not(:disabled) { background: rgba(255,255,255,.14); }
+    .iconbtn-sm:disabled { opacity: .35; cursor: default; }
 
-    .main { flex: 1; display: flex; gap: 16px; padding: 16px; min-height: 0; }
-    .stage { flex: 1.9; display: flex; flex-direction: column; min-width: 0; gap: 12px; }
+    /* BASE LAYER: avatar fills the entire screen, edge-to-edge. */
     .viewport {
-      flex: 1; position: relative; border-radius: 20px; overflow: hidden;
+      position: absolute; inset: 0; z-index: 1; overflow: hidden;
       background: radial-gradient(ellipse at 50% 30%, #1a1530 0%, #0a0a0f 70%);
-      border: 1px solid rgba(255,255,255,.06); min-height: 0;
     }
     .viewport app-avatar-tts { position: absolute; inset: 0; }
     .viewport ::ng-deep .canvas-container { background-color: transparent !important; }
@@ -484,6 +545,9 @@ const CHIP_LABELS: Record<string, string> = {
     .do-scroll { flex: 1; overflow-y: auto; padding: 24px 28px 120px; max-width: 980px; width: 100%; margin: 0 auto; }
     .do-text p { font-size: 15px; line-height: 1.7; color: #c7ccd6; margin: 0 0 16px; }
     .do-text p:first-child { color: #e6e8ee; }
+    .do-loading { display: flex; align-items: center; gap: 10px; color: #b9b2d6; font-size: 14px; padding: 8px 0; }
+    .do-spin { width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.18); border-top-color: #a78bfa; border-radius: 50%; animation: spin 1s linear infinite; }
+    .do-err { color: #fca5a5; font-size: 13.5px; }
     .glow {
       position: absolute; left: 50%; top: 38%; width: 480px; height: 480px;
       transform: translate(-50%, -50%); pointer-events: none; z-index: 1;
@@ -491,11 +555,11 @@ const CHIP_LABELS: Record<string, string> = {
       mix-blend-mode: screen;
     }
     .statuspill {
-      position: absolute; bottom: 16px; left: 50%; transform: translateX(-50%); z-index: 3;
-      display: flex; align-items: center; gap: 8px;
-      background: rgba(14,15,19,.75); backdrop-filter: blur(8px);
+      display: inline-flex; align-items: center; gap: 8px; align-self: center;
+      background: rgba(14,15,19,.7); backdrop-filter: blur(8px);
       border: 1px solid rgba(139,92,246,.35); color: #ddd;
-      padding: 8px 18px; border-radius: 999px; font-size: 13.5px; white-space: nowrap;
+      padding: 7px 16px; border-radius: 999px; font-size: 13px; white-space: nowrap;
+      box-shadow: 0 6px 20px rgba(0,0,0,.35);
     }
     .wave { display: inline-flex; gap: 2px; align-items: flex-end; height: 14px; }
     .wave i { width: 3px; background: var(--accent); border-radius: 2px; animation: wv 1s ease-in-out infinite; }
@@ -512,9 +576,11 @@ const CHIP_LABELS: Record<string, string> = {
     @keyframes dt { 30% { opacity: .25; transform: translateY(-3px); } }
     .spk { width: 9px; height: 9px; background: var(--accent); border-radius: 50%; animation: pulse 1s infinite; }
     @keyframes pulse { 50% { opacity: .4; } }
-    .toast { position: absolute; left: 14px; right: 14px; z-index: 3; padding: 9px 14px; border-radius: 10px; font-size: 12.5px; }
-    .toast.warn { top: 14px; background: rgba(160,120,20,.85); }
-    .toast.err { top: 14px; background: rgba(160,30,30,.88); }
+    .toastwrap { position: absolute; top: 64px; left: 50%; transform: translateX(-50%); z-index: 30;
+      width: min(560px, 82vw); display: flex; flex-direction: column; gap: 8px; pointer-events: none; }
+    .toast { padding: 9px 14px; border-radius: 10px; font-size: 12.5px; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
+    .toast.warn { background: rgba(160,120,20,.9); }
+    .toast.err { background: rgba(160,30,30,.92); }
 
     .microw { display: flex; align-items: center; justify-content: center; gap: 18px; flex: none; }
     .micbtn {
@@ -531,13 +597,15 @@ const CHIP_LABELS: Record<string, string> = {
     .spinner { position: absolute; inset: -2px; border-radius: 50%; pointer-events: none; border: 2px solid transparent; border-top-color: var(--accent); animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .ctl {
-      width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,.12);
-      background: rgba(255,255,255,.05); color: #ccc; font-size: 16px; cursor: pointer;
+      width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,.16);
+      background: rgba(20,18,30,.5); backdrop-filter: blur(8px); color: #e6e6ee; font-size: 16px; cursor: pointer;
       display: grid; place-items: center; transition: background .15s;
     }
-    .ctl:hover:not(:disabled) { background: rgba(255,255,255,.12); }
+    .ctl:hover:not(:disabled) { background: rgba(40,36,60,.7); }
     .ctl:disabled { opacity: .35; cursor: default; }
     .ctl.active { background: #b33939; border-color: #b33939; color: #fff; }
+    .ctl.stop { background: rgba(179,57,57,.85); border-color: #c0392b; color: #fff; }
+    .ctl.stop:hover:not(:disabled) { background: #c0392b; }
     .stt-unsupported { text-align: center; color: #d9a440; font-size: 12px; margin: -6px 0 0; }
 
     .drawer { flex: none; }
@@ -564,8 +632,20 @@ const CHIP_LABELS: Record<string, string> = {
     }
     .ghost.accent:hover:not(:disabled) { background: rgba(139,92,246,.3); }
 
+    /* ---- Admin Studio overlay (floating, hidden until opened) ---- */
+    .studio-overlay {
+      position: absolute; left: 16px; bottom: 16px; z-index: 25;
+      width: min(380px, 90vw); max-height: 82vh; overflow-y: auto;
+      display: flex; flex-direction: column; gap: 8px; padding: 12px 14px;
+      background: rgba(16,15,24,.86); backdrop-filter: blur(18px);
+      border: 1px solid rgba(139,92,246,.3); border-radius: 16px;
+      box-shadow: 0 18px 50px rgba(0,0,0,.6);
+    }
+    .studio-head { display: flex; align-items: center; justify-content: space-between; }
+    .studio-title { font-size: 13px; font-weight: 700; color: #c4b0f7; letter-spacing: .3px; }
+
     /* ---- Preview Editor Panel ---- */
-    .preview-panel { flex: none; border-top: 1px solid rgba(139,92,246,.2); padding-top: 6px; margin-top: 4px; }
+    .preview-panel { flex: none; }
     .preview-toggle { color: #9b87c4 !important; }
     .preview-toggle:hover { color: #c4b0f7 !important; }
     .preview-toggle.active { color: var(--accent) !important; font-weight: 600; }
@@ -600,20 +680,58 @@ const CHIP_LABELS: Record<string, string> = {
     .cmd-textarea:focus { outline: none; }
     .cmd-copy { margin-top: 2px; flex: none; }
 
-    .chat {
-      flex: 1; min-width: 300px; max-width: 420px; display: flex; flex-direction: column;
-      background: rgba(255,255,255,.035); backdrop-filter: blur(14px);
-      border: 1px solid rgba(255,255,255,.07); border-radius: 20px; overflow: hidden;
+    /* Floating, semi-transparent full-height chat panel anchored on the right. */
+    .chat.floating {
+      position: absolute; top: 74px; right: 16px; bottom: 24px; z-index: 15;
+      width: 340px; max-width: 38vw;
+      display: flex; flex-direction: column; overflow: hidden;
+      background: rgba(14,13,22,.42); backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,.12); border-radius: 18px;
+      box-shadow: 0 16px 48px rgba(0,0,0,.5);
     }
-    .chat-head { display: flex; align-items: center; justify-content: space-between; padding: 14px 16px; border-bottom: 1px solid rgba(255,255,255,.06); flex: none; }
-    .chat-head h2 { margin: 0; font-size: 15px; font-weight: 600; }
-    .feed { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 10px; }
-    .empty { margin: auto; color: #667; font-size: 14px; }
-    .bubble { max-width: 92%; padding: 9px 13px; border-radius: 14px; font-size: 13.5px; line-height: 1.55; }
-    .bubble.user { align-self: flex-end; background: rgba(139,92,246,.16); border: 1px solid rgba(139,92,246,.25); border-bottom-right-radius: 4px; color: #e6defc; }
-    .bubble.user.interimb { opacity: .55; font-style: italic; }
-    .bubble.bot { align-self: flex-start; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.08); border-bottom-left-radius: 4px; color: #dfe2ea; }
-    .bubble.bot.streaming { opacity: .65; }
+    /* Compact, semi-transparent media history panel anchored on the left. */
+    .media-panel.floating {
+      position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 15;
+      width: 248px; max-width: 26vw; max-height: 56vh;
+      display: flex; flex-direction: column; overflow: hidden;
+      background: rgba(14,13,22,.42); backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,.12); border-radius: 18px;
+      box-shadow: 0 16px 48px rgba(0,0,0,.5);
+    }
+    .media-head { padding: 10px 13px; border-bottom: 1px solid rgba(255,255,255,.08); flex: none; }
+    .media-head h2 { margin: 0; font-size: 12.5px; font-weight: 600; color: #eceaf6; text-shadow: 0 1px 4px rgba(0,0,0,.6); }
+    .media-feed { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+    .media-entry { flex: none; }
+    /* Themed scrollbar: transparent track, blue outline (media + chat feeds). */
+    .media-feed::-webkit-scrollbar, .feed::-webkit-scrollbar { width: 8px; }
+    .media-feed::-webkit-scrollbar-track, .feed::-webkit-scrollbar-track { background: transparent; }
+    .media-feed::-webkit-scrollbar-thumb, .feed::-webkit-scrollbar-thumb {
+      background: transparent; border: 1px solid rgba(96,165,250,.7); border-radius: 999px;
+    }
+    .media-feed::-webkit-scrollbar-thumb:hover, .feed::-webkit-scrollbar-thumb:hover { border-color: rgba(96,165,250,1); }
+    .media-feed, .feed { scrollbar-width: thin; scrollbar-color: rgba(96,165,250,.7) transparent; }
+    .chat-head { display: flex; align-items: center; justify-content: space-between; padding: 11px 14px; border-bottom: 1px solid rgba(255,255,255,.08); flex: none; }
+    .chat-head h2 { margin: 0; font-size: 13.5px; font-weight: 600; color: #eceaf6; text-shadow: 0 1px 4px rgba(0,0,0,.6); }
+    .chat-head-ctl { display: flex; align-items: center; gap: 8px; }
+    .reload-icon {
+      width: 26px; height: 26px; border-radius: 50%; flex: none; cursor: pointer; font-size: 13px;
+      display: grid; place-items: center; transition: background .15s, color .15s, border-color .15s;
+      background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.12); color: #c7ccd6;
+    }
+    .reload-icon:hover:not(:disabled) { background: rgba(255,255,255,.12); color: #fff; }
+    .reload-icon:disabled { opacity: .55; cursor: default; }
+    .reload-icon.hot { background: rgba(240,198,116,.18); border-color: rgba(240,198,116,.55); color: #f0c674; }
+    .reload-icon.spin { animation: spin 1s linear infinite; }
+    .feed { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 9px; }
+    .empty { margin: auto; color: #9aa; font-size: 13px; text-align: center; text-shadow: 0 1px 4px rgba(0,0,0,.6); }
+    /* New messages fade in (stream-chat feel). Legible over a variable 3D backdrop. */
+    .bubble { max-width: 92%; padding: 8px 12px; border-radius: 13px; font-size: 13px; line-height: 1.5;
+      text-shadow: 0 1px 3px rgba(0,0,0,.5); animation: bubblein .35s ease both; }
+    @keyframes bubblein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
+    .bubble.user { align-self: flex-end; background: rgba(139,92,246,.42); border: 1px solid rgba(160,120,255,.45); border-bottom-right-radius: 4px; color: #f1ecff; }
+    .bubble.user.interimb { opacity: .6; font-style: italic; }
+    .bubble.bot { align-self: flex-start; background: rgba(18,16,28,.62); border: 1px solid rgba(255,255,255,.14); border-bottom-left-radius: 4px; color: #eef0f6; }
+    .bubble.bot.streaming { opacity: .7; }
     .bubble.bot.karaoke {
       background: linear-gradient(100deg, rgba(139,92,246,.22) 30%, rgba(139,92,246,.06) 60%, rgba(139,92,246,.22) 90%);
       background-size: 220% 100%; animation: karaoke 2.2s linear infinite;
@@ -639,14 +757,21 @@ const CHIP_LABELS: Record<string, string> = {
     }
     .bubble.bot:hover .replay { opacity: 1; }
     .replay:hover { background: rgba(139,92,246,.35); }
-    .vermas { display: inline-block; margin-top: 8px; padding: 7px 13px; border-radius: 9px; cursor: pointer;
-      background: var(--accent, #8b5cf6); border: 1px solid var(--accent, #8b5cf6); color: #fff; font-size: 12.5px; font-weight: 600; }
-    .vermas:hover { background: #7c4ff0; }
-    .conv-extras { flex: none; padding: 8px 12px 0; display: flex; flex-direction: column; gap: 6px; }
-    .chips { display: flex; flex-wrap: wrap; gap: 6px; }
-    .chip { background: rgba(139,92,246,.16); border: 1px solid rgba(139,92,246,.4); color: #cbb8f8;
-      border-radius: 999px; padding: 5px 11px; font-size: 12px; cursor: pointer; white-space: nowrap; }
-    .chip:hover:not(:disabled) { background: rgba(139,92,246,.3); }
+    /* Bootstrap outline-success: green outline, transparent bg, green text, fill on hover. Compact. */
+    .vermas { display: inline-block; margin-top: 7px; padding: 3px 11px; border-radius: 6px; cursor: pointer;
+      background: transparent; border: 1px solid #22c55e; color: #4ade80; font-size: 11.5px; font-weight: 600;
+      line-height: 1.5; transition: background .15s, color .15s; }
+    .vermas:hover { background: #22c55e; color: #062b14; }
+    /* Floating bottom cluster: status pill + mic + chips + input, centered over avatar. */
+    .bottom-cluster {
+      position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 15;
+      width: min(680px, 92vw); display: flex; flex-direction: column; align-items: center; gap: 12px;
+    }
+    .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
+    .chip { background: rgba(20,18,30,.5); backdrop-filter: blur(8px); border: 1px solid rgba(160,120,255,.4); color: #d6c9fb;
+      border-radius: 999px; padding: 6px 14px; font-size: 12px; cursor: pointer; white-space: nowrap;
+      text-shadow: 0 1px 3px rgba(0,0,0,.5); font-family: 'JetBrains Mono', ui-monospace, monospace; }
+    .chip:hover:not(:disabled) { background: rgba(139,92,246,.4); }
     .chip:disabled { opacity: .45; cursor: default; }
     .syncrow { display: flex; align-items: center; gap: 10px; font-size: 11px; color: #6b7384; flex-wrap: wrap; }
     .synced { color: #8b93a3; }
@@ -656,15 +781,19 @@ const CHIP_LABELS: Record<string, string> = {
     .syncbtn:hover:not(:disabled) { background: rgba(255,255,255,.1); }
     .syncbtn:disabled { opacity: .5; cursor: default; }
     .syncbtn.hot { background: rgba(240,198,116,.18); border-color: rgba(240,198,116,.5); color: #f0c674; }
+    /* Floating input pill, full width of the bottom cluster. */
     .chat-input {
-      flex: none; display: flex; gap: 8px; align-items: flex-end;
-      padding: 10px 12px; border-top: 1px solid rgba(255,255,255,.06);
+      width: 100%; display: flex; gap: 8px; align-items: flex-end;
+      padding: 7px 7px 7px 16px; border-radius: 26px;
+      background: rgba(14,13,22,.5); backdrop-filter: blur(16px);
+      border: 1px solid rgba(255,255,255,.14); box-shadow: 0 12px 36px rgba(0,0,0,.45);
     }
     .chat-input textarea {
-      flex: 1; resize: none; min-height: 36px; max-height: 100px;
-      background: rgba(255,255,255,.05); color: #E8E9EE; border: 1px solid rgba(255,255,255,.1);
-      border-radius: 12px; padding: 8px 12px; font-size: 13px; line-height: 1.4;
+      flex: 1; resize: none; min-height: 26px; max-height: 110px;
+      background: transparent; color: #E8E9EE; border: none; outline: none;
+      padding: 6px 0; font-size: 13.5px; line-height: 1.45;
     }
+    .chat-input textarea::placeholder { color: #8b8ba0; }
     .chat-input textarea:disabled { opacity: .5; }
     .send {
       flex: none; width: 38px; height: 38px; border-radius: 50%; border: none;
@@ -724,9 +853,17 @@ const CHIP_LABELS: Record<string, string> = {
     .manual-label { margin-top: 4px; }
     code { background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
 
+    /* Keep overlays clear of the avatar's face on smaller windows. */
     @media (max-width: 900px) {
-      .main { flex-direction: column; }
-      .chat { max-width: none; min-height: 220px; }
+      .chat.floating { width: 42vw; max-width: 42vw; top: 66px; bottom: 96px; }
+      .media-panel.floating { width: 30vw; max-width: 30vw; max-height: 44vh; }
+      .bottom-cluster { width: 94vw; bottom: 12px; }
+      .studio-overlay { width: 92vw; }
+    }
+    @media (max-width: 560px) {
+      /* Side panels would crowd the face: chat becomes a short top overlay, media hidden. */
+      .chat.floating { width: calc(100vw - 24px); max-width: none; left: 12px; right: 12px; top: 60px; bottom: auto; height: 30vh; }
+      .media-panel.floating { display: none; }
     }
   `]
 })
@@ -739,9 +876,11 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
     public catalog = inject(AvatarCatalogService);
     public rag = inject(RagAvatarService);
     public assistantSvc = inject(AssistantConfigService);
+    public admin = inject(AdminService);
     private store = inject(MotionStoreService);
     private player = inject(GesturePlayerService);
     private route = inject(ActivatedRoute);
+    private router = inject(Router);
     private avatarMgr = inject(AvatarManagerService);
     private avatars = inject(AvatarService);
     private convContent = inject(ConversationContentService);
@@ -752,8 +891,14 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
     syncState = signal<'in-sync' | 'changes'>('in-sync');
     syncing = signal<boolean>(false);
 
-    // Full-screen detail view ("Ver más detalles") + PiP avatar.
+    // Full-screen detail view ("Ver mas") + PiP avatar.
     detailOpen = signal<ConvMessage | null>(null);
+    // Resolved detail text shown in the overlay (fetched on demand in stage 2).
+    detailText = signal<string>('');
+    // True while the on-demand detail (stage 2) is being generated.
+    detailLoading = signal<boolean>(false);
+    // Error from the on-demand detail call (shown in the overlay).
+    detailError = signal<string>('');
     // Full-screen image-only viewer (root-level overlay).
     mediaViewer = signal<{ media: MediaItem[]; index: number } | null>(null);
 
@@ -765,12 +910,79 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
     }
     closeMediaViewer(): void { this.mediaViewer.set(null); }
 
-    openDetail(m: ConvMessage): void {
-        // Setting this shrinks .viewport to PiP via CSS; avatar-tts' ResizeObserver
-        // resizes the existing canvas (camera aspect + renderer) -- no GLB reload.
-        this.detailOpen.set(m);
+    /** Assistant messages that carry media, oldest→newest (newest rendered at the bottom). */
+    mediaMessages(): ConvMessage[] {
+        return this.conv.messages().filter((m) => m.role === 'assistant' && !!m.media?.length);
     }
-    closeDetail(): void { this.detailOpen.set(null); }
+    trackMsg = (_: number, m: ConvMessage) => m.id;
+
+    /** Stop button: cleanly halt audio + speech animation; avatar returns to neutral pose. */
+    stopSpeech(): void { this.conv.interrupt(); }
+
+    /** Most recent replayable assistant message, if any (drives the Repeat toggle). */
+    private lastReplayableMsg(): ConvMessage | null {
+        const ms = this.conv.messages();
+        for (let i = ms.length - 1; i >= 0; i--) {
+            if (ms[i].role === 'assistant' && ms[i].replayable) return ms[i];
+        }
+        return null;
+    }
+    lastReplayable(): boolean { return !!this.lastReplayableMsg(); }
+
+    /** Repeat button: replay the last response (voice + gestures). */
+    repeatLast(): void {
+        const m = this.lastReplayableMsg();
+        if (m) void this.replay(m.id);
+    }
+
+    /** True when "Ver mas" should show: a detail exists OR can be fetched, and typing finished. */
+    canShowDetail(m: ConvMessage): boolean {
+        return (!!m.detail || !!m.detailAvailable) && !this.isRevealing(m);
+    }
+
+    /**
+     * Open the detail overlay. STAGE 2: if the detail is not cached yet, fetch it
+     * on demand (mode 'detail', reusing the stage-1 chunk ids) and cache it on the
+     * message so a second "Ver mas" does not re-call the LLM. Setting detailOpen
+     * shrinks .viewport to PiP via CSS; the avatar-tts ResizeObserver resizes the
+     * existing canvas (camera aspect + renderer) -- no GLB reload.
+     */
+    async openDetail(m: ConvMessage): Promise<void> {
+        this.detailOpen.set(m);
+        this.detailError.set('');
+        const cached = (m.detail ?? '').trim();
+        if (cached) { this.detailText.set(cached); return; }
+        if (!m.detailAvailable) { this.detailText.set(m.content); return; } // no detail to fetch
+        this.detailText.set('');
+        this.detailLoading.set(true);
+        try {
+            const q = (m.srcQuery && m.srcQuery.trim()) ? m.srcQuery : this.detailTitle();
+            const resp = await this.rag.ask(q, {
+                assistantId: this.assistantId,
+                namespace: this.assistant()?.ragCollection,
+                language: this.lang,
+                voice: this.voiceId,
+                mode: 'detail',
+                chunkIds: m.sourceIds,
+            });
+            const text = (resp.detail || resp.body || '').trim();
+            if (this.detailOpen()?.id !== m.id) return; // overlay changed while loading
+            m.detail = text;                 // cache on the message (no re-call next time)
+            this.detailText.set(text || m.content);
+        } catch (e: any) {
+            if (this.detailOpen()?.id !== m.id) return;
+            this.detailError.set(e?.message ?? String(e));
+            this.detailText.set(m.content);  // fall back to the spoken summary
+        } finally {
+            this.detailLoading.set(false);
+        }
+    }
+    closeDetail(): void {
+        this.detailOpen.set(null);
+        this.detailText.set('');
+        this.detailError.set('');
+        this.detailLoading.set(false);
+    }
 
     /** Title of the detail view = the user question that produced this answer. */
     detailTitle(): string {
@@ -784,11 +996,10 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
         return 'Detalle';
     }
 
-    /** Detail text split into paragraphs (falls back to the summary content). */
+    /** Detail paragraphs from the resolved (on-demand) detail text. */
     detailParas(): string[] {
-        const m = this.detailOpen();
-        if (!m) return [];
-        const src = (m.detail && m.detail.trim()) ? m.detail : m.content;
+        const src = this.detailText();
+        if (!src) return [];
         return src.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
     }
 
@@ -807,14 +1018,17 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
 
     @ViewChild('feedEl') feedEl?: ElementRef<HTMLDivElement>;
     @ViewChild('previewTextareaEl') previewTextareaEl?: ElementRef<HTMLTextAreaElement>;
+    @ViewChild('mediaFeedEl') mediaFeedEl?: ElementRef<HTMLDivElement>;
     private stickToBottom = true;
     private lastMsgCount = 0;
+    private lastMediaCount = 0;
 
     // manual text mode
     text = '';
     textMode = false;
 
-    // preview editor mode
+    // preview editor mode (admin studio)
+    studioOpen = false;     // floating Studio overlay (Response Editor + manual mode); hidden by default
     previewMode = false;
     previewText = '';
     previewGestureId = '';
@@ -838,6 +1052,37 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
     providerIds: LlmProviderId[] = ['ollama', 'openai', 'gemini', 'anthropic', 'deepseek'];
 
     // ------------------------------------------------------------ ui helpers
+
+    /** Header title = current assistant's name; graceful fallback when none is set. */
+    assistantName(): string {
+        const a = this.assistant();
+        return (a?.name && a.name.trim()) || a?.id || 'Avatar';
+    }
+
+    /** 1–2 letter initials chip for the header, derived from the assistant name. */
+    assistantInitials(): string {
+        const name = this.assistantName();
+        const parts = name.trim().split(/\s+/).filter(Boolean);
+        const letters = parts.length >= 2 ? parts[0][0] + parts[1][0] : name.slice(0, 2);
+        return letters.toUpperCase();
+    }
+
+    /** Back arrow -> assistants list. */
+    goBack(): void { void this.router.navigate(['/assistants']); }
+
+    /** Language change from the settings slideover (replaces the removed navbar toggle). */
+    setLang(l: TtsLang): void {
+        this.lang = l;
+        this.onProviderOrLangChange();
+    }
+
+    /** Tooltip for the top-of-chat reload icon: last-updated, or sync/changes state. */
+    syncTooltip(): string {
+        if (this.syncing()) return 'Sincronizando…';
+        if (this.syncState() === 'changes') return 'Hay cambios nuevos — clic para sincronizar';
+        const at = this.convLastSyncLabel();
+        return at ? `Contenido actualizado: ${at}` : 'Recargar contenido';
+    }
 
     private opts() {
         return { provider: this.provider, lang: this.lang, voiceId: this.voiceId };
@@ -980,7 +1225,7 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
         this.ragError.set('');
         if (on) {
             await this.reloadAssistant();
-            this.conv.ragFetcher = (q: string) =>
+            this.conv.ragFetcher = (q: string, mode?: 'rag' | 'capabilities') =>
                 this.rag.ask(q, {
                     assistantId: this.assistantId,
                     // namespace hint from the loaded assistant config; the Function
@@ -988,6 +1233,8 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
                     namespace: this.assistant()?.ragCollection,
                     language: this.lang,
                     voice: this.voiceId,
+                    // 'capabilities' -> metadata-only answer (no RAG retrieval).
+                    mode,
                 });
             // Intent router: greetings answered instantly (no RAG); info queries
             // go to the namespace. Per-assistant lists/reply override the defaults;
@@ -996,6 +1243,7 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
             this.conv.greetingResponse = a?.greetingResponse ?? null;
             this.conv.greetingKeywords = a?.greetingKeywords ?? undefined;
             this.conv.farewellKeywords = (a as any)?.farewellKeywords ?? undefined;
+            this.conv.capabilityKeywords = (a as any)?.capabilityKeywords ?? undefined;
             this.conv.queryVerbs = a?.queryVerbs ?? undefined;
             this.conv.intentClassifier = (q: string) => this.llm.classifyIntent(q);
             // Load per-assistant conversational content (cache -> change-detect).
@@ -1006,8 +1254,10 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
             this.conv.greetings = [];
             this.conv.farewells = [];
             this.conv.infoAcks = [];
+            this.conv.capabilitiesAnswer = '';
             this.conv.greetingKeywords = undefined;
             this.conv.farewellKeywords = undefined;
+            this.conv.capabilityKeywords = undefined;
             this.conv.queryVerbs = undefined;
             this.conv.intentClassifier = null;
             this.suggestedPrompts.set([]);
@@ -1038,6 +1288,9 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
         this.conv.greetings = c.greetings.map((g) => g.text);
         this.conv.farewells = c.farewells.map((f) => f.text);
         this.conv.infoAcks = c.infoAcknowledgements.map((i) => i.text);
+        // Resolved (custom-or-global) pre-written capabilities answer. Empty -> the
+        // capabilities intent falls back to chatRag capabilities mode (metadata-only).
+        this.conv.capabilitiesAnswer = (c.capabilities?.answer ?? '').trim();
         this.suggestedPrompts.set(c.suggestedPrompts);
     }
 
@@ -1128,12 +1381,20 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
 
     ngAfterViewChecked() {
         const el = this.feedEl?.nativeElement;
-        if (!el) return;
-        const count = this.conv.messages().length + (this.conv.streaming() ? 1 : 0) + (this.stt.interim() ? 1 : 0);
-        if (count !== this.lastMsgCount && this.stickToBottom) {
-            el.scrollTop = el.scrollHeight;
+        if (el) {
+            const count = this.conv.messages().length + (this.conv.streaming() ? 1 : 0) + (this.stt.interim() ? 1 : 0);
+            if (count !== this.lastMsgCount && this.stickToBottom) {
+                el.scrollTop = el.scrollHeight;
+            }
+            this.lastMsgCount = count;
         }
-        this.lastMsgCount = count;
+        // Media history: auto-scroll to the newest carousel when new media arrives.
+        const mEl = this.mediaFeedEl?.nativeElement;
+        const mCount = this.mediaMessages().length;
+        if (mEl && mCount !== this.lastMediaCount) {
+            mEl.scrollTop = mEl.scrollHeight;
+        }
+        this.lastMediaCount = mCount;
     }
 
     // ------------------------------------------------------------ manual mode
@@ -1152,6 +1413,9 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
     // --------------------------------------------------------- avatar catalog
 
     async ngOnInit(): Promise<void> {
+        // Resolve admin status for UI gating (gear + Response Editor). UX only —
+        // real enforcement is server-side in rules/callables.
+        void this.admin.check();
         // Resolve preview thumbnails (best-effort; missing → person-icon fallback).
         for (const a of this.catalog.catalog()) {
             this.catalog.resolveThumbnailUrl(a)

@@ -65,8 +65,15 @@ export interface ConvMessage {
     tailGesture?: string;
     /** RAG informational mode: media references attached to this answer (lazy-fetched). */
     media?: MediaItem[];
-    /** RAG: full long-form detail shown on "Ver mas" (NOT spoken). Empty -> hide. */
+    /** RAG: full long-form detail shown on "Ver mas" (NOT spoken). Empty -> hide.
+     *  With the two-stage flow this is filled lazily AFTER the user clicks "Ver mas". */
     detail?: string;
+    /** RAG stage-1: true when a detail CAN be fetched on demand (chunks exist). */
+    detailAvailable?: boolean;
+    /** RAG stage-1: chunk ids (from sources) reused by the on-demand detail call. */
+    sourceIds?: string[];
+    /** RAG stage-1: the user question, reused by the on-demand detail call. */
+    srcQuery?: string;
 }
 
 export interface ConvTtsOpts {
@@ -102,8 +109,10 @@ export class ConversationService {
      *  Set from the Response Editor tail dropdown before each live turn. */
     public liveTailGesture: WritableSignal<string> = signal('');
     /** When set (Text-Avatar RAG/informational mode), every turn is answered by
-     *  the Cloud Function via this fetcher instead of the client LLM. null = LLM. */
-    public ragFetcher: ((q: string) => Promise<RagResponse>) | null = null;
+     *  the Cloud Function via this fetcher instead of the client LLM. null = LLM.
+     *  The optional `mode` selects the Function answer mode: undefined/'rag' =
+     *  normal retrieval; 'capabilities' = fast metadata-only answer (no RAG). */
+    public ragFetcher: ((q: string, mode?: 'rag' | 'capabilities') => Promise<RagResponse>) | null = null;
 
     // ---- Intent router (greeting/farewell vs RAG query). Active only in RAG mode. ----
     /** Cached greeting phrases (random non-repeating pick). Falls back to greetingResponse. */
@@ -112,12 +121,17 @@ export class ConversationService {
     public farewells: string[] = [];
     /** Cached info-acknowledgement fillers spoken right before a RAG call. */
     public infoAcks: string[] = [];
+    /** Resolved (custom-or-global) pre-written capabilities/purpose answer. When
+     *  non-empty, the capabilities intent speaks it DIRECTLY with no chatRag call. */
+    public capabilitiesAnswer = '';
     /** Legacy single greeting reply (fallback when `greetings` is empty). */
     public greetingResponse: string | null = null;
     /** Per-assistant extra greeting triggers, merged with the global defaults. */
     public greetingKeywords: string[] | undefined;
     /** Per-assistant extra farewell triggers, merged with the global defaults. */
     public farewellKeywords: string[] | undefined;
+    /** Per-assistant extra capability triggers, merged with the global defaults. */
+    public capabilityKeywords: string[] | undefined;
     /** Per-assistant extra query verbs, merged with the global defaults. */
     public queryVerbs: string[] | undefined;
     /** Optional lightweight LLM fallback used ONLY when local classification is
@@ -216,6 +230,7 @@ export class ConversationService {
         let intent: Intent = classifyIntentLocal(text, {
             greetingKeywords: this.greetingKeywords,
             farewellKeywords: this.farewellKeywords,
+            capabilityKeywords: this.capabilityKeywords,
             queryVerbs: this.queryVerbs,
         });
         if (intent === 'ambiguous') {
@@ -229,6 +244,19 @@ export class ConversationService {
         }
         if (intent === 'farewell') {
             await this.speakInstant(text, this.pickFarewell(opts), 'despedida', opts);
+            return;
+        }
+        // Capabilities/purpose. Resolution order:
+        //  (a) a pre-written answer (custom-or-global) -> speak directly, NO chatRag.
+        //  (b) else -> chatRag capabilities mode (metadata-only; server may use a
+        //      custom prompt template). RAG retrieval is never used in either path.
+        if (intent === 'capabilities') {
+            const answer = (this.capabilitiesAnswer || '').trim();
+            if (answer) {
+                await this.speakInstant(text, answer, 'capacidades', opts);
+            } else {
+                await this.runRagTurn(text, (q) => fetcher(q, 'capabilities'), opts);
+            }
             return;
         }
         // Info query -> optional infoAck filler spoken first, then the real RAG answer.
@@ -366,10 +394,18 @@ export class ConversationService {
             for (const w of sane.warnings) console.warn('[rag-sanitizer]', w);
             const finalText = sane.text;
 
+            // Two-stage detail: stage-1 returns NO detail. If one is already inline
+            // (e.g. capabilities mode), keep it; otherwise mark detail as fetchable
+            // and stash the chunk ids + question for the on-demand stage-2 call.
+            const inlineDetail = ((payload as any).detail || '').trim();
+            const srcIds = (payload.sources || []).map((s: any) => s?.id).filter((x: any): x is string => !!x);
             const assistantMsg = this.push({
                 role: 'assistant', content: finalText, at: Date.now(),
                 meta: 'RAG', replayable: true, media: payload.media,
-                detail: (payload as any).detail || undefined, // full text for "Ver mas"
+                detail: inlineDetail || undefined,
+                detailAvailable: !inlineDetail && srcIds.length > 0,
+                sourceIds: srcIds.length ? srcIds : undefined,
+                srcQuery: query,
                 leadGesture: leadId || undefined, tailGesture: this.liveTailGesture() || undefined,
             });
             this.setState('speaking');

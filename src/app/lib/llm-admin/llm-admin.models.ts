@@ -45,11 +45,24 @@ export const PROVIDER_LABELS: Record<LlmProviderId, string> = {
   'gemini-api': 'Gemini (API key)',
 };
 
-/** Sensible model suggestions per provider (free-text field; not enforced). */
+/**
+ * Curated FALLBACK model suggestions per provider (used only when live listing is
+ * unavailable). Free-text entry is always allowed, and the live list (when a key
+ * exists) overrides these. Keep generateContent/chat-capable models ONLY.
+ * NOTE: gemini-1.5-* and gemini-2.0-* are intentionally removed (shut down).
+ */
 export const MODEL_SUGGESTIONS: Record<LlmProviderId, string[]> = {
-  openai: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini'],
+  openai: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'],
   deepseek: ['deepseek-chat', 'deepseek-reasoner'],
-  'gemini-api': ['gemini-1.5-flash', 'gemini-1.5-pro', 'gemini-2.0-flash'],
+  'gemini-api': [
+    'gemini-flash-latest',
+    'gemini-2.5-flash',
+    'gemini-2.5-flash-lite',
+    'gemini-2.5-pro',
+    'gemini-3.5-flash',
+    'gemini-3.1-flash-lite',
+    'gemini-3.1-pro-preview',
+  ],
 };
 
 export interface TestConnectionResult {

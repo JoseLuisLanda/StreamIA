@@ -161,6 +161,9 @@ export class AssistantConfigService {
         ragCollection: ns,
         ragNamespace: ns,
         llmProfileId: cfg.llmProfileId ?? null,
+        // Per-stage profile overrides (empty -> use global default / legacy).
+        summaryProfileId: cfg.summaryProfileId ?? null,
+        detailProfileId: cfg.detailProfileId ?? null,
         // New docs are stamped at the current schema with all fields present.
         schemaVersion: ASSISTANT_SCHEMA_VERSION,
         useCustomResponses: cfg.useCustomResponses ?? {
@@ -229,6 +232,8 @@ export class AssistantConfigService {
       ragCollection: data.ragCollection ?? data.ragNamespace ?? id,
       ragNamespace: data.ragNamespace ?? data.ragCollection ?? id,
       llmProfileId: data.llmProfileId ?? undefined,
+      summaryProfileId: data.summaryProfileId ?? undefined,
+      detailProfileId: data.detailProfileId ?? undefined,
       useCustomResponses: data.useCustomResponses ?? undefined,
       systemPrompt: data.systemPrompt,
       greetingResponse: data.greetingResponse,

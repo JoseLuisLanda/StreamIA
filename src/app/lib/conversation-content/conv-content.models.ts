@@ -27,18 +27,49 @@ export interface UseCustomResponses {
   infoAcknowledgements: boolean;
   farewells: boolean;
   suggestedPrompts: boolean;
+  /**
+   * Capabilities/purpose answer. true => use this assistant's own capabilities
+   * config (capabilities.answer / capabilities.promptTemplate); false/absent =>
+   * use the global default. Optional so existing literals stay valid.
+   */
+  capabilities?: boolean;
 }
 
 export function defaultUseCustom(): UseCustomResponses {
-  return { greetings: false, infoAcknowledgements: false, farewells: false, suggestedPrompts: false };
+  return { greetings: false, infoAcknowledgements: false, farewells: false, suggestedPrompts: false, capabilities: false };
 }
 
 export function normalizeUseCustom(v: any): UseCustomResponses {
   const d = defaultUseCustom();
   if (v && typeof v === 'object') {
     for (const k of CONV_KINDS) (d as any)[k] = v[k] === true;
+    d.capabilities = v['capabilities'] === true;
   }
   return d;
+}
+
+/**
+ * Capabilities/purpose config (singleton, NOT a list). Either a pre-written
+ * `answer` (spoken directly, no chatRag call) OR a `promptTemplate` override used
+ * server-side by chatRag's metadata-only capabilities mode. Both optional.
+ */
+export interface CapabilitiesConfig {
+  /** Pre-written answer. If set (and flag on), the avatar speaks it with NO chatRag call. */
+  answer?: string;
+  /** Custom prompt template for capabilities mode (replaces the default metadata prompt). */
+  promptTemplate?: string;
+}
+
+export function emptyCapabilities(): CapabilitiesConfig {
+  return {};
+}
+
+export function normalizeCapabilities(v: any): CapabilitiesConfig {
+  if (!v || typeof v !== 'object') return {};
+  const out: CapabilitiesConfig = {};
+  if (typeof v.answer === 'string' && v.answer.trim()) out.answer = v.answer;
+  if (typeof v.promptTemplate === 'string' && v.promptTemplate.trim()) out.promptTemplate = v.promptTemplate;
+  return out;
 }
 
 /** A phrase entry (greetings / infoAcknowledgements / farewells). */
@@ -66,6 +97,8 @@ export interface AssistantConvContent {
   infoAcknowledgements: PhraseEntry[];
   farewells: PhraseEntry[];
   suggestedPrompts: SuggestedPrompt[];
+  /** Resolved capabilities/purpose config (custom-or-global). */
+  capabilities?: CapabilitiesConfig;
 }
 
 /**
@@ -73,7 +106,7 @@ export interface AssistantConvContent {
  * incompatible cached envelopes (e.g. pre-flag) are treated as a miss and
  * re-synced instead of serving stale/empty content.
  */
-export const CACHE_SCHEMA = 2;
+export const CACHE_SCHEMA = 3;
 
 /** Cache envelope persisted in IndexedDB, keyed by assistantId. */
 export interface CachedConvContent {
@@ -97,13 +130,15 @@ export interface GlobalResponses {
   infoAcknowledgements: PhraseEntry[];
   farewells: PhraseEntry[];
   suggestedPrompts: SuggestedPrompt[];
+  /** Global default capabilities/purpose config. */
+  capabilities?: CapabilitiesConfig;
   modifiedAt: number;
 }
 
 export type SyncState = 'no-cache' | 'in-sync' | 'changes';
 
 export function emptyContent(): AssistantConvContent {
-  return { greetings: [], infoAcknowledgements: [], farewells: [], suggestedPrompts: [] };
+  return { greetings: [], infoAcknowledgements: [], farewells: [], suggestedPrompts: [], capabilities: {} };
 }
 
 // --------------------------------------------------------------- seed defaults

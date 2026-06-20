@@ -156,6 +156,28 @@ interface VoiceOpt { id: string; label: string; }
                     </optgroup>
                   </select>
                 </label>
+                <label class="fld"><span>Summary model (override)</span>
+                  <select [(ngModel)]="form.summaryProfileId">
+                    <option [ngValue]="undefined">- Use global default -</option>
+                    <optgroup label="Global">
+                      <option *ngFor="let p of globalProfiles()" [ngValue]="p.id">{{ p.name }} ({{ llmLabels[p.provider] }}/{{ p.model }})</option>
+                    </optgroup>
+                    <optgroup label="Privados de este asistente" *ngIf="privateProfiles().length">
+                      <option *ngFor="let p of privateProfiles()" [ngValue]="p.id">{{ p.name }} ({{ llmLabels[p.provider] }}/{{ p.model }})</option>
+                    </optgroup>
+                  </select>
+                </label>
+                <label class="fld"><span>Detail model (override)</span>
+                  <select [(ngModel)]="form.detailProfileId">
+                    <option [ngValue]="undefined">- Use global default -</option>
+                    <optgroup label="Global">
+                      <option *ngFor="let p of globalProfiles()" [ngValue]="p.id">{{ p.name }} ({{ llmLabels[p.provider] }}/{{ p.model }})</option>
+                    </optgroup>
+                    <optgroup label="Privados de este asistente" *ngIf="privateProfiles().length">
+                      <option *ngFor="let p of privateProfiles()" [ngValue]="p.id">{{ p.name }} ({{ llmLabels[p.provider] }}/{{ p.model }})</option>
+                    </optgroup>
+                  </select>
+                </label>
                 <p class="hint">Efectivo: {{ effectiveLlm() }}</p>
                 <div class="llmbtns">
                   <button class="btn ghost sm" type="button" (click)="newPrivateProfile()" [disabled]="!form.id">+ Perfil privado</button>

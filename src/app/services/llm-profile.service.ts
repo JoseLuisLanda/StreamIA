@@ -1,5 +1,5 @@
 import { Injectable } from '@angular/core';
-import { collection, getDocs, query, where } from 'firebase/firestore';
+import { collection, doc, getDoc, getDocs, query, serverTimestamp, setDoc, where } from 'firebase/firestore';
 import { httpsCallable } from 'firebase/functions';
 import { getFirebaseFirestoreClient, getFirebaseFunctionsClient } from './firebase-client';
 import { LlmConfigProfile, LlmKeyRef, TestProfileResult } from '../lib/llm-admin/llm-profile.models';
@@ -32,6 +32,33 @@ export class LlmProfileService {
   async listForAssistant(assistantId: string): Promise<LlmConfigProfile[]> {
     const all = await this.listAll();
     return all.filter((p) => p.scope === 'global' || p.ownerAssistantId === assistantId);
+  }
+
+  /** Read the GLOBAL per-stage default profile ids (config/ragModels). */
+  async getStageDefaults(): Promise<{ summaryProfileId: string; detailProfileId: string }> {
+    try {
+      const snap = await getDoc(doc(this.db(), 'config', 'ragModels'));
+      const d = (snap.data() as any) ?? {};
+      return {
+        summaryProfileId: (d.summaryProfileId ?? '').toString(),
+        detailProfileId: (d.detailProfileId ?? '').toString(),
+      };
+    } catch {
+      return { summaryProfileId: '', detailProfileId: '' };
+    }
+  }
+
+  /** Persist the GLOBAL per-stage default profile ids (admin-gated by rules). */
+  async saveStageDefaults(v: { summaryProfileId: string; detailProfileId: string }): Promise<void> {
+    await setDoc(
+      doc(this.db(), 'config', 'ragModels'),
+      {
+        summaryProfileId: (v.summaryProfileId || '').trim() || null,
+        detailProfileId: (v.detailProfileId || '').trim() || null,
+        updatedAt: serverTimestamp(),
+      },
+      { merge: true },
+    );
   }
 
   async saveProfile(p: LlmConfigProfile): Promise<string> {
@@ -84,6 +111,22 @@ export class LlmProfileService {
       return (await fn({ profileId })).data;
     } catch (e: any) {
       return { ok: false, error: describe(e) };
+    }
+  }
+
+  /**
+   * List the LIVE, valid models for a provider via the admin callable (key read
+   * server-side from Secret Manager; never exposed). Returns bare model ids.
+   */
+  async listModels(provider: string, profileId: string, baseUrl?: string): Promise<{ ok: boolean; models: string[]; error?: string }> {
+    const fn = httpsCallable<{ provider: string; profileId: string; baseUrl?: string }, { ok: boolean; models: string[]; error?: string }>(
+      getFirebaseFunctionsClient(),
+      'listProviderModels',
+    );
+    try {
+      return (await fn({ provider, profileId, baseUrl })).data;
+    } catch (e: any) {
+      return { ok: false, models: [], error: describe(e) };
     }
   }
 

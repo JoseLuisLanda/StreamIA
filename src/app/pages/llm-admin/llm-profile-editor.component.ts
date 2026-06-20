@@ -1,8 +1,8 @@
-import { Component, EventEmitter, Input, Output, inject, signal } from '@angular/core';
+import { Component, EventEmitter, Input, OnInit, Output, computed, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { LlmProfileService } from '../../services/llm-profile.service';
-import { LlmConfigProfile, TestProfileResult } from '../../lib/llm-admin/llm-profile.models';
+import { LlmConfigProfile, TestProfileResult, activeKeyOf } from '../../lib/llm-admin/llm-profile.models';
 import { LlmProviderId, MODEL_SUGGESTIONS, PROVIDERS, PROVIDER_LABELS } from '../../lib/llm-admin/llm-admin.models';
 
 /**
@@ -22,17 +22,26 @@ import { LlmProviderId, MODEL_SUGGESTIONS, PROVIDERS, PROVIDER_LABELS } from '..
           <input type="text" [(ngModel)]="p.name" placeholder="OpenAI Produccion" />
         </label>
         <label class="fld"><span>Provider</span>
-          <select [(ngModel)]="p.provider" (ngModelChange)="onProvider()">
+          <select [ngModel]="providerSig()" (ngModelChange)="onProvider($event)">
             <option *ngFor="let pr of providers" [value]="pr">{{ labels[pr] }}</option>
           </select>
         </label>
       </div>
       <div class="grid2">
-        <label class="fld"><span>Model</span>
-          <input type="text" [(ngModel)]="p.model" [attr.list]="'pm-' + p.provider" />
+        <label class="fld">
+          <span class="modlabel">Model
+            <button class="btn xs" type="button" (click)="refreshModels()" [disabled]="modelsLoading() || !p.id" title="List live models from the provider">
+              {{ modelsLoading() ? 'Listing...' : 'Refresh models' }}
+            </button>
+          </span>
+          <input type="text" [ngModel]="modelSig()" (ngModelChange)="onModelInput($event)" [attr.list]="'pm-' + p.provider" placeholder="type or pick a model" />
           <datalist [id]="'pm-' + p.provider">
-            <option *ngFor="let m of suggestions()" [value]="m"></option>
+            <option *ngFor="let m of availableModels()" [value]="m"></option>
           </datalist>
+          <span class="mini" *ngIf="liveModels().length">{{ liveModels().length }} live models</span>
+          <span class="mini" *ngIf="!liveModels().length && p.id">Using suggested list (Refresh to fetch live)</span>
+          <span class="warn" *ngIf="modelsErr()">{{ modelsErr() }}</span>
+          <span class="warn" *ngIf="modelDeprecated()">Current model "{{ modelSig() }}" is not in the available list - it may be deprecated. Pick a valid one or Refresh.</span>
         </label>
         <label class="fld"><span>Base URL (optional)</span>
           <input type="text" [(ngModel)]="p.baseUrl" placeholder="leave blank for default" />
@@ -52,7 +61,7 @@ import { LlmProviderId, MODEL_SUGGESTIONS, PROVIDERS, PROVIDER_LABELS } from '..
       <!-- Keys (only after the profile exists) -->
       <div class="keys" *ngIf="p.id">
         <h4>Labeled keys <small>(one active; values are write-only)</small></h4>
-        <div class="empty" *ngIf="!p.keys.length">No keys yet — add one below.</div>
+        <div class="empty" *ngIf="!p.keys.length">No keys yet - add one below.</div>
         <div class="krow" *ngFor="let k of p.keys">
           <label class="kactive">
             <input type="radio" name="active-{{ p.id }}" [checked]="k.active" (change)="setActive(k.id)" />
@@ -76,7 +85,7 @@ import { LlmProviderId, MODEL_SUGGESTIONS, PROVIDERS, PROVIDER_LABELS } from '..
 
         <div class="row">
           <button class="btn" (click)="test()" [disabled]="testing()">{{ testing() ? 'Testing...' : 'Test profile' }}</button>
-          <span class="ok" *ngIf="testResult()?.ok">OK — {{ testResult()?.provider }}/{{ testResult()?.model }} (key: {{ testResult()?.key }})</span>
+          <span class="ok" *ngIf="testResult()?.ok">OK - {{ testResult()?.provider }}/{{ testResult()?.model }} (key: {{ testResult()?.key }})</span>
           <span class="err" *ngIf="testResult() && !testResult()?.ok">Failed: {{ testResult()?.error }}</span>
         </div>
       </div>
@@ -110,9 +119,12 @@ import { LlmProviderId, MODEL_SUGGESTIONS, PROVIDERS, PROVIDER_LABELS } from '..
     .btn.xs { padding: 4px 9px; font-size: 11px; }
     .btn.danger { background: rgba(179,57,57,.2); border-color: rgba(179,57,57,.5); color: #ffb3b3; }
     .ok { color: #6ee7b7; font-size: 12.5px; } .err { color: #fca5a5; font-size: 12.5px; }
+    .modlabel { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+    .mini { font-size: 10.5px; color: #8b93a3; }
+    .warn { font-size: 11px; color: #f0c674; }
   `],
 })
-export class LlmProfileEditorComponent {
+export class LlmProfileEditorComponent implements OnInit {
   @Input({ required: true }) p!: LlmConfigProfile;
   @Output() changed = new EventEmitter<string>(); // emits profile id after persistence
 
@@ -130,12 +142,64 @@ export class LlmProfileEditorComponent {
   readonly keyErr = signal('');
   readonly testResult = signal<TestProfileResult | null>(null);
 
-  suggestions(): string[] {
-    return MODEL_SUGGESTIONS[this.p.provider] ?? [];
+  // Signal mirrors of provider/model so computed() reacts to user edits (p is a
+  // plain @Input object). Writes go to BOTH the signal and p (p is what's saved).
+  readonly providerSig = signal<LlmProviderId>('openai');
+  readonly modelSig = signal('');
+  // Live, generateContent-capable models fetched server-side (empty -> use static).
+  readonly liveModels = signal<string[]>([]);
+  readonly modelsLoading = signal(false);
+  readonly modelsErr = signal('');
+
+  /** Dropdown source: live list when available, else the curated fallback. */
+  readonly availableModels = computed(() => {
+    const live = this.liveModels();
+    if (live.length) return live;
+    return MODEL_SUGGESTIONS[this.providerSig()] ?? [];
+  });
+  /** Saved model not present in the available list -> likely deprecated (surfaced, never auto-changed). */
+  readonly modelDeprecated = computed(() => {
+    const list = this.availableModels();
+    const m = (this.modelSig() || '').trim();
+    return !!m && list.length > 0 && !list.includes(m);
+  });
+
+  ngOnInit(): void {
+    this.providerSig.set(this.p.provider);
+    this.modelSig.set(this.p.model);
+    // Auto-list if the profile already has an active key (no key -> static fallback).
+    if (this.p.id && activeKeyOf(this.p)) void this.refreshModels();
   }
-  onProvider(): void {
-    const s = this.suggestions();
-    if (s.length && !s.includes(this.p.model)) this.p.model = s[0];
+
+  onModelInput(v: string): void {
+    this.p.model = v;
+    this.modelSig.set(v);
+  }
+
+  onProvider(v: LlmProviderId): void {
+    this.p.provider = v;
+    this.providerSig.set(v);
+    this.liveModels.set([]); // provider changed -> stale live list
+    this.modelsErr.set('');
+    const s = this.availableModels();
+    if (s.length && !s.includes(this.p.model)) { this.p.model = s[0]; this.modelSig.set(s[0]); }
+  }
+
+  /** Fetch the live model list for the current provider via the admin callable. */
+  async refreshModels(): Promise<void> {
+    if (!this.p.id) { this.modelsErr.set('Save the profile and add a key first.'); return; }
+    this.modelsLoading.set(true); this.modelsErr.set('');
+    try {
+      const r = await this.svc.listModels(this.p.provider, this.p.id, this.p.baseUrl);
+      if (r.ok && r.models.length) {
+        this.liveModels.set(r.models);
+      } else {
+        this.liveModels.set([]);
+        if (r.error) this.modelsErr.set(`${r.error} (using suggested list)`);
+      }
+    } finally {
+      this.modelsLoading.set(false);
+    }
   }
 
   async saveProfile(): Promise<void> {
@@ -184,7 +248,13 @@ export class LlmProfileEditorComponent {
 
   async test(): Promise<void> {
     this.testing.set(true); this.testResult.set(null);
-    try { this.testResult.set(await this.svc.test(this.p.id)); }
-    finally { this.testing.set(false); }
+    try {
+      const r = await this.svc.test(this.p.id);
+      // Friendlier message when the failure looks like a bad/deprecated model.
+      if (r && !r.ok && /not found|not supported|does not exist|404|unknown model|model_not_found/i.test(r.error ?? '')) {
+        r.error = `Model "${this.p.model}" is not available for this provider/key - click "Refresh models" and pick a valid one. (${r.error})`;
+      }
+      this.testResult.set(r);
+    } finally { this.testing.set(false); }
   }
 }

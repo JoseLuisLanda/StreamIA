@@ -26,3 +26,4 @@ export {
 } from './llmProfiles';
 export { generateResponses } from './generateResponses';
 export { backfillAssistants } from './backfill';
+export { listProviderModels } from './listProviderModels';

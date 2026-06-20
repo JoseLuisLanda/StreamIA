@@ -90,6 +90,18 @@ type PhraseKind = 'greetings' | 'infoAcknowledgements' | 'farewells';
                 </div>
                 <button class="btn ghost xs" (click)="gPromptList.push({ label: '', prompt: '' })">+ Añadir</button>
               </div>
+              <div class="cat">
+                <div class="cathead"><h3>Capacidades / Proposito</h3>
+                  <span class="genwrap">
+                    <button class="btn sm" (click)="genGlobalCapabilities()" [disabled]="genBusy()">Generar con IA</button>
+                    <button class="btn sm primary" (click)="saveGlobalCapabilities()" [disabled]="gSaving()">Guardar</button>
+                  </span>
+                </div>
+                <label class="caplbl">Respuesta directa (opcional; si se define, se habla SIN llamar a chatRag)</label>
+                <textarea class="ta" rows="3" [(ngModel)]="gCapAnswer" placeholder="Ej: Soy tu asistente; te ayudo con..."></textarea>
+                <label class="caplbl">Plantilla de prompt (opcional; reemplaza el prompt por defecto, solo metadatos, sin RAG)</label>
+                <textarea class="ta" rows="3" [(ngModel)]="gCapTemplate" placeholder="Instruccion para el LLM (modo solo-metadatos)"></textarea>
+              </div>
               <p class="ok" *ngIf="gMsg()">{{ gMsg() }}</p>
               <p class="err" *ngIf="gErr()">{{ gErr() }}</p>
             </div>
@@ -149,6 +161,20 @@ type PhraseKind = 'greetings' | 'infoAcknowledgements' | 'farewells';
                   <button class="btn ghost sm" (click)="draftPrompts=[]">Descartar</button>
                 </div>
               </div>
+              <div class="cat">
+                <div class="cathead">
+                  <h3>Capacidades / Proposito <span class="badge" [class.custom]="flags().capabilities">{{ flags().capabilities ? 'Custom' : 'Global' }}</span></h3>
+                  <span class="genwrap">
+                    <button class="btn sm" (click)="genAsstCapabilities()" [disabled]="genBusy()">Generar con IA</button>
+                    <button class="btn sm primary" (click)="saveAsstCapabilities()">Guardar</button>
+                    <button class="btn sm" *ngIf="flags().capabilities" (click)="revertCapabilities()">Revertir a global</button>
+                  </span>
+                </div>
+                <label class="caplbl">Respuesta directa (opcional; si se define, se habla SIN chatRag)</label>
+                <textarea class="ta" rows="3" [(ngModel)]="aCapAnswer" placeholder="Respuesta fija para preguntas de capacidades/proposito"></textarea>
+                <label class="caplbl">Plantilla de prompt (opcional; modo solo-metadatos, sin RAG)</label>
+                <textarea class="ta" rows="3" [(ngModel)]="aCapTemplate" placeholder="Instruccion para el LLM"></textarea>
+              </div>
               <p class="ok" *ngIf="aMsg()">{{ aMsg() }}</p>
               <p class="err" *ngIf="aErr()">{{ aErr() }}</p>
             </div>
@@ -180,6 +206,8 @@ type PhraseKind = 'greetings' | 'infoAcknowledgements' | 'farewells';
     .row { display:flex; align-items:center; gap:6px; margin-bottom:6px; flex-wrap:wrap; }
     .t { flex:1; min-width:140px; background:rgba(255,255,255,.05); color:#e6e8ee; border:1px solid rgba(255,255,255,.12); border-radius:8px; padding:6px 9px; font-size:12.5px; }
     .t.sm { flex:0 0 140px; }
+    .ta { width:100%; background:rgba(255,255,255,.05); color:#e6e8ee; border:1px solid rgba(255,255,255,.12); border-radius:8px; padding:7px 9px; font-size:12.5px; line-height:1.45; resize:vertical; margin-bottom:8px; }
+    .caplbl { display:block; font-size:11px; color:#8b93a3; margin:2px 0 4px; }
     .warn { font-size:10.5px; color:#f0c674; }
     .ix { width:26px; height:28px; border-radius:7px; cursor:pointer; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.12); color:#aeb4c0; }
     .ix.danger:hover { background:rgba(179,57,57,.25); color:#ffb3b3; }
@@ -215,6 +243,8 @@ export class LlmResponsesComponent implements OnInit {
   readonly gMsg = signal(''); readonly gErr = signal('');
   gPhrases: Record<PhraseKind, Array<{ text: string }>> = { greetings: [], infoAcknowledgements: [], farewells: [] };
   gPromptList: Array<{ label: string; prompt: string }> = [];
+  gCapAnswer = ''; gCapTemplate = '';   // global capabilities config
+  aCapAnswer = ''; aCapTemplate = '';   // per-assistant capabilities config
 
   // per-assistant
   readonly assistants = signal<AssistantConfig[]>([]);
@@ -264,8 +294,27 @@ export class LlmResponsesComponent implements OnInit {
         farewells: g.farewells.map((p) => ({ text: p.text })),
       };
       this.gPromptList = g.suggestedPrompts.map((p) => ({ label: p.label, prompt: p.prompt }));
+      this.gCapAnswer = g.capabilities?.answer ?? '';
+      this.gCapTemplate = g.capabilities?.promptTemplate ?? '';
     } catch (e: any) { this.gErr.set(e?.message ?? String(e)); }
     finally { this.gLoading.set(false); }
+  }
+
+  async saveGlobalCapabilities(): Promise<void> {
+    this.gSaving.set(true); this.gErr.set(''); this.gMsg.set('');
+    try {
+      await this.content.saveGlobalCapabilities({ answer: this.gCapAnswer.trim(), promptTemplate: this.gCapTemplate.trim() });
+      this.gMsg.set('Guardado.');
+    } catch (e: any) { this.gErr.set(e?.message ?? String(e)); }
+    finally { this.gSaving.set(false); }
+  }
+  async genGlobalCapabilities(): Promise<void> {
+    this.genBusy.set(true); this.gErr.set('');
+    try {
+      const r = await this.content.generate({ scope: 'global', category: 'capabilities' });
+      if (r.error) this.gErr.set(r.error);
+      else if (r.answer) this.gCapAnswer = r.answer;
+    } finally { this.genBusy.set(false); }
   }
 
   async saveGlobalPhrases(k: PhraseKind): Promise<void> {
@@ -317,8 +366,37 @@ export class LlmResponsesComponent implements OnInit {
       const c = await this.content.listForEdit(this.selId);
       this.current = { greetings: c.greetings, infoAcknowledgements: c.infoAcknowledgements, farewells: c.farewells };
       this.currentPrompts = c.suggestedPrompts;
+      const cap = await this.content.getAssistantCapabilities(this.selId);
+      this.aCapAnswer = cap.answer ?? '';
+      this.aCapTemplate = cap.promptTemplate ?? '';
     } catch (e: any) { this.aErr.set(e?.message ?? String(e)); }
     finally { this.aLoading.set(false); }
+  }
+
+  async saveAsstCapabilities(): Promise<void> {
+    this.aErr.set(''); this.aMsg.set('');
+    try {
+      await this.content.saveAssistantCapabilities(this.selId, { answer: this.aCapAnswer.trim(), promptTemplate: this.aCapTemplate.trim() });
+      this.aMsg.set('Guardado como personalizado.');
+      await this.onSelectAssistant();
+    } catch (e: any) { this.aErr.set(e?.message ?? String(e)); }
+  }
+  async revertCapabilities(): Promise<void> {
+    if (!confirm('Revertir capacidades a la global?')) return;
+    this.aErr.set('');
+    try {
+      await this.content.revertCapabilities(this.selId);
+      this.aMsg.set('Revertido a global.');
+      await this.onSelectAssistant();
+    } catch (e: any) { this.aErr.set(e?.message ?? String(e)); }
+  }
+  async genAsstCapabilities(): Promise<void> {
+    this.genBusy.set(true); this.aErr.set('');
+    try {
+      const r = await this.content.generate({ scope: 'assistant', assistantId: this.selId, category: 'capabilities' });
+      if (r.error) this.aErr.set(r.error);
+      else if (r.answer) this.aCapAnswer = r.answer;
+    } finally { this.genBusy.set(false); }
   }
   summaryPhrases(k: PhraseKind): string {
     if (this.flags()[k]) {

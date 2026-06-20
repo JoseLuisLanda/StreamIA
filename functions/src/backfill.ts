@@ -19,7 +19,7 @@ import { ENFORCE_ADMIN_ROLE } from './lib/flags';
 const CALL_OPTS = { region: 'us-central1', cors: true } as const;
 
 /** Mirror of ASSISTANT_SCHEMA_VERSION (client). Bump together when adding fields. */
-const ASSISTANT_SCHEMA_VERSION = 2;
+const ASSISTANT_SCHEMA_VERSION = 4;
 
 interface BackfillResult {
   scanned: number;
@@ -48,9 +48,15 @@ export const backfillAssistants = onCall<unknown, Promise<BackfillResult>>(
       const patch: any = {};
       if (!d.useCustomResponses || typeof d.useCustomResponses !== 'object') {
         patch.useCustomResponses = {
-          greetings: false, infoAcknowledgements: false, farewells: false, suggestedPrompts: false,
+          greetings: false, infoAcknowledgements: false, farewells: false, suggestedPrompts: false, capabilities: false,
         };
+      } else if (d.useCustomResponses.capabilities == null) {
+        // Existing flags object missing only the v3 capabilities flag -> add it (merge).
+        patch.useCustomResponses = { capabilities: false };
       }
+      // v4: per-stage LLM profile overrides (null => unset => use global/legacy).
+      if (d.summaryProfileId === undefined) patch.summaryProfileId = null;
+      if (d.detailProfileId === undefined) patch.detailProfileId = null;
       if (d.contentModifiedAt == null) patch.contentModifiedAt = FieldValue.serverTimestamp();
       if (Number(d.schemaVersion ?? 0) < ASSISTANT_SCHEMA_VERSION) patch.schemaVersion = ASSISTANT_SCHEMA_VERSION;
 
