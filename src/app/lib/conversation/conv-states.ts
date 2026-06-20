@@ -14,7 +14,9 @@ export const CONV_TRANSITIONS: Record<ConvState, ConvState[]> = {
     listening: ['sending', 'idle', 'error'],
     sending: ['waiting_llm', 'error', 'idle'],
     waiting_llm: ['speaking', 'error', 'idle'],
-    speaking: ['idle', 'listening', 'error'],
+    // 'waiting_llm' is legal from 'speaking': the info-ack FILLER is spoken
+    // (speaking) and then the turn returns to waiting for the RAG/LLM answer.
+    speaking: ['idle', 'listening', 'error', 'waiting_llm'],
     error: ['idle', 'listening', 'speaking'],
 };
 

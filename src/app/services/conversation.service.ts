@@ -9,6 +9,7 @@ import { PlanCache } from '../lib/performance/plan-cache';
 import { speechStartLine } from '../lib/performance/timing';
 import { MediaItem, RagResponse } from '../lib/rag/rag.models';
 import { classifyIntentLocal, Intent } from '../lib/intent/intent-router';
+import { GESTURES_LEADIN_ENABLED, GESTURES_TAIL_ENABLED, GESTURES_THINKING_ENABLED } from '../lib/config/feature-flags';
 
 /**
  * Conversation orchestrator: explicit state machine wiring
@@ -319,13 +320,13 @@ export class ConversationService {
         if (opts.provider === 'piper') this.revealingMsgId.set(msg.id);
 
         try {
-            if (leadId) this.gestures.trigger(leadId, undefined, undefined, true);
+            if (leadId) this.gLead(leadId, undefined, undefined, true);
             await this.tts.speak(reply, { ...opts, singlePass: !!leadId });
             if (this.tts.lastPerformance) this.plans.set(msg.id, this.tts.lastPerformance);
             if (gen !== this.gen) return;
             this.speakingMsgId.set(null);
             this.revealingMsgId.set(null);
-            if (tailId) this.gestures.trigger(tailId, undefined, undefined, true);
+            if (tailId) this.gTail(tailId, undefined, undefined, true);
             this.afterSpeaking(opts);
         } catch (e: any) {
             if (gen !== this.gen) return;
@@ -347,9 +348,9 @@ export class ConversationService {
         // Lead-in plays immediately, covering Function cold-start + RAG retrieval.
         const leadId = this.liveLeadGesture();
         if (leadId) {
-            this.gestures.trigger(leadId, undefined, undefined, true);
+            this.gLead(leadId, undefined, undefined, true);
         } else if (this.tts.waitingAnimsEnabled()) {
-            this.gestures.triggerTransient('thinking', 1, 'slow');
+            this.gThinking('thinking', 1, 'slow');
         }
 
         const t0 = performance.now();
@@ -378,7 +379,7 @@ export class ConversationService {
             // filler was empty). Stops as soon as the response arrives.
             if (pending && this.tts.waitingAnimsEnabled()) {
                 keepAlive = setInterval(() => {
-                    if (gen === this.gen && pending) this.gestures.triggerTransient('thinking', 1, 'slow');
+                    if (gen === this.gen && pending) this.gThinking('thinking', 1, 'slow');
                 }, 2600);
             }
 
@@ -424,7 +425,7 @@ export class ConversationService {
             if (gen !== this.gen) return;
 
             const tailId = this.liveTailGesture();
-            if (tailId) this.gestures.trigger(tailId, undefined, undefined, true);
+            if (tailId) this.gTail(tailId, undefined, undefined, true);
             this.afterSpeaking(opts);
         } catch (e: any) {
             if (keepAlive) { clearInterval(keepAlive); keepAlive = null; }
@@ -522,9 +523,9 @@ export class ConversationService {
         if (leadId) {
             // Lead gesture plays immediately while the LLM generates, covering synthesis latency.
             // It blends out naturally when speak() calls stopInternal at audio start.
-            this.gestures.trigger(leadId, undefined, undefined, true);
+            this.gLead(leadId, undefined, undefined, true);
         } else if (this.tts.waitingAnimsEnabled()) {
-            this.gestures.triggerTransient('thinking', 1, 'slow'); // waiting gesture: killed at audio start
+            this.gThinking('thinking', 1, 'slow'); // waiting gesture: killed at audio start
         }
 
         const t0 = performance.now();
@@ -570,7 +571,7 @@ export class ConversationService {
 
             // Tail gesture (motion-only) plays after body speech completes
             const tailId = this.liveTailGesture();
-            if (tailId) this.gestures.trigger(tailId, undefined, undefined, true);
+            if (tailId) this.gTail(tailId, undefined, undefined, true);
 
             this.afterSpeaking(opts);
         } catch (e: any) {
@@ -597,6 +598,22 @@ export class ConversationService {
     }
 
     // ------------------------------------------------------------ internals
+
+    /**
+     * Gesture triggers guarded by their INDEPENDENT sub-flags (debug bypass):
+     *   gLead -> GESTURES_LEADIN_ENABLED, gTail -> GESTURES_TAIL_ENABLED,
+     *   gThinking -> GESTURES_THINKING_ENABLED.
+     * When a flag is off, that gesture is skipped entirely (no cold-path work).
+     */
+    private gLead(...args: Parameters<GesturePlayerService['trigger']>): void {
+        if (GESTURES_LEADIN_ENABLED) this.gestures.trigger(...args);
+    }
+    private gTail(...args: Parameters<GesturePlayerService['trigger']>): void {
+        if (GESTURES_TAIL_ENABLED) this.gestures.trigger(...args);
+    }
+    private gThinking(...args: Parameters<GesturePlayerService['triggerTransient']>): void {
+        if (GESTURES_THINKING_ENABLED) this.gestures.triggerTransient(...args);
+    }
 
     private interruptInternals(): void {
         this.gen++;            // any in-flight turn becomes a no-op

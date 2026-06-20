@@ -177,13 +177,19 @@ export function scaleTimeline(events: VisemeEvent[], speechStart: number, speech
     return frames;
 }
 
-/** Find speech start/end in an AudioBuffer by simple energy threshold. */
-export function findSpeechBounds(buffer: AudioBuffer, threshold = 0.01): { start: number; end: number } {
+/**
+ * Find speech start/end in an AudioBuffer by simple energy threshold.
+ * DOWNSAMPLED: scans every `step`-th sample so a long buffer can't cause a long
+ * synchronous main-thread loop. step=32 -> ~1.5 ms of position granularity at
+ * 22 kHz, which is inaudible for viseme alignment but ~32x cheaper.
+ */
+export function findSpeechBounds(buffer: AudioBuffer, threshold = 0.01, step = 32): { start: number; end: number } {
     const data = buffer.getChannelData(0);
     const n = data.length;
+    const s = Math.max(1, step | 0);
     let first = 0, last = n - 1;
-    for (let i = 0; i < n; i++) { if (Math.abs(data[i]) > threshold) { first = i; break; } }
-    for (let i = n - 1; i >= 0; i--) { if (Math.abs(data[i]) > threshold) { last = i; break; } }
+    for (let i = 0; i < n; i += s) { if (Math.abs(data[i]) > threshold) { first = i; break; } }
+    for (let i = n - 1; i >= 0; i -= s) { if (Math.abs(data[i]) > threshold) { last = i; break; } }
     if (last <= first) return { start: 0, end: buffer.duration };
     return { start: first / buffer.sampleRate, end: last / buffer.sampleRate };
 }

@@ -23,6 +23,7 @@ import { LlmService, LlmProviderId, LLM_PROVIDER_LABELS } from '../../services/l
 import { ConversationService, ConvMessage } from '../../services/conversation.service';
 import { parseGestureMarkup } from '../../lib/gestures/gesture-markup';
 import { GESTURE_MAP, GestureDef, SPEED_MULTIPLIERS } from '../../lib/gestures/gesture-library';
+import { GESTURES_LEADIN_ENABLED, GESTURES_TAIL_ENABLED } from '../../lib/config/feature-flags';
 import { CustomGestureRegistryService } from '../../services/custom-gesture-registry.service';
 import { MotionStoreService } from '../../services/motion-store.service';
 import { GesturePlayerService } from '../../services/gesture-player.service';
@@ -1345,14 +1346,17 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
     async replay(msgId: number): Promise<void> {
         const msg = this.conv.messages().find(m => m.id === msgId);
         if (!msg) return;
-        // If the message has stored lead/tail gestures, orchestrate the full sequence
-        if (msg.leadGesture || msg.tailGesture) {
+        // Replay lead/tail blocks only when their OWN flag is on (debug). Each is
+        // independent; speech (body gestures handled inside tts) always replays.
+        const wantLead = GESTURES_LEADIN_ENABLED && !!msg.leadGesture;
+        const wantTail = GESTURES_TAIL_ENABLED && !!msg.tailGesture;
+        if (wantLead || wantTail) {
             if (this.previewBusy()) return;
             this.previewRunning = true;
             try {
-                if (msg.leadGesture) await this.playGestureBlock(msg.leadGesture);
+                if (wantLead) await this.playGestureBlock(msg.leadGesture!);
                 await this.conv.replayMessage(msgId, this.opts());
-                if (msg.tailGesture) await this.playGestureBlock(msg.tailGesture);
+                if (wantTail) await this.playGestureBlock(msg.tailGesture!);
             } finally {
                 this.previewRunning = false;
             }

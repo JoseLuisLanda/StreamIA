@@ -3,6 +3,8 @@ import {
     textToVisemes, scaleTimeline, findSpeechBounds, VisemeFrame
 } from '../lib/lipsync/text-to-visemes';
 import { parseGestureMarkup } from '../lib/gestures/gesture-markup';
+import { GESTURES_BODY_ENABLED } from '../lib/config/feature-flags';
+import { speakNumericSequences, hasLongDigitRun } from '../lib/lipsync/number-speech';
 import { GESTURE_MAP, CYCLE_BASE_SECONDS, SPEED_MULTIPLIER_MIN, SPEED_MULTIPLIER_MAX } from '../lib/gestures/gesture-library';
 import { GesturePlayerService, now as wallNow } from './gesture-player.service';
 import { Viseme, VISEME_TO_ARKIT, BlendWeights } from '../lib/lipsync/viseme-map';
@@ -51,6 +53,32 @@ export const PIPER_VOICES: Record<TtsLang, { id: string; label: string }[]> = {
 
 /** Replies with total speech below this compile as ONE full plan up front. */
 const FULL_PRECOMPILE_MAX_CHARS = 220;
+
+/**
+ * Max characters per progressive BODY (Part B) synthesis unit. Smaller -> each
+ * unit synthesizes faster so prefetch stays ahead of playback (no inter-segment
+ * stall); larger -> fewer boundaries. ~90 chars is roughly <=5 s of audio, whose
+ * synth (~45% of audio duration) finishes well before the previous unit ends.
+ * Tune here.
+ */
+const BODY_CHUNK_MAX_CHARS = 90;
+
+/**
+ * How many units to keep synthesizing AHEAD of the one currently playing. The
+ * Piper worker is serial (FIFO) but accepts concurrent requests, so we keep a
+ * sliding window of (SYNTH_LOOKAHEAD + 1) compiles in flight: the worker stays
+ * continuously busy producing ahead of playback, so playback never catches up.
+ * 1 = old behavior (marginal, caused ~1s underruns). 2 absorbs synth jitter. Tune here.
+ */
+const SYNTH_LOOKAHEAD = 2;
+
+/**
+ * Master switch for PROGRESSIVE (split + prefetch) playback. Default FALSE: the
+ * (now short) summary is synthesized as ONE single-pass unit and played -- no
+ * split, no concurrent prefetch, so only ONE main-thread timeline build happens
+ * (no bunched bursts). Set true to re-enable the progressive/prefetch path.
+ */
+const PROGRESSIVE_ENABLED = false;
 
 interface ActivePlayback {
     frames: VisemeFrame[];
@@ -105,6 +133,7 @@ export class TtsLipsyncService {
     private timingOpts: SpeakOptions | null = null;
     private firstSynthMarked = false;
     private firstAudioReported = false;
+    private speakStartMs = 0; // [tts.timing] call -> first segment audible
     private warmedVoice: string | null = null;
 
     constructor() {
@@ -128,6 +157,8 @@ export class TtsLipsyncService {
     async speak(text: string, opts: SpeakOptions): Promise<void> {
         const trimmed = text?.trim();
         if (!trimmed) return;
+        const tSpeakStart = performance.now(); // [tts.timing] total speak() duration
+        this.speakStartMs = tSpeakStart;       // reset per utterance for time-to-first-audio
 
         // interrupt previous playback but let a waiting (transient) gesture
         // survive synthesis — it dies at the actual audio start (kill switch)
@@ -145,7 +176,13 @@ export class TtsLipsyncService {
         this.gestureWarnings.set(parsed.warnings);
         for (const w of parsed.warnings) console.warn('[gestures]', w);
 
-        const plan = buildSpeechTimeline(parsed.cleanText, parsed.gestures);
+        // Inline BODY gestures gate (debug): when off, build the timeline with NO
+        // gestures so the cold path does no gesture timeline integration / scheduling
+        // / clip load. cleanText (tag-free) is still spoken with lip-sync.
+        const gIn = GESTURES_BODY_ENABLED ? parsed.gestures : [];
+        const tTimeline = performance.now();
+        const plan = buildSpeechTimeline(parsed.cleanText, gIn);
+        console.log(`[tts.timing] buildSpeechTimeline: ${Math.round(performance.now() - tTimeline)} ms (segments=${plan.segments.length})`);
         this.timing.mark('parse_split_done');
 
         if (!plan.segments.some(s => s.kind === 'speech') && plan.segments.length === 0) {
@@ -155,7 +192,15 @@ export class TtsLipsyncService {
         }
 
         try {
-            const split = (opts.provider === 'piper' && !opts.singlePass && this.progressiveEnabled())
+            // PROGRESSIVE for ALL piper replies, including the RAG summary that used
+            // singlePass (all-at-once). Part A = first sentence -> synthesized + spoken
+            // ASAP; Part B = the rest -> synthesized in the worker WHILE A plays. This
+            // cuts time-to-first-audio and keeps the main thread from waiting on the
+            // whole response. Gestures-off + digit-by-digit keep segments small (the
+            // digit rewrite happens at synth time, so it does NOT add segments), so
+            // there is no synchronous stall between segments.
+            // PROGRESSIVE_ENABLED master flag (default false) -> single-pass for now.
+            const split = (PROGRESSIVE_ENABLED && opts.provider === 'piper' && this.progressiveEnabled())
                 ? splitProgressive(parsed.cleanText, plan.gestures, this.partAMaxWords())
                 : null;
             if (opts.provider === 'piper' && split) {
@@ -175,6 +220,11 @@ export class TtsLipsyncService {
                 this.active = null;
                 this.currentViseme.set('sil');
             }
+            // [tts.timing] total: call -> audio-ready (provider, input chars, digit-run flag).
+            console.log(
+                `[tts.timing] speak total: ${Math.round(performance.now() - tSpeakStart)} ms` +
+                ` provider=${opts.provider} chars=${trimmed.length} longDigitRun=${hasLongDigitRun(trimmed)}`,
+            );
         }
     }
 
@@ -339,9 +389,10 @@ export class TtsLipsyncService {
         const tlA = buildSpeechTimeline(split.partA, []);
         const planAPromise = compilePerformance(expandSegments(tlA.segments), [], opts.lang, deps);
 
-        // Part B: queued right behind A in the worker (FIFO), per-sentence units
+        // Part B: queued right behind A in the worker (FIFO). Chunk into SMALL units
+        // (BODY_CHUNK_MAX_CHARS) so each synthesizes fast and prefetch stays ahead.
         const tlB = buildSpeechTimeline(split.partB, split.gesturesB);
-        const expandedB = expandSegments(tlB.segments);
+        const expandedB = expandSegments(tlB.segments, BODY_CHUNK_MAX_CHARS);
         const unitsB: ExpandedSegment[][] = expandedB.map(seg => [seg]);
         const unitGesturesB = this.assignGesturesToUnits(unitsB, tlB.gestures);
 
@@ -359,15 +410,31 @@ export class TtsLipsyncService {
     }
 
     private makeDeps(ctx: AudioContext, voiceId: string): CompilerDeps {
+        // Digit language follows the Piper voice id prefix (es_*, en_*).
+        const lang: 'es' | 'en' = voiceId.toLowerCase().startsWith('en') ? 'en' : 'es';
         return {
             synthesize: async (text: string) => {
+                // FIX: rewrite long digit runs to digit-by-digit BEFORE phonemization,
+                // so Piper doesn't expand "71974131981" into a giant cardinal. Only the
+                // SPOKEN text is changed here; the visible chat bubble is untouched.
+                const spoken = speakNumericSequences(text, lang);
+                const digitRun = hasLongDigitRun(text);
                 const first = !this.firstSynthMarked;
                 if (first) { this.firstSynthMarked = true; this.timing?.mark('synthA_started'); }
-                const wav = await this.piper.synthesizeWav(text, voiceId, p => this.downloadProgress.set(p));
+                const tSynth = performance.now();
+                const wav = await this.piper.synthesizeWav(spoken, voiceId, p => this.downloadProgress.set(p));
+                const synthMs = Math.round(performance.now() - tSynth);
                 if (first) this.timing?.mark('synthA_done');
                 this.downloadProgress.set(null);
                 const buffer = await ctx.decodeAudioData(wav);
                 if (first) this.timing?.mark('decodeA_done');
+                // [tts.timing] per-segment: chars, long-digit-run flag, Piper synth ms
+                // (text->phonemes->audio; vits-web does not expose the phonemize step
+                // separately), audio duration, and the POST-normalization text Piper saw.
+                console.log(
+                    `[tts.timing] piper synth: chars=${text.length} longDigitRun=${digitRun}` +
+                    ` synthMs=${synthMs} audioSec=${buffer.duration.toFixed(2)} post=${JSON.stringify(spoken)}`,
+                );
                 return buffer;
             },
             getClip: (url: string) => this.loadAudioClip(ctx, url),
@@ -394,15 +461,35 @@ export class TtsLipsyncService {
         firstPending?: Promise<PerformancePlan>
     ): Promise<void> {
         const debugPlan = localStorage.getItem('textAvatar.debugPlan') === '1';
-        let pending = firstPending ?? (units.length ? compilePerformance(units[0], unitGestures[0], opts.lang, deps) : null);
+        if (!units.length) { await previousPlayback; return; }
+
+        // Sliding compile window: keep up to (SYNTH_LOOKAHEAD + 1) units synthesizing
+        // AHEAD of playback so the serial worker stays continuously busy. Concurrent
+        // compilePerformance calls are safe (worker client multiplexes by id, FIFO).
+        const compiles: (Promise<PerformancePlan> | null)[] = new Array(units.length).fill(null);
+        const startCompile = (idx: number): void => {
+            if (idx < 0 || idx >= units.length || compiles[idx]) return;
+            compiles[idx] = compilePerformance(units[idx], unitGestures[idx], opts.lang, deps);
+        };
+        if (firstPending) compiles[0] = firstPending;
+        // Prime the window (units 0..SYNTH_LOOKAHEAD) -- these synthesize DURING
+        // previousPlayback (e.g. Part A), so a buffer is ready before unit 0 plays.
+        for (let k = 0; k <= SYNTH_LOOKAHEAD; k++) startCompile(k);
+
         await previousPlayback;
-        if (gen !== this.generation || !pending) return;
+        if (gen !== this.generation) return;
 
         for (let i = 0; i < units.length; i++) {
-            // bridge: if the next plan isn't compiled yet, hold naturally
+            startCompile(i); // safety (normally already primed)
+            const pending = compiles[i]!;
+
+            // bridge: if unit i isn't compiled yet, hold naturally. The render loop +
+            // idle motion keep ticking; mouth falls to neutral (getMouthWeights
+            // returns {} with no active plan) -- never a freeze or pose reset.
             let resolved = false;
             pending.then(() => { resolved = true; }, () => { resolved = true; });
             await Promise.resolve(); // let an already-settled promise mark itself
+            const underrunStart = resolved ? 0 : performance.now();
             if (!resolved) {
                 this.bridging.set(true);
                 if (this.waitingAnimsEnabled()) {
@@ -411,12 +498,14 @@ export class TtsLipsyncService {
             }
             const plan = await pending;
             this.bridging.set(false);
+            if (underrunStart) {
+                console.log(`[tts.timing] prefetch underrun: waited ${Math.round(performance.now() - underrunStart)} ms for next unit`);
+            }
             if (gen !== this.generation) return;
             captured.push(plan);
             this.lastPerformance = captured;
-            if (i + 1 < units.length) {
-                pending = compilePerformance(units[i + 1], unitGestures[i + 1], opts.lang, deps);
-            }
+            // Keep the window full: kick off the unit SYNTH_LOOKAHEAD beyond the next.
+            startCompile(i + 1 + SYNTH_LOOKAHEAD);
             this.lastCompileMs.set(plan.compileMs);
             console.log(`[tts] unit ${i + 1}/${units.length}: compiled ${plan.duration.toFixed(1)} s audio in ${plan.compileMs.toFixed(0)} ms`);
             if (debugPlan) console.log('[tts] PerformancePlan', JSON.stringify(planToJson(plan), null, 2));
@@ -546,8 +635,11 @@ export class TtsLipsyncService {
 
     /** Finalizes the per-reply timing summary at the actual audio start. */
     private reportFirstAudio(): void {
-        if (this.firstAudioReported || !this.timing) return;
+        if (this.firstAudioReported) return;
         this.firstAudioReported = true;
+        // Perceived start: speak() call -> first segment audible (separate from total synth).
+        console.log(`[tts.timing] time-to-first-audio: ${Math.round(performance.now() - this.speakStartMs)} ms (call -> first segment audible)`);
+        if (!this.timing) return;
         this.timing.mark('audio_started');
         const summary = this.timing.summary(this.piper.lastSynthMeta?.sessionCached);
         if (localStorage.getItem('textAvatar.debugPlan') === '1' || localStorage.getItem('textAvatar.debugTiming') === '1') {

@@ -21,6 +21,13 @@ let lastSessionCached = false;
 async function patchOrtSessionCache(): Promise<void> {
     if (ortPatched) return;
     const ort: any = await import('onnxruntime-web');
+    // Single-thread WASM: avoids threaded WASM (SharedArrayBuffer / COOP-COEP),
+    // which is unavailable here and only warns + auto-falls-back anyway. Harmless if
+    // the env shape differs across versions.
+    try {
+        ort.env.wasm.numThreads = 1;
+        ort.env.wasm.simd = true;
+    } catch { /* env shape changed across versions -> defaults */ }
     const orig = ort.InferenceSession.create.bind(ort.InferenceSession);
     const cache = new Map<number, Promise<any>>();
     ort.InferenceSession.create = (data: any, ...rest: any[]) => {

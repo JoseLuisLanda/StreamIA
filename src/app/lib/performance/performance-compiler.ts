@@ -77,7 +77,8 @@ export async function compilePerformance(
     lang: 'es' | 'en',
     deps: CompilerDeps
 ): Promise<PerformancePlan> {
-    const started = (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const nowMs = () => (typeof performance !== 'undefined' ? performance.now() : Date.now());
+    const started = nowMs();
     const events: PlanEvent[] = [];
     const planGestures: PlanGesture[] = [];
     const visemeTrack: VisemeFrame[] = [];
@@ -85,14 +86,21 @@ export async function compilePerformance(
     let cursor = 0;
     let bufSeq = 0;
     const anchored = new Set<TimelineGesture>();
+    // [tts.timing] main-thread timeline-build accounting (per sub-step).
+    let mbMs = 0, vmMs = 0, nSpeech = 0;
 
     for (const segment of segments) {
         if (segment.kind === 'speech') {
             const buffer = await deps.synthesize(segment.text);
             const bufferId = `b${bufSeq++}`;
             buffers.set(bufferId, buffer);
+            nSpeech++;
+            const tMb = nowMs();
             const bounds = deps.measureBounds(buffer);
+            mbMs += nowMs() - tMb;
+            const tVm = nowMs();
             const frames = scaleTimeline(textToVisemes(segment.text, lang), bounds.start, bounds.end);
+            vmMs += nowMs() - tVm;
             for (const f of frames) visemeTrack.push({ viseme: f.viseme, tStart: cursor + f.tStart, tEnd: cursor + f.tEnd });
 
             // anchor gestures inside this chunk against the MEASURED window
@@ -109,6 +117,10 @@ export async function compilePerformance(
 
             events.push({ type: 'speech', t0: cursor, t1: cursor + buffer.duration, bufferId, text: segment.text, srcStart: segment.sourceStart, srcEnd: segment.sourceEnd });
             cursor += buffer.duration;
+            // Yield to the event loop after each speech segment so the rAF render
+            // loop (breathing/blink/lipsync) can tick -> the main thread is never held
+            // across segments by the timeline build, even if synthesis returns instantly.
+            await new Promise<void>((r) => setTimeout(r, 0));
         } else if (segment.kind === 'pause') {
             const dur = segment.durationMs / 1000;
             anchorBeforeSegment(gestures, anchored, planGestures, segment.sourceIndex, cursor);
@@ -134,7 +146,11 @@ export async function compilePerformance(
     }
     planGestures.sort((a, b) => a.t - b.t);
 
-    const compileMs = (typeof performance !== 'undefined' ? performance.now() : Date.now()) - started;
+    const compileMs = nowMs() - started;
+    // [tts.timing] how much MAIN-THREAD work the timeline build did (the part that
+    // can stall the render loop), split by sub-step. measureBounds is downsampled
+    // and the loop yields between speech segments, so this should be a few ms.
+    console.log(`[tts.timing] timeline build: ${Math.round(mbMs + vmMs)} ms (measureBounds ${Math.round(mbMs)}, visemes ${Math.round(vmMs)}, speechSegments ${nSpeech})`);
     return { events, gestures: planGestures, visemeTrack, buffers, duration: cursor, compileMs };
 }
 

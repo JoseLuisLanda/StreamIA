@@ -19,7 +19,8 @@ import type { AuthedRequest } from './lib/http-auth';
 import { embedText } from './lib/embeddings';
 import { generateFromProfile } from './lib/llm';
 import { resolveProfileForAssistant, resolveStageProfile, loadRagStageModels } from './lib/llm-profiles';
-import { annotateGestures } from './lib/gestures';
+import { annotateGestures, stripGestureTags } from './lib/gestures';
+import { GESTURES_BODY_ENABLED } from './lib/flags';
 
 const MAX_K = 8;
 const DEFAULT_K = 6;
@@ -275,15 +276,21 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
         ? 'No tengo informacion suficiente para responder eso.'
         : 'I do not have enough information to answer that.';
   }
+  // Body gestures OFF (debug): strip any stray tags from the SPOKEN summary.
+  if (!GESTURES_BODY_ENABLED) summary = stripGestureTags(summary);
 
-  // --- Gesture tags annotate the SPOKEN summary (fail-soft -> plain summary). ---
+  // --- Inline BODY gesture tags annotate the SPOKEN summary (fail-soft -> plain).
+  //     GESTURES_BODY_ENABLED on  -> annotate (client gets tagged gestureCommands).
+  //     GESTURES_BODY_ENABLED off -> gestureCommands = clean summary (no tags). ---
   const tAssembly = Date.now();
   let gestureCommands = summary;
-  try {
-    gestureCommands = annotateGestures(summary) || summary;
-  } catch (e) {
-    logger.warn('chatRag gesture annotation failed', { error: String(e) });
-    gestureCommands = summary;
+  if (GESTURES_BODY_ENABLED) {
+    try {
+      gestureCommands = annotateGestures(summary) || summary;
+    } catch (e) {
+      logger.warn('chatRag gesture annotation failed', { error: String(e) });
+      gestureCommands = summary;
+    }
   }
 
   // --- Media: only the candidates the LLM chose as relevant (order preserved). ---
@@ -438,6 +445,9 @@ async function answerDetail(
     const result = await generateFromProfile(detailProfile, query, context, language, genPersona);
     stage(`D3 detail LLM generation (${profile.provider}/${profile.model}, ONE call)`, tGen);
     detailText = (result.text ?? '').trim();
+    // Detail is TEXT-ONLY (never spoken) -> always strip any gesture tags, regardless
+    // of the body flag, so the "Ver mas" text never shows markup.
+    detailText = stripGestureTags(detailText);
   } catch (e: any) {
     const m = e?.meta ?? {};
     const detail = e?.message ?? String(e);
