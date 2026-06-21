@@ -134,7 +134,6 @@ const CHIP_LABELS: Record<string, string> = {
             <button class="chip" *ngFor="let p of hintLoop(); let i = index; trackBy: trackHint"
                     (click)="sendChip(p)"
                     [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
-                    [attr.aria-hidden]="i >= activePrompts().length ? 'true' : null"
                     [title]="p.prompt">{{ p.label }}</button>
           </div>
         </div>

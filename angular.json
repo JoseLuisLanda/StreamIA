@@ -21,10 +21,6 @@
             "index": "src/index.html",
             "browser": "src/main.ts",
             "tsConfig": "tsconfig.app.json",
-            "externalDependencies": [
-              "fs",
-              "path"
-            ],
             "assets": [
               {
                 "glob": "**/*",

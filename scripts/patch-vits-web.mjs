@@ -1,58 +1,49 @@
 /**
- * Postinstall patch: make the Piper TTS deps browser-safe for the stock @angular/build
- * (esbuild) bundler -- WITHOUT a custom builder/plugin.
+ * Postinstall patch: make @diffusionstudio/vits-web browser-safe for the STOCK
+ * @angular/build (esbuild) bundler on Angular 21.
  *
- * @diffusionstudio/vits-web ships an emscripten bundle (piper-*.js) that contains Node-only
- * `require("fs")` / `require("path")` calls inside dead branches guarded by an
- * ENVIRONMENT_IS_NODE check. esbuild (platform: browser) still must RESOLVE those bare
- * specifiers and, with no Node polyfills, fails the build with:
- *   X [ERROR] Could not resolve "fs" / "path" [plugin angular-compiler]
+ * Why this exists: the @angular-builders/custom-esbuild alias-plugin approach is dead on
+ * Angular 21 (that builder hard-requires @angular/build@^19). vits-web's emscripten bundle
+ * (piper-*.js) has Node-only `require("fs")` / `require("path")` calls inside dead
+ * ENVIRONMENT_IS_NODE branches. esbuild (platform: browser) still must RESOLVE those bare
+ * specifiers; with `externalDependencies` they survive as bare imports that the Piper
+ * MODULE WORKER cannot resolve (a module worker does not inherit the page import map) ->
+ * the worker fails to load -> Piper falls back to MAIN-THREAD synthesis (UI freeze and the
+ * "numThreads is 32 / crossOriginIsolated" warning, since vits-web sets numThreads on the
+ * main thread when the worker is down).
  *
- * The @angular-builders/custom-esbuild alias-plugin approach is dead on Angular 21 (that
- * builder pins @angular/build@^19). The portable fix that works with the STOCK builder is
- * the package's own `browser` field: esbuild honors `browser: { "fs": false, "path": false }`
- * and substitutes an EMPTY module for those imports -- in EVERY chunk, including the Piper
- * web worker. The dead branches never run in the browser, so the empty stub is never called.
- *
- * This script merges (does not clobber) the `browser` map into each dep's package.json. It is
- * idempotent and re-runs on every `npm install` via the "postinstall" script.
+ * Fix: rewrite those dead `require("fs"|"path")` calls to an inline empty object `({})` in
+ * vits-web's dist, so there is NO bare specifier left for esbuild to resolve in EITHER the
+ * main or the worker chunk. The branches never run in the browser, so `({})` is inert. This
+ * lets `externalDependencies` be removed -> the worker bundles cleanly -> it loads and runs
+ * single-thread synthesis off the main thread. Idempotent (after the rewrite there is
+ * nothing left to match) and re-runs on every `npm install` via "postinstall".
  */
-import { readFileSync, writeFileSync } from 'node:fs';
-import { createRequire } from 'node:module';
+import { readdirSync, readFileSync, writeFileSync, statSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const require = createRequire(import.meta.url);
-const TARGETS = ['@diffusionstudio/vits-web', 'onnxruntime-web'];
-const BUILTINS = ['fs', 'path'];
+const here = dirname(fileURLToPath(import.meta.url));
+const dist = join(here, '..', 'node_modules', '@diffusionstudio', 'vits-web', 'dist');
 
-for (const name of TARGETS) {
-  let pkgPath;
-  try {
-    pkgPath = require.resolve(`${name}/package.json`);
-  } catch {
-    console.warn(`[patch-vits-web] ${name} not installed; skipping.`);
-    continue;
+function patchDir(dir) {
+  let count = 0;
+  let entries;
+  try { entries = readdirSync(dir); } catch { return 0; }
+  for (const name of entries) {
+    const p = join(dir, name);
+    if (statSync(p).isDirectory()) { count += patchDir(p); continue; }
+    if (!/\.(js|mjs|cjs)$/.test(name)) continue;
+    const src = readFileSync(p, 'utf8');
+    const re = /require\(\s*["'](?:fs|path)["']\s*\)/g;
+    if (!re.test(src)) continue;
+    writeFileSync(p, src.replace(/require\(\s*["'](?:fs|path)["']\s*\)/g, '({})'));
+    count++;
+    console.log('[patch-vits-web] stubbed fs/path require in ' + p);
   }
-
-  const pkg = JSON.parse(readFileSync(pkgPath, 'utf8'));
-
-  // Only the object form of `browser` is a substitution map. If a package uses the string
-  // form (alternate entry point), leave it alone to avoid breaking its browser build.
-  if (pkg.browser !== undefined && (typeof pkg.browser !== 'object' || pkg.browser === null)) {
-    console.warn(`[patch-vits-web] ${name} has a non-object "browser" field; skipping.`);
-    continue;
-  }
-
-  const browser = pkg.browser ?? {};
-  let changed = false;
-  for (const m of BUILTINS) {
-    if (browser[m] !== false) { browser[m] = false; changed = true; }
-  }
-
-  if (changed) {
-    pkg.browser = browser;
-    writeFileSync(pkgPath, JSON.stringify(pkg, null, 2) + '\n');
-    console.log(`[patch-vits-web] patched "browser" (fs/path -> false) in ${name}.`);
-  } else {
-    console.log(`[patch-vits-web] ${name} already patched.`);
-  }
+  return count;
 }
+
+const n = patchDir(dist);
+if (n) console.log('[patch-vits-web] patched ' + n + ' file(s).');
+else console.log('[patch-vits-web] nothing to patch (already done or dir missing): ' + dist);

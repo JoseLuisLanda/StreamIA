@@ -6,7 +6,9 @@
     "start": "ng serve",
     "build": "ng build",
     "watch": "ng build --watch --configuration development",
-    "test": "ng test"
+    "test": "ng test",
+    "patch-vits-web": "node scripts/patch-vits-web.mjs",
+    "postinstall": "node scripts/patch-vits-web.mjs"
   },
   "prettier": {
     "printWidth": 100,
