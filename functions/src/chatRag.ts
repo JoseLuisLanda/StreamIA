@@ -29,6 +29,8 @@ const DEFAULT_K = 6;
 const SUMMARY_MAX_TOKENS = 160;
 /** Output-token cap for the on-demand DETAIL stage. */
 const DETAIL_MAX_TOKENS = 768;
+/** Output-token cap for the SUGGESTIONS stage (3 short follow-up prompts as JSON). */
+const SUGGESTIONS_MAX_TOKENS = 128;
 
 interface ChatRagBody {
   query?: string;
@@ -42,8 +44,10 @@ interface ChatRagBody {
    *  - 'capabilities'  = metadata-only answer (no findNearest/chunks/media).
    *  - 'detail'        = STAGE 2 on-demand: detail-only, reusing the SAME chunks as
    *                      stage 1 (passed back as chunkIds) -> no embed, no findNearest.
+   *  - 'suggestions'   = 3 follow-up prompts, reusing the SAME chunks (chunkIds) ->
+   *                      no embed, no findNearest. Separate async call after the summary.
    */
-  mode?: 'rag' | 'capabilities' | 'detail';
+  mode?: 'rag' | 'capabilities' | 'detail' | 'suggestions';
   /** STAGE 2: the chunk doc ids from stage 1's `sources` (keeps detail consistent). */
   chunkIds?: string[];
 }
@@ -94,7 +98,10 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   // Optional per-assistant custom capabilities prompt template (used only when the
   // capabilities flag is on). Read from the same doc -> zero extra reads, zero client trust.
   let capPromptTemplate = '';
-  const mode = body.mode === 'capabilities' ? 'capabilities' : body.mode === 'detail' ? 'detail' : 'rag';
+  const mode = body.mode === 'capabilities' ? 'capabilities'
+    : body.mode === 'detail' ? 'detail'
+    : body.mode === 'suggestions' ? 'suggestions'
+    : 'rag';
   const assistantId = (body.assistantId ?? '').trim();
   try {
     if (assistantId) {
@@ -149,6 +156,20 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
       assistantId, llmProfileId, persona, language, query, namespace,
       chunkIds: body.chunkIds ?? [], k, stage,
       overrideProfileId: asstDetailProfileId, globalProfileId: stageModels.detailProfileId,
+    });
+    return;
+  }
+
+  // === SUGGESTIONS MODE: generate 3 short follow-up prompts from the SAME stage-1
+  // chunks (passed as chunkIds) -- no embed, no findNearest. Reuses the SUMMARY profile.
+  // Called by the client AFTER the summary (separate, async request) so the summary
+  // speed is untouched. Never hard-fails: returns { suggestions: [] } on any error so
+  // the client falls back to its static chips. ===
+  if (mode === 'suggestions') {
+    await answerSuggestions(res, {
+      assistantId, llmProfileId, persona, language, query, namespace,
+      chunkIds: body.chunkIds ?? [], k, stage,
+      overrideProfileId: asstSummaryProfileId, globalProfileId: stageModels.summaryProfileId,
     });
     return;
   }
@@ -463,6 +484,83 @@ async function answerDetail(
   res.json({ summary: '', detail: detailText, body: '', gestureCommands: '', media: [], sources: [] });
 }
 
+/**
+ * SUGGESTIONS stage: produce exactly 3 short follow-up prompts grounded in the SAME
+ * stage-1 chunks (reused by id -- no embed, no findNearest, same cheap pattern as detail).
+ * Reuses the SUMMARY profile/model. Never hard-fails: any error or unparsable output ->
+ * { suggestions: [] } (HTTP 200) so the client cleanly falls back to its static chips.
+ */
+async function answerSuggestions(
+  res: Response,
+  args: {
+    assistantId: string; llmProfileId: string; persona: string;
+    language: string; query: string; namespace: string;
+    chunkIds: string[]; k: number;
+    overrideProfileId?: string; globalProfileId?: string;
+    stage: (label: string, from: number) => void;
+  },
+): Promise<void> {
+  const { assistantId, llmProfileId, persona, language, query, namespace, chunkIds, stage } = args;
+
+  // Reuse the EXACT stage-1 chunks by id (no embed, no findNearest). If none were
+  // provided, skip generation and return empty (client keeps its static chips).
+  let context = '';
+  try {
+    const tCtx = Date.now();
+    if (chunkIds.length) {
+      context = await fetchChunksByIds(namespace, chunkIds.slice(0, MAX_K));
+      stage('S1 suggestions context: chunks by id (no embed, no findNearest)', tCtx);
+    }
+  } catch (e) {
+    logger.warn('chatRag suggestions context failed', { namespace, error: String(e) });
+  }
+  if (!context.trim()) { res.json({ suggestions: [] }); return; }
+
+  let suggestions: string[] = [];
+  try {
+    const genPersona = `${persona ? persona + '\n\n' : ''}${SUGGESTIONS_DIRECTIVE}`;
+    const tProfile = Date.now();
+    const { profile, source } = await resolveStageProfile({
+      assistantId, overrideProfileId: args.overrideProfileId,
+      globalProfileId: args.globalProfileId, legacyProfileId: llmProfileId,
+    });
+    stage('S2 suggestions profile resolve (reuses summary profile)', tProfile);
+    logger.info('chatRag: suggestions profile resolved', {
+      assistantId, source, profile: profile.name, provider: profile.provider, model: profile.model,
+    });
+    const sugProfile = { ...profile, maxOutputTokens: Math.min(profile.maxOutputTokens ?? SUGGESTIONS_MAX_TOKENS, SUGGESTIONS_MAX_TOKENS) };
+    const tGen = Date.now();
+    const result = await generateFromProfile(sugProfile, query, context, language, genPersona);
+    stage(`S3 suggestions LLM generation (${profile.provider}/${profile.model}, ONE call)`, tGen);
+    suggestions = parseSuggestions(result.text);
+  } catch (e: any) {
+    const m = e?.meta ?? {};
+    logger.warn('chatRag suggestions generation failed (returning empty -> client falls back)', {
+      assistantId, namespace, provider: m.provider, model: m.model, error: e?.message ?? String(e),
+    });
+    suggestions = [];
+  }
+  res.json({ suggestions });
+}
+
+/** Parse the LLM output into up to 3 trimmed suggestion strings (strict-JSON tolerant). */
+function parseSuggestions(raw: string): string[] {
+  const text = (raw ?? '').toString();
+  const start = text.indexOf('[');
+  const end = text.lastIndexOf(']');
+  if (start < 0 || end <= start) return [];
+  let arr: unknown;
+  try { arr = JSON.parse(text.slice(start, end + 1)); } catch { return []; }
+  if (!Array.isArray(arr)) return [];
+  const out: string[] = [];
+  for (const v of arr) {
+    const s = (typeof v === 'string' ? v : '').trim();
+    if (s) out.push(s);
+    if (out.length === 3) break;
+  }
+  return out;
+}
+
 /** Fetch specific chunk docs by id and join their text (preserves request order). */
 async function fetchChunksByIds(namespace: string, ids: string[]): Promise<string> {
   if (!ids.length) return '';
@@ -517,6 +615,18 @@ const DETAIL_ONLY_DIRECTIVE =
   'Genera un analisis COMPLETO y EXTENSO (varios parrafos) que amplie la respuesta breve, ' +
   'fundado UNICAMENTE en el CONTEXTO, sin saludos ni despedidas y sin marcadores. ' +
   'Escribelo en el mismo idioma de la pregunta. Este texto se mostrara como lectura (no se habla).';
+
+/**
+ * SUGGESTIONS directive: exactly 3 short, natural follow-up prompts the user might ask
+ * next, grounded in the retrieved CONTEXT (not generic). Strict JSON array of 3 strings.
+ */
+const SUGGESTIONS_DIRECTIVE =
+  'Basandote UNICAMENTE en el CONTEXTO y en la pregunta del usuario, propone EXACTAMENTE 3 ' +
+  'preguntas de seguimiento que el usuario podria hacer a continuacion: cortas y naturales ' +
+  '(maximo unas 6 palabras cada una), especificas al contenido (no genericas), en el mismo ' +
+  'idioma de la pregunta, formuladas como las haria el usuario. Responde UNICAMENTE con un ' +
+  'arreglo JSON valido de 3 cadenas y nada mas, sin texto adicional ni bloques de codigo. ' +
+  'Ejemplo de formato: ["pregunta uno", "pregunta dos", "pregunta tres"].';
 
 /**
  * Directive that makes the model emit a short spoken SUMMARY + a full DETAIL,

@@ -221,6 +221,13 @@ export class RagAvatarService {
    */
   private normalize(data: unknown): RagAvatarResponse {
     const obj = (data ?? {}) as Record<string, any>;
+    const suggestions = Array.isArray(obj['suggestions'])
+      ? (obj['suggestions'] as any[]).map((s) => String(s)) : undefined;
+
+    // Suggestions-mode payload: { suggestions: [...] } with no body/summary.
+    if (suggestions && typeof obj['summary'] !== 'string' && typeof obj['body'] !== 'string' && typeof obj['gestureCommands'] !== 'string') {
+      return { body: '', gestureCommands: '', media: [], sources: [], suggestions };
+    }
 
     // Structured shape: has summary/body or gestureCommands.
     if (typeof obj['summary'] === 'string' || typeof obj['body'] === 'string' || typeof obj['gestureCommands'] === 'string') {
@@ -235,6 +242,7 @@ export class RagAvatarService {
         gestureCommands,
         media: Array.isArray(obj['media']) ? (obj['media'] as MediaItem[]) : [],
         sources: Array.isArray(obj['sources']) ? (obj['sources'] as RagSource[]) : [],
+        suggestions,
       };
     }
 

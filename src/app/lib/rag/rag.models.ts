@@ -31,7 +31,7 @@ export interface RagRequest {
    *  - 'capabilities' = metadata-only answer (no retrieval/media).
    *  - 'detail'       = STAGE 2 detail-only, reusing stage-1 chunks via `chunkIds`.
    */
-  mode?: 'rag' | 'capabilities' | 'detail';
+  mode?: 'rag' | 'capabilities' | 'detail' | 'suggestions';
   /** STAGE 2: chunk ids from stage 1's `sources`, so the detail reuses the same context. */
   chunkIds?: string[];
 }
@@ -48,9 +48,10 @@ export interface RagAskOptions {
   preview?: boolean;
   language?: string;
   voice?: string;
-  /** 'capabilities' = metadata-only; 'detail' = stage-2 detail-only. Default = stage-1 summary. */
-  mode?: 'rag' | 'capabilities' | 'detail';
-  /** STAGE 2: chunk ids from stage 1's sources (reuses the same context). */
+  /** 'capabilities' = metadata-only; 'detail' = stage-2 detail-only; 'suggestions' =
+   *  3 follow-up prompts (reuses stage-1 chunks). Default = stage-1 summary. */
+  mode?: 'rag' | 'capabilities' | 'detail' | 'suggestions';
+  /** STAGE 2/suggestions: chunk ids from stage 1's sources (reuses the same context). */
   chunkIds?: string[];
 }
 
@@ -88,6 +89,8 @@ export interface RagResponse {
   media?: MediaItem[];
   /** retrieval citations (optional) */
   sources?: RagSource[];
+  /** 'suggestions' mode: up to 3 follow-up prompt strings. Absent in other modes. */
+  suggestions?: string[];
 }
 
 /**

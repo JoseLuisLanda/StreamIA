@@ -125,7 +125,7 @@ const CHIP_LABELS: Record<string, string> = {
              through the FULL per-assistant prompt set (PROMPT_CAROUSEL_INTERVAL_MS).
              Hover/touch pauses rotation. Tapping a chip still sends that prompt.
              Dimmed (faded out) while subtitles are showing; fades back when idle. -->
-        <div class="prompt-carousel" *ngIf="ragMode && suggestedPrompts().length"
+        <div class="prompt-carousel" *ngIf="ragMode && activePrompts().length"
              [class.dim]="subStage() !== 'hidden'"
              (pointerenter)="pauseCarousel()" (pointerleave)="resumeCarousel()">
           <button class="chip" *ngFor="let p of carouselPrompts(); trackBy: trackPrompt"
@@ -1229,9 +1229,18 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     carouselIndex = signal(0);
     private carouselTimer: any = null;
 
-    /** A wrapping window of the FULL per-assistant suggested-prompts list. */
+    /** Dynamic, per-turn LLM follow-up suggestions. null/empty -> static fallback chips. */
+    dynamicSuggestions = signal<SuggestedPrompt[] | null>(null);
+    /** Active chip set: the dynamic suggestions for this turn when present, otherwise the
+     *  static per-assistant prompts (so the chips are never empty / never block on the LLM). */
+    activePrompts = computed<SuggestedPrompt[]>(() => {
+        const d = this.dynamicSuggestions();
+        return (d && d.length) ? d : this.suggestedPrompts();
+    });
+
+    /** A wrapping window of the ACTIVE prompt set (dynamic suggestions or static). */
     carouselPrompts = computed<SuggestedPrompt[]>(() => {
-        const all = this.suggestedPrompts();
+        const all = this.activePrompts();
         const n = all.length;
         if (n <= this.PROMPT_CAROUSEL_VISIBLE) return all;
         const start = this.carouselIndex() % n;
@@ -1244,7 +1253,7 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     private startCarousel(): void {
         if (this.carouselTimer) return;
         this.carouselTimer = setInterval(() => {
-            const n = this.suggestedPrompts().length;
+            const n = this.activePrompts().length;
             if (n > this.PROMPT_CAROUSEL_VISIBLE) this.carouselIndex.update((i) => (i + 1) % n);
         }, this.PROMPT_CAROUSEL_INTERVAL_MS);
     }
@@ -1254,6 +1263,52 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     /** Pause on hover/touch (nice-to-have). */
     pauseCarousel(): void { this.stopCarousel(); }
     resumeCarousel(): void { this.startCarousel(); }
+
+    // ----------------------------------------------- dynamic follow-up suggestions
+    /** Message id we last requested suggestions for (avoids duplicate/stale fetches). */
+    private lastSuggestionMsgId = -1;
+    /**
+     * When a NEW assistant turn with reusable chunks arrives, fetch 3 follow-up prompts in
+     * the BACKGROUND (separate 'suggestions' call, reusing the turn's chunkIds). Non-blocking:
+     * the summary/speech path is untouched. Resets to the static fallback until they arrive.
+     */
+    private _suggestFx = effect(() => {
+        const msgs = this.conv.messages();
+        untracked(() => {
+            if (!this.ragMode) return;
+            let target: ConvMessage | undefined;
+            for (let i = msgs.length - 1; i >= 0; i--) {
+                const m = msgs[i];
+                if (m.role === 'assistant' && (m.srcQuery || '').trim() && m.sourceIds?.length) { target = m; break; }
+            }
+            if (!target || target.id === this.lastSuggestionMsgId) return;
+            this.lastSuggestionMsgId = target.id;
+            this.dynamicSuggestions.set(null);   // fall back to static chips until fresh ones land
+            void this.fetchSuggestions(target);
+        });
+    });
+
+    /** Background 'suggestions' request reusing the turn's chunkIds (no re-embed). */
+    private async fetchSuggestions(m: ConvMessage): Promise<void> {
+        try {
+            const resp = await this.rag.ask((m.srcQuery || '').trim(), {
+                assistantId: this.assistantId,
+                namespace: this.assistant()?.ragCollection,
+                language: this.lang,
+                voice: this.voiceId,
+                mode: 'suggestions',
+                chunkIds: m.sourceIds,
+            });
+            if (this.lastSuggestionMsgId !== m.id) return; // a newer turn superseded this one
+            const arr = resp.suggestions ?? [];
+            const opts: SuggestedPrompt[] = arr
+                .map((s) => (s || '').trim())
+                .filter((s) => !!s)
+                .slice(0, 3)
+                .map((s, i) => ({ id: 'sg-' + i, label: s, prompt: s, order: i, enabled: true }));
+            if (opts.length) this.dynamicSuggestions.set(opts); // else keep the static fallback
+        } catch { /* keep static fallback on any error */ }
+    }
 
     ngOnDestroy(): void {
         this.clearChatTimers(); this.stopCarousel(); this.clearFlyTimer();
