@@ -121,17 +121,22 @@ const CHIP_LABELS: Record<string, string> = {
         <app-avatar-tts [avatarUrl]="avatarUrl()" [compact]="pipActive()" (rigReport)="onRigReport($event)"></app-avatar-tts>
         <button class="pip-x" *ngIf="pipActive()" (click)="closeDetail(); closeMediaViewer()" title="Expandir avatar">⤢</button>
 
-        <!-- suggested-prompt carousel pinned to the avatar's bottom edge; auto-advances
-             through the FULL per-assistant prompt set (PROMPT_CAROUSEL_INTERVAL_MS).
-             Hover/touch pauses rotation. Tapping a chip still sends that prompt.
-             Dimmed (faded out) while subtitles are showing; fades back when idle. -->
+        <!-- suggested-prompt carousel pinned to the avatar's bottom edge: a SLOW, smooth,
+             continuous CSS marquee (transform translate, --hint-scroll-ms). Hover or press
+             pauses the drift (animation-play-state) so chips are readable/tappable; the
+             button click still fires. Content = dynamic 3 suggestions (or static fallback).
+             Dimmed (faded out) while subtitles show; fades back + resumes drift when idle. -->
         <div class="prompt-carousel" *ngIf="ragMode && activePrompts().length"
-             [class.dim]="subStage() !== 'hidden'"
-             (pointerenter)="pauseCarousel()" (pointerleave)="resumeCarousel()">
-          <button class="chip" *ngFor="let p of carouselPrompts(); trackBy: trackPrompt"
-                  (click)="sendChip(p)"
-                  [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
-                  [title]="p.prompt">{{ p.label }}</button>
+             [class.dim]="subStage() !== 'hidden'" [class.paused]="hintPaused()"
+             (pointerenter)="pauseHints()" (pointerleave)="resumeHints()"
+             (pointerdown)="pauseHints()" (pointerup)="resumeHints()" (pointercancel)="resumeHints()">
+          <div class="hint-track">
+            <button class="chip" *ngFor="let p of hintLoop(); let i = index; trackBy: trackHint"
+                    (click)="sendChip(p)"
+                    [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
+                    [attr.aria-hidden]="i >= activePrompts().length ? 'true' : null"
+                    [title]="p.prompt">{{ p.label }}</button>
+          </div>
         </div>
 
         <!-- LIVE SUBTITLE (rolling caption): progressively revealed in sync with the voice
@@ -861,16 +866,36 @@ const CHIP_LABELS: Record<string, string> = {
     .statusband .statuspill { pointer-events: auto; }
 
     /* Prompt-chip carousel pinned to the avatar's bottom edge (auto-rotating window). */
+    /* Carousel = a CENTERED, fixed-width clipped band for a slow marquee. The band is
+       centered on screen (left:50% + translateX(-50%)); landscape ~50vw, portrait ~75vw
+       (set in the media query). The inner .hint-track (doubled chips) starts FLUSH at the
+       band's left (no left padding/mask -> no left-edge clip on load) and drifts 0 -> -50%
+       linearly, looping seamlessly. Only ~2.5 chips fit -> 2 full + the 3rd peeking at the
+       RIGHT (soft right-edge fade). --hint-scroll-ms = tunable speed (higher = slower). */
     .prompt-carousel {
-      position: absolute; left: 0; right: 0; bottom: 8px; z-index: 12;
-      display: flex; gap: 8px; justify-content: center; align-items: center;
-      flex-wrap: nowrap; overflow: hidden; padding: 0 12px;
+      position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 12;
+      width: 50vw; max-width: 720px;
+      display: block; overflow: hidden; padding: 0;
+      --hint-scroll-ms: 30000ms;
+      transition: opacity .22s ease;
+      /* Right-edge fade only: hints the incoming 3rd chip; never clips the left. */
+      -webkit-mask-image: linear-gradient(to right, #000 82%, transparent 100%);
+              mask-image: linear-gradient(to right, #000 82%, transparent 100%);
     }
+    .prompt-carousel.dim { opacity: 0; pointer-events: none; }
+    .hint-track {
+      display: inline-flex; flex-wrap: nowrap; align-items: center; gap: 10px; width: max-content;
+      animation: hint-scroll var(--hint-scroll-ms) linear infinite; will-change: transform;
+    }
+    /* Pause on hover OR press (the .paused class is toggled on pointerdown/enter). The
+       button click still fires -- pausing only freezes the animation, it does not block
+       pointer events; the tap lands on the now-stationary chip. */
+    .prompt-carousel:hover .hint-track,
+    .prompt-carousel.paused .hint-track { animation-play-state: paused; }
+    @media (prefers-reduced-motion: reduce) { .hint-track { animation: none; } }
     .prompt-carousel .chip { animation: chipfade .4s ease both; }
     @keyframes chipfade { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
-    /* Carousel fades out while subtitles show, fades back in when idle (220ms). */
-    .prompt-carousel { transition: opacity .22s ease; }
-    .prompt-carousel.dim { opacity: 0; pointer-events: none; }
+    @keyframes hint-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
 
     /* Live subtitle bar over the lower avatar. Durations below MUST match the TS
        constants SUBTITLE_FLY_MS (650) and SUBTITLE_FADE_MS (220). */
@@ -1072,13 +1097,10 @@ const CHIP_LABELS: Record<string, string> = {
       .statuspill { font-size: 12px; padding: 6px 13px; }
       .bubble { font-size: 12.5px; }
       .vermas { font-size: 11px; }
-      /* Hint chips: keep them FULLY visible -- inset from both edges, smaller font/padding,
-         and WRAP (overflow visible) so a chip is never sliced by the screen edge. */
-      .prompt-carousel {
-        left: 0; right: 0; padding: 0 14px; overflow: visible;
-        flex-wrap: wrap; row-gap: 6px;
-      }
-      .prompt-carousel .chip { font-size: 11px; padding: 5px 11px; max-width: calc(100vw - 36px); }
+      /* Hint chips on narrow screens: the centered band widens to ~75vw (still centered via
+         the base left:50% + translateX) with smaller chips; the marquee drifts within it. */
+      .prompt-carousel { width: 75vw; max-width: none; }
+      .prompt-carousel .chip { font-size: 11px; padding: 5px 11px; max-width: 70vw; }
       /* Consistent side gutter for the other edge-touching bands. */
       .statusband { padding-left: 14px; padding-right: 14px; }
       .bottom-cluster { padding-left: 14px; padding-right: 14px; }
@@ -1220,15 +1242,7 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     }
     closeMedia(): void { this.mediaOpen.set(false); }
 
-    // -------------------------------------------------------- prompt carousel
-    /** Auto-advance interval (ms) for the suggested-prompt carousel. */
-    private readonly PROMPT_CAROUSEL_INTERVAL_MS = 2000;
-    /** Chips visible in the carousel window at once (it slides through the full set). */
-    private readonly PROMPT_CAROUSEL_VISIBLE = 2;
-    /** Rotating start index into the full suggested-prompts list. */
-    carouselIndex = signal(0);
-    private carouselTimer: any = null;
-
+    // ----------------------------------------------- prompt carousel (CSS marquee)
     /** Dynamic, per-turn LLM follow-up suggestions. null/empty -> static fallback chips. */
     dynamicSuggestions = signal<SuggestedPrompt[] | null>(null);
     /** Active chip set: the dynamic suggestions for this turn when present, otherwise the
@@ -1237,32 +1251,18 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         const d = this.dynamicSuggestions();
         return (d && d.length) ? d : this.suggestedPrompts();
     });
-
-    /** A wrapping window of the ACTIVE prompt set (dynamic suggestions or static). */
-    carouselPrompts = computed<SuggestedPrompt[]>(() => {
-        const all = this.activePrompts();
-        const n = all.length;
-        if (n <= this.PROMPT_CAROUSEL_VISIBLE) return all;
-        const start = this.carouselIndex() % n;
-        const out: SuggestedPrompt[] = [];
-        for (let i = 0; i < this.PROMPT_CAROUSEL_VISIBLE; i++) out.push(all[(start + i) % n]);
-        return out;
+    /** Doubled list for a SEAMLESS CSS marquee: the track translates 0 -> -50%, where the
+     *  second copy sits exactly where the first started -> the loop wraps with no visible
+     *  jump. Motion is pure CSS (transform animation); no JS timer / per-step index. */
+    hintLoop = computed<SuggestedPrompt[]>(() => {
+        const a = this.activePrompts();
+        return a.length ? [...a, ...a] : [];
     });
-    trackPrompt = (_: number, p: SuggestedPrompt) => p.label + '|' + p.prompt;
-
-    private startCarousel(): void {
-        if (this.carouselTimer) return;
-        this.carouselTimer = setInterval(() => {
-            const n = this.activePrompts().length;
-            if (n > this.PROMPT_CAROUSEL_VISIBLE) this.carouselIndex.update((i) => (i + 1) % n);
-        }, this.PROMPT_CAROUSEL_INTERVAL_MS);
-    }
-    private stopCarousel(): void {
-        if (this.carouselTimer) { clearInterval(this.carouselTimer); this.carouselTimer = null; }
-    }
-    /** Pause on hover/touch (nice-to-have). */
-    pauseCarousel(): void { this.stopCarousel(); }
-    resumeCarousel(): void { this.startCarousel(); }
+    trackHint = (i: number) => i; // index key: the two copies are intentionally identical
+    /** True while the user hovers or presses the carousel -> motion paused (CSS class). */
+    hintPaused = signal(false);
+    pauseHints(): void { this.hintPaused.set(true); }
+    resumeHints(): void { this.hintPaused.set(false); }
 
     // ----------------------------------------------- dynamic follow-up suggestions
     /** Message id we last requested suggestions for (avoids duplicate/stale fetches). */
@@ -1311,7 +1311,7 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     }
 
     ngOnDestroy(): void {
-        this.clearChatTimers(); this.stopCarousel(); this.clearFlyTimer();
+        this.clearChatTimers(); this.clearFlyTimer();
         this.subMql?.removeEventListener('change', this.subMqlHandler);
     }
 
@@ -1953,8 +1953,7 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         // Resolve admin status for UI gating (gear + Response Editor). UX only —
         // real enforcement is server-side in rules/callables.
         void this.admin.check();
-        // Start the suggested-prompt carousel rotation (idempotent; paused on hover).
-        this.startCarousel();
+        // (Hint carousel motion is now pure CSS -- no JS timer to start.)
         // React to orientation/size crossing the 1024px breakpoint (subtitle line limit).
         this.subMql?.addEventListener('change', this.subMqlHandler);
         // Load the avatar list from the DB (avatars/{id}) and restore the last selection.
