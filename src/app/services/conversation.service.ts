@@ -537,6 +537,32 @@ export class ConversationService {
         this.revealingMsgId.set(null);
     }
 
+    /**
+     * Full session reset for LEAVING the page or SWITCHING assistant. Goes beyond
+     * clear(): first interruptInternals() stops TTS + STT and bumps the generation
+     * token so any in-flight turn (summary/detail/suggestions) becomes a no-op when
+     * it resolves; then it wipes the transcript/streaming/plans AND zeroes the badge
+     * counters (deliveredCount / deliveredMediaCount / speechCompleted) plus the
+     * dedupe set and non-repeat picker, so nothing from the previous assistant or
+     * session carries over. Ends in the idle state. Does NOT touch the 3D
+     * canvas/scene (audio stop != scene teardown).
+     */
+    resetSession(): void {
+        this.interruptInternals();   // gen++, tts.stop(), stt.stop(); clears streaming/speaking/revealing
+        this.messages.set([]);
+        this.streaming.set('');
+        this.llm.clearConversation();
+        this.plans.clear();
+        this.speakingMsgId.set(null);
+        this.revealingMsgId.set(null);
+        this.deliveredCount.set(0);
+        this.deliveredMediaCount.set(0);
+        this.speechCompleted.set(0);
+        this.deliveredIds.clear();
+        this.lastPick = {};
+        this.setState('idle');
+    }
+
     // ----------------------------------------------------------------- turn
 
     private async runTurn(transcript: string, optsOverride?: ConvTtsOpts): Promise<void> {

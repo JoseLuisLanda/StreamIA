@@ -2,6 +2,7 @@ import { Component, ElementRef, ViewChild, AfterViewChecked, OnInit, OnDestroy, 
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
+import { Subscription } from 'rxjs';
 import { AdminService } from '../../services/admin.service';
 import { AvatarManagerService } from '../../services/avatar-manager.service';
 import { AvatarService } from '../../services/avatar.service';
@@ -14,6 +15,8 @@ import { MediaGalleryComponent } from '../../components/media-gallery/media-gall
 import { RagAvatarService } from '../../services/rag-avatar.service';
 import { AssistantConfigService } from '../../services/assistant-config.service';
 import { ConversationContentService } from '../../services/conversation-content.service';
+import { AuthService } from '../../services/auth.service';
+import { ConversationHistoryService, ConversationSummary, StoredMessage } from '../../services/conversation-history.service';
 import { AssistantConvContent, SuggestedPrompt } from '../../lib/conversation-content/conv-content.models';
 import { MediaItem } from '../../lib/rag/rag.models';
 import { AssistantConfig } from '../../lib/rag/rag.models';
@@ -81,8 +84,9 @@ const CHIP_LABELS: Record<string, string> = {
             </svg>
             <span class="badge media" *ngIf="mediaUnread() > 0">{{ mediaBadge() }}</span>
           </button>
-          <!-- Settings gear (admin-only). The theater-masks Studio toggle was removed. -->
-          <button class="iconbtn" *ngIf="admin.isAdmin()" (click)="settingsOpen.set(!settingsOpen())" title="Ajustes">⚙️</button>
+          <!-- Settings gear: admins (avatar picker + rig) OR any signed-in user (to
+               reach their conversation history). Signed-out users do not see it. -->
+          <button class="iconbtn" *ngIf="admin.isAdmin() || auth.user()" (click)="settingsOpen.set(!settingsOpen())" title="Ajustes">⚙️</button>
         </div>
       </header>
 
@@ -450,10 +454,33 @@ const CHIP_LABELS: Record<string, string> = {
           </div>
         </div>
         <p class="note err-text" *ngIf="avatarLoadError()">⚠️ {{ avatarLoadError() }}</p>
-        <div class="conf-detail" *ngIf="selectedReport() as r">
-          <b>{{ confLabel(r.conformance) }}</b> — {{ r.matchedArkit.length }}/52 ARKit, head bone: {{ r.hasHeadBone ? '✓' : '✕' }}
-          <div *ngFor="let w of r.warnings" class="conf-warn">⚠️ {{ w }}</div>
-        </div>
+
+        <!-- Conversation history (per user, per assistant). Replaces the old rig
+             "Fully conforms (ARKit-52)" info block. On-demand restore only. -->
+        <h4 class="hist-h">Historial de conversaciones</h4>
+        <p class="note" *ngIf="!auth.user()">Inicia sesion para guardar tu historial.</p>
+        <ng-container *ngIf="auth.user()">
+          <p class="note" *ngIf="history.loading()">Cargando historial...</p>
+          <p class="note" *ngIf="!history.loading() && !history.list().length">
+            Aun no tienes conversaciones guardadas con este asistente.
+          </p>
+          <div class="hist-list" *ngIf="history.list().length">
+            <div class="hist-row" *ngFor="let c of history.list(); trackBy: trackHist"
+                 (click)="restoreConversation(c)" [title]="c.title">
+              <div class="hist-main">
+                <span class="hist-title">{{ c.title }}</span>
+                <span class="hist-meta">{{ historyWhen(c.updatedAt) }} &middot; {{ c.messageCount }} msj</span>
+              </div>
+              <button class="hist-del" (click)="deleteConversation(c, $event)"
+                      title="Eliminar conversacion" aria-label="Eliminar conversacion">
+                <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                     stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M3 6h18M8 6V4h8v2M19 6l-1 14H6L5 6M10 11v6M14 11v6"/>
+                </svg>
+              </button>
+            </div>
+          </div>
+        </ng-container>
       </div>
     </div>
   `,
@@ -1007,6 +1034,24 @@ const CHIP_LABELS: Record<string, string> = {
     .conf-partial { color: #d9a440; } .conf-incompatible { color: #f87171; }
     .conf-detail { font-size: 11px; color: #98a; background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 8px 10px; margin: 2px 0 6px; }
     .conf-detail b { color: #c4b0f7; }
+    /* Conversation history list (Settings panel) */
+    .hist-h { margin-top: 16px; }
+    .hist-list { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 6px; }
+    .hist-row {
+      display: flex; align-items: center; gap: 8px; cursor: pointer;
+      background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.08);
+      border-radius: 10px; padding: 8px 10px; transition: background .15s, border-color .15s;
+    }
+    .hist-row:hover { background: rgba(139,92,246,.12); border-color: rgba(139,92,246,.35); }
+    .hist-main { display: flex; flex-direction: column; gap: 2px; min-width: 0; flex: 1; }
+    .hist-title { font-size: 12.5px; color: #E8E9EE; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    .hist-meta { font-size: 10.5px; color: #889; }
+    .hist-del {
+      flex: none; width: 26px; height: 26px; border-radius: 8px; cursor: pointer;
+      background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.1); color: #b9899a;
+      display: grid; place-items: center; transition: background .15s, color .15s;
+    }
+    .hist-del:hover { background: rgba(179,57,57,.55); color: #fff; border-color: #c0392b; }
     .conf-warn { color: #d9a440; margin-top: 3px; font-size: 10.5px; }
     .manual-label { margin-top: 4px; }
     code { background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
@@ -1123,6 +1168,8 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     private avatarMgr = inject(AvatarManagerService);
     private avatars = inject(AvatarService);
     private convContent = inject(ConversationContentService);
+    public auth = inject(AuthService);
+    public history = inject(ConversationHistoryService);
 
     // Per-assistant conversational content (chips + sync indicator)
     suggestedPrompts = signal<SuggestedPrompt[]>([]);
@@ -1310,7 +1357,11 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     }
 
     ngOnDestroy(): void {
-        this.clearChatTimers(); this.clearFlyTimer();
+        this.routeSub?.unsubscribe();
+        // Leaving the page (back, route change, etc.) must always stop TTS/audio,
+        // cancel any in-flight turn, and clear state so nothing keeps running or
+        // carries over. resetSessionState() also clears the chat/fly timers.
+        this.resetSessionState();
         this.subMql?.removeEventListener('change', this.subMqlHandler);
     }
 
@@ -1600,8 +1651,13 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         return letters.toUpperCase();
     }
 
-    /** Back arrow -> assistants list. */
-    goBack(): void { void this.router.navigate(['/assistants']); }
+    /** Back arrow -> assistants list. Stop + wipe FIRST so the avatar goes silent at
+     *  once and no audio / in-flight response survives the navigation (ngOnDestroy
+     *  also resets, but doing it here makes the silence immediate on tap). */
+    goBack(): void {
+        this.resetSessionState();
+        void this.router.navigate(['/assistants']);
+    }
 
     /** Language change from the settings slideover (replaces the removed navbar toggle). */
     setLang(l: TtsLang): void {
@@ -1958,15 +2014,224 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         // Load the avatar list from the DB (avatars/{id}) and restore the last selection.
         await this.loadDbAvatars();
 
-        // If launched from the /assistants selector (?assistant=ID), load that
-        // assistant fully configured and turn RAG mode on. Falls back silently if
-        // absent so direct /text-avatar access keeps working.
-        const dep = this.route.snapshot.queryParamMap.get('assistant');
+        // React to the ?assistant= query param for BOTH the initial load and any
+        // in-place switch (the component is reused if Angular keeps the same route
+        // config; recreated if we leave to /assistants first -- this handles both).
+        // Subscribing (vs reading the one-shot snapshot) means a param change while
+        // the component is reused triggers onAssistantParam(), which resets to a
+        // clean slate before loading the new assistant. Falls back silently when the
+        // param is absent so direct /text-avatar access keeps working.
+        this.routeSub = this.route.queryParamMap.subscribe((pm) => {
+            void this.onAssistantParam(pm.get('assistant'));
+        });
+    }
+
+    /** Last ?assistant= value handled, so we only reset/reload on a REAL change. */
+    private currentAssistantParam: string | null = null;
+    private routeSub?: Subscription;
+
+    /**
+     * Handle the ?assistant= param for first load and in-place switches. On any real
+     * change it RESETS the whole session (stop speech, cancel in-flight summary/detail/
+     * suggestions, wipe history/media/suggestions/subtitles/badge counts) BEFORE
+     * loading the new assistant, so nothing stale carries over. The 3D canvas is NOT
+     * recreated -- setRagMode swaps the avatar GLB and the scene resizes in place.
+     */
+    private async onAssistantParam(dep: string | null): Promise<void> {
+        if (dep === this.currentAssistantParam) return; // no real change -> no reset
+        this.currentAssistantParam = dep;
+        this.resetSessionState();
         if (dep) {
             this.assistantId = dep;
             setAssistantId(dep);
             await this.setRagMode(true); // loads deployment (avatar/voice/lang/lead-tail) + wires RAG fetcher
         }
+        void this.loadHistoryList(); // refresh the Settings history list for this assistant
+    }
+
+    /** Load the signed-in user's saved conversations for the CURRENT assistant
+     *  (newest first). No-op (clears the list) when signed out or no assistant. */
+    async loadHistoryList(): Promise<void> {
+        const u = this.auth.user();
+        if (!u || !this.assistantId) { this.history.list.set([]); return; }
+        await this.history.loadList(u.uid, this.assistantId);
+    }
+
+    /**
+     * Clean slate for the page: stop + wipe the singleton conversation/audio
+     * (conv.resetSession) and reset THIS component's view state -- dynamic
+     * suggestions back to the static chips, subtitle overlay hidden, detail/media
+     * overlays closed, chat popup collapsed, and the unread-badge baselines zeroed.
+     * Idempotent; safe to call on enter, on assistant switch, and on leave. Never
+     * touches the avatar canvas/scene.
+     */
+    private resetSessionState(): void {
+        // Persist any pending edits of the CURRENT session BEFORE we clear messages,
+        // then forget the active doc so the NEXT session starts a fresh conversation.
+        this.flushHistory();
+        this.history.resetCurrent();
+        this.lastSavedSig = '';
+        // Singleton conversation + TTS/STT + in-flight cancel + badge counters.
+        this.conv.resetSession();
+        // Dynamic follow-up chips -> fall back to the static carousel.
+        this.dynamicSuggestions.set(null);
+        this.lastSuggestionMsgId = -1;
+        // Unread baselines (chat + media badges) back to zero.
+        this.chatSeenCount.set(0);
+        this.mediaSeenCount.set(0);
+        // Subtitle overlay off + cancel its fly timer.
+        this.clearFlyTimer();
+        this.subStage.set('hidden');
+        this.subCurrentId.set(null);
+        // Close any open overlays.
+        this.detailOpen.set(null);
+        this.detailText.set('');
+        this.detailLoading.set(false);
+        this.detailError.set('');
+        this.mediaViewer.set(null);
+        // Collapse the chat popup + clear its idle/fade timers.
+        this.clearChatTimers();
+        this.chatOpen.set(false);
+        this.chatActive.set(false);
+    }
+
+    // ---------------------------------------------------------- history persist
+    /** trackBy for the history list rows. */
+    trackHist = (_: number, c: ConversationSummary) => c.id;
+
+    /** Refresh the history list each time the Settings panel opens (and when the
+     *  auth state changes while it is open). */
+    private _historyLoadFx = effect(() => {
+        const open = this.settingsOpen();
+        const u = this.auth.user();
+        if (open && u) untracked(() => void this.loadHistoryList());
+    });
+
+    /** Debounce timer for incremental Firestore writes. */
+    private historySaveTimer: any = null;
+    /** Content signature of the last successful save (skips no-op writes + the
+     *  redundant write right after a restore). */
+    private lastSavedSig = '';
+    /** True while restoring a saved conversation -> suppress the persist effect. */
+    private restoringHistory = false;
+
+    /** A cheap signature of the persistable transcript (count + last turn). */
+    private signatureOf(msgs: ConvMessage[]): string {
+        const real = msgs.filter((m) => m.role !== 'system' && (m.content ?? '').trim());
+        const last = real[real.length - 1];
+        return real.length + ':' + (last ? last.id + ':' + (last.content ?? '').length : '0');
+    }
+
+    /**
+     * Persist effect: whenever the transcript changes, save it (debounced) to
+     * Firestore -- but ONLY when signed in and there is at least one real message.
+     * Lazy create on the first message, update in place after. Skips while
+     * restoring and skips no-op content (signature unchanged).
+     */
+    private _persistFx = effect(() => {
+        const msgs = this.conv.messages(); // tracked dependency
+        untracked(() => this.onTranscriptChanged(msgs));
+    });
+
+    private onTranscriptChanged(msgs: ConvMessage[]): void {
+        if (this.restoringHistory) return;
+        if (!this.auth.user()) return; // not logged in -> ephemeral only
+        const hasUserTurn = msgs.some((m) => m.role === 'user' && (m.content ?? '').trim());
+        if (!hasUserTurn) return; // never create an empty conversation
+        const sig = this.signatureOf(msgs);
+        if (sig === this.lastSavedSig) return; // nothing new
+        if (this.historySaveTimer) clearTimeout(this.historySaveTimer);
+        this.historySaveTimer = setTimeout(() => this.persistNow(), 700);
+    }
+
+    /** Capture the current transcript and write it now (used by the debounce and
+     *  by flushHistory before a clear). Fire-and-forget; never throws into the UI. */
+    private persistNow(): void {
+        if (this.historySaveTimer) { clearTimeout(this.historySaveTimer); this.historySaveTimer = null; }
+        const u = this.auth.user();
+        if (!u) return;
+        const msgs = this.conv.messages();
+        if (!msgs.some((m) => m.role === 'user' && (m.content ?? '').trim())) return;
+        const sig = this.signatureOf(msgs);
+        this.lastSavedSig = sig;
+        const wasNew = !this.history.currentConversationId();
+        void this.history.save({
+            uid: u.uid,
+            email: u.email ?? null,
+            assistantId: this.assistantId,
+            assistantName: this.assistantName(),
+            avatarId: this.catalog.selectedId() ?? '',
+            messages: msgs,
+        }).then(() => { if (wasNew) void this.loadHistoryList(); });
+    }
+
+    /** Flush a pending debounced save immediately (called before clearing state). */
+    private flushHistory(): void {
+        if (this.historySaveTimer || this.conv.messages().some((m) => m.role === 'user')) {
+            this.persistNow();
+        }
+    }
+
+    /**
+     * Restore a saved conversation into the chat ON DEMAND (never automatic).
+     * Saves+clears the current session first, loads the picked doc's messages into
+     * the chat log, and makes that doc the active one so CONTINUING the chat appends
+     * to it (same conversationId). Does not speak anything or touch the canvas.
+     */
+    async restoreConversation(c: ConversationSummary): Promise<void> {
+        const u = this.auth.user();
+        if (!u) return;
+        this.resetSessionState();              // persist + stop + clear current session
+        const stored = await this.history.restore(u.uid, c.id);
+        const msgs = stored.map((s) => this.fromStored(s));
+        this.restoringHistory = true;
+        this.conv.messages.set(msgs);          // replace chat view with the restored turns
+        this.history.setCurrent(c.id);         // continue appending to THIS doc
+        this.lastSavedSig = this.signatureOf(msgs);
+        this.restoringHistory = false;
+        this.settingsOpen.set(false);
+        this.openChat();                       // surface the restored transcript
+    }
+
+    /** Map a persisted message back to a runtime ConvMessage. Restored assistant
+     *  turns are NOT replayable (the compiled audio plan is in-memory only). */
+    private fromStored(s: StoredMessage): ConvMessage {
+        const m: ConvMessage = { id: s.id, role: s.role, content: s.content ?? '', at: s.at ?? Date.now() };
+        if (s.meta != null) m.meta = s.meta;
+        if (s.kind != null) m.kind = s.kind;
+        if (s.detail != null) m.detail = s.detail;
+        if (s.detailAvailable != null) m.detailAvailable = s.detailAvailable;
+        if (Array.isArray(s.sourceIds)) m.sourceIds = s.sourceIds;
+        if (s.srcQuery != null) m.srcQuery = s.srcQuery;
+        if (Array.isArray(s.media)) m.media = s.media as any;
+        m.replayable = false;
+        return m;
+    }
+
+    /** Delete a saved conversation (user-triggered, with a confirm). */
+    async deleteConversation(c: ConversationSummary, ev: Event): Promise<void> {
+        ev.stopPropagation();
+        const u = this.auth.user();
+        if (!u) return;
+        const ok = typeof window !== 'undefined'
+            ? window.confirm('Eliminar esta conversacion? Esta accion no se puede deshacer.')
+            : true;
+        if (!ok) return;
+        try {
+            await this.history.remove(u.uid, c.id);
+        } catch (e: any) {
+            console.warn('[history] delete failed:', e?.message ?? e);
+        }
+    }
+
+    /** Short relative/absolute timestamp for a history row. */
+    historyWhen(ms: number): string {
+        if (!ms) return '';
+        const d = new Date(ms);
+        const now = Date.now();
+        const sameDay = new Date(now).toDateString() === d.toDateString();
+        const time = d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+        return sameDay ? time : d.toLocaleDateString([], { day: '2-digit', month: 'short' }) + ' ' + time;
     }
 
     /**
