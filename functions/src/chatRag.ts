@@ -24,8 +24,9 @@ import { GESTURES_BODY_ENABLED } from './lib/flags';
 
 const MAX_K = 8;
 const DEFAULT_K = 6;
-/** Token cap for the spoken STAGE-1 summary (2-3 sentences + optional media tag). */
-const SUMMARY_MAX_TOKENS = 256;
+/** Token cap for the spoken STAGE-1 summary: short (1-2 sentences, <=30 words) +
+ *  optional media tag. Headroom so it never cuts mid-sentence. */
+const SUMMARY_MAX_TOKENS = 160;
 /** Output-token cap for the on-demand DETAIL stage. */
 const DETAIL_MAX_TOKENS = 768;
 
@@ -502,10 +503,11 @@ const CAPABILITIES_DIRECTIVE =
  * No <<DETAIL>> section is requested here (detail is deferred to the detail stage).
  */
 const SUMMARY_ONLY_DIRECTIVE =
-  'Responde con un resumen MUY BREVE de 2 a 3 frases (aprox. 40 palabras), directo y claro, ' +
+  'Responde con un resumen CORTO de 1 a 2 frases, MAXIMO 30 palabras en total, directo y claro, ' +
   'fundado UNICAMENTE en el CONTEXTO, sin saludos ni despedidas y sin marcadores. ' +
-  'Este texto se hablara en voz alta, asi que escribelo natural y conciso, en el mismo idioma de la pregunta. ' +
-  'No agregues una version larga ni secciones adicionales.';
+  'Este texto se hablara en voz alta: di solo lo esencial y se muy conciso, en el mismo idioma de la pregunta. ' +
+  'Termina siempre la idea (sin cortes a media frase). El analisis completo se mostrara aparte ' +
+  '(boton "Ver mas"), asi que NO incluyas detalles extensos ni una version larga.';
 
 /**
  * STAGE 2 directive: detail ONLY. Long-form analysis for the SAME question, grounded

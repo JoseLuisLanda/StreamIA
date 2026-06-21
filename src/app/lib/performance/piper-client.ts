@@ -1,8 +1,16 @@
 /**
  * Main-thread client for the Piper synthesis worker.
- * Falls back to in-thread synthesis if Worker/module loading fails
- * (logged; the UI still works, just with the old blocking behavior).
+ *
+ * Diagnostics: logs worker construction, the path each synth takes (WORKER vs
+ * MAIN), and a HARD error if main-thread synthesis ever runs (it blocks the UI).
+ *
+ * ALLOW_MAIN_THREAD_FALLBACK: when false, a failed worker throws instead of
+ * synthesizing on the main thread -> the UI can NEVER freeze (cost: no audio
+ * until the worker is fixed, with a loud error). Keep true to preserve audio
+ * while diagnosing; flip to false to prove the freeze is gone.
  */
+const ALLOW_MAIN_THREAD_FALLBACK = true;
+
 export interface SynthMeta {
     synthMs: number;
     sessionCached: boolean;
@@ -14,6 +22,7 @@ export class PiperClient {
 
     private worker: Worker | null = null;
     private workerFailed = false;
+    private lastWorkerError = '';
     private nextId = 1;
     private pending = new Map<number, {
         resolve: (wav: ArrayBuffer) => void;
@@ -27,10 +36,16 @@ export class PiperClient {
             try {
                 return await this.viaWorker(text, voiceId, onProgress);
             } catch (e: any) {
-                console.warn('[piper] worker synthesis failed, falling back to main thread:', e?.message ?? e);
-                this.workerFailed = true;
+                this.lastWorkerError = e?.message ?? String(e);
+                console.error('[piper] WORKER path FAILED -> ' + this.lastWorkerError);
+                this.workerFailed = true; // latched: do not keep retrying a broken worker
                 this.disposeWorker();
             }
+        }
+        if (!ALLOW_MAIN_THREAD_FALLBACK) {
+            const msg = '[piper] main-thread fallback DISABLED; worker unavailable: ' + (this.lastWorkerError || 'unknown');
+            console.error(msg);
+            throw new Error(msg);
         }
         return this.viaMainThread(text, voiceId, onProgress);
     }
@@ -43,7 +58,15 @@ export class PiperClient {
 
     private ensureWorker(): Worker {
         if (this.worker) return this.worker;
-        const w = new Worker(new URL('../../workers/piper.worker', import.meta.url), { type: 'module' });
+        let w: Worker;
+        try {
+            w = new Worker(new URL('../../workers/piper.worker', import.meta.url), { type: 'module' });
+            console.info('[piper] worker constructed OK (module worker)');
+        } catch (e: any) {
+            console.error('[piper] worker CONSTRUCTION failed: ' + (e?.message ?? e));
+            throw e;
+        }
+        w.onmessageerror = (e) => console.error('[piper] worker messageerror', e);
         w.onmessage = (e: MessageEvent) => {
             const { id, wav, error, progress, meta } = e.data ?? {};
             const req = this.pending.get(id);
@@ -66,6 +89,7 @@ export class PiperClient {
     private viaWorker(text: string, voiceId: string, onProgress?: (p: number) => void): Promise<ArrayBuffer> {
         const w = this.ensureWorker();
         const id = this.nextId++;
+        console.info('[piper] synth -> WORKER (id=' + id + ', chars=' + (text?.length ?? 0) + ')');
         return new Promise<ArrayBuffer>((resolve, reject) => {
             this.pending.set(id, { resolve, reject, onProgress });
             w.postMessage({ id, text, voiceId });
@@ -80,6 +104,11 @@ export class PiperClient {
     // -------------------------------------------------------- main-thread path
 
     private async viaMainThread(text: string, voiceId: string, onProgress?: (p: number) => void): Promise<ArrayBuffer> {
+        console.error(
+            '[piper] *** SYNTHESIS RUNNING ON THE MAIN THREAD (viaMainThread) -- this BLOCKS the UI ***'
+            + ' chars=' + (text?.length ?? 0)
+            + ' | worker error: ' + (this.lastWorkerError || 'n/a'),
+        );
         this.mainModule = this.mainModule ?? (await import('@diffusionstudio/vits-web'));
         const blob: Blob = await this.mainModule.predict({ text, voiceId }, (p: any) => {
             if (p?.total) onProgress?.(Math.min(1, p.loaded / p.total));

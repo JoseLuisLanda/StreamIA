@@ -1,4 +1,4 @@
-import { Component, ElementRef, ViewChild, AfterViewChecked, OnInit, computed, inject, signal } from '@angular/core';
+import { Component, ElementRef, ViewChild, AfterViewChecked, OnInit, OnDestroy, computed, effect, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
@@ -8,6 +8,7 @@ import { AvatarService } from '../../services/avatar.service';
 import { AvatarTtsComponent, DEFAULT_AVATAR_URL } from '../../components/avatar-tts/avatar-tts.component';
 import { AvatarCatalogService } from '../../services/avatar-catalog.service';
 import { getCatalogEntry } from '../../lib/avatars/avatar-catalog';
+import { Avatar } from '../../lib/avatars/avatar.models';
 import { RigReport, Conformance, conformanceLabel } from '../../lib/avatars/rig-spec';
 import { MediaGalleryComponent } from '../../components/media-gallery/media-gallery.component';
 import { RagAvatarService } from '../../services/rag-avatar.service';
@@ -52,23 +53,77 @@ const CHIP_LABELS: Record<string, string> = {
           <button class="backbtn" (click)="goBack()" title="Volver a asistentes" aria-label="Volver a asistentes">←</button>
           <div class="brandtext">
             <span class="name">{{ assistantName() }}</span>
-            <span class="status-line"><i class="dot-online"></i> Active Instance</span>
+            <span class="status-line"><i class="dot-online"></i> {{ activeAvatarName() }}</span>
           </div>
         </div>
         <div class="topctl">
-          <!-- Admin-only: Response Editor (studio) + settings gear. Non-admins see nothing. -->
-          <button class="iconbtn" *ngIf="admin.isAdmin()" (click)="studioOpen = !studioOpen" title="Response Editor">🎭</button>
-          <button class="iconbtn" *ngIf="admin.isAdmin()" (click)="settingsOpen = !settingsOpen" title="Ajustes">⚙️</button>
+          <!-- Chat popup toggle (everyone). The written conversation lives in an on-demand
+               popup so the avatar + voice stay the primary focus. -->
+          <button class="iconbtn" (click)="toggleChat()" [class.active]="chatOpen()"
+                  [class.unread]="chatUnread() > 0"
+                  title="Conversacion" aria-label="Conversacion">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M21 11.5a8.4 8.4 0 0 1-8.5 8.5 8.6 8.6 0 0 1-3.9-.9L3 21l1.9-5.1A8.4 8.4 0 0 1 4 11.5 8.5 8.5 0 0 1 12.5 3 8.4 8.4 0 0 1 21 11.5z"/>
+            </svg>
+            <span class="badge" *ngIf="chatUnread() > 0">{{ chatBadge() }}</span>
+          </button>
+          <!-- Media popup toggle (everyone). Amber-green when unseen media has arrived;
+               returns to neutral white once opened (mediaSeen). Hidden until any media exists. -->
+          <button class="iconbtn" *ngIf="mediaMessages().length" (click)="toggleMedia()"
+                  [class.active]="mediaOpen()" [class.hasnew]="mediaHasNew()"
+                  title="Contenido relacionado" aria-label="Contenido relacionado">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                 stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+              <rect x="3" y="5" width="18" height="14" rx="2"/>
+              <circle cx="8.5" cy="10" r="1.6"/>
+              <path d="M21 16l-5-5L5 19"/>
+            </svg>
+            <span class="badge media" *ngIf="mediaUnread() > 0">{{ mediaBadge() }}</span>
+          </button>
+          <!-- Settings gear (admin-only). The theater-masks Studio toggle was removed. -->
+          <button class="iconbtn" *ngIf="admin.isAdmin()" (click)="settingsOpen.set(!settingsOpen())" title="Ajustes">⚙️</button>
         </div>
       </header>
+
+      <!-- ===================== STATUS BAND (between top bar and avatar) ===================== -->
+      <div class="statusband">
+        <div class="statuspill" [ngSwitch]="conv.state()">
+          <ng-container *ngSwitchCase="'listening'">
+            <span class="wave"><i></i><i></i><i></i><i></i><i></i></span> Escuchando…
+          </ng-container>
+          <ng-container *ngSwitchCase="'sending'">
+            <span class="dots"><i></i><i></i><i></i></span> Pensando…
+          </ng-container>
+          <ng-container *ngSwitchCase="'waiting_llm'">
+            <span class="dots"><i></i><i></i><i></i></span> Pensando…
+          </ng-container>
+          <ng-container *ngSwitchCase="'speaking'">
+            <span class="spk"></span> {{ tts.bridging() ? '…' : 'Hablando…' }}
+          </ng-container>
+          <ng-container *ngSwitchCase="'error'">⚠️ Error</ng-container>
+          <ng-container *ngSwitchDefault>🕐 Esperando…</ng-container>
+        </div>
+      </div>
 
       <!-- ===================== BASE LAYER: full-screen avatar ===================== -->
       <!-- Canvas is resized via avatar-tts' ResizeObserver (camera aspect + renderer),
            never recreated — the cached GLB, WebGL context, and avatar state persist. -->
       <div class="viewport" [class.pip]="pipActive()">
         <div class="glow"></div>
-        <app-avatar-tts [avatarUrl]="avatarUrl" (rigReport)="onRigReport($event)"></app-avatar-tts>
+        <app-avatar-tts [avatarUrl]="avatarUrl()" [compact]="pipActive()" (rigReport)="onRigReport($event)"></app-avatar-tts>
         <button class="pip-x" *ngIf="pipActive()" (click)="closeDetail(); closeMediaViewer()" title="Expandir avatar">⤢</button>
+
+        <!-- suggested-prompt carousel pinned to the avatar's bottom edge; auto-advances
+             through the FULL per-assistant prompt set (PROMPT_CAROUSEL_INTERVAL_MS).
+             Hover/touch pauses rotation. Tapping a chip still sends that prompt. -->
+        <div class="prompt-carousel" *ngIf="ragMode && suggestedPrompts().length"
+             (pointerenter)="pauseCarousel()" (pointerleave)="resumeCarousel()">
+          <button class="chip" *ngFor="let p of carouselPrompts(); trackBy: trackPrompt"
+                  (click)="sendChip(p)"
+                  [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
+                  [title]="p.prompt">{{ p.label }}</button>
+        </div>
       </div>
 
       <!-- floating toasts (top-center) -->
@@ -191,8 +246,13 @@ const CHIP_LABELS: Record<string, string> = {
           </div>
       </div>
 
-      <!-- ===================== FLOATING CHAT OVERLAY (upper-right, glass) ===================== -->
-      <aside class="chat floating">
+      <!-- ===================== ON-DEMAND CHAT POPUP (glass overlay, auto-fades when idle) =====================
+           Opened from the top-bar chat button. Holds BOTH the conversation history AND the message input.
+           Any interaction (focus/keystroke/pointer/wheel) resets the idle fade timer; when idle it fades
+           out and closes. Spoken responses never auto-open it; history accumulates in the background. -->
+      <aside class="chat popup" *ngIf="chatOpen()" [class.faded]="!chatActive()"
+             (focusin)="chatActivity()" (keydown)="chatActivity()"
+             (pointerdown)="chatActivity()" (wheel)="chatActivity()">
           <div class="chat-head">
             <h2>Conversación</h2>
             <div class="chat-head-ctl">
@@ -210,7 +270,7 @@ const CHIP_LABELS: Record<string, string> = {
             </div>
 
             <ng-container *ngFor="let m of conv.messages(); let i = index">
-              <div class="sysline" *ngIf="m.role === 'system' && (showProcess || m.kind === 'error')"
+              <div class="sysline" *ngIf="m.role === 'system' && m.kind === 'error'"
                    [class.errline]="m.kind === 'error'" [title]="msgTitle(m)">
                 {{ m.content }}
               </div>
@@ -237,14 +297,27 @@ const CHIP_LABELS: Record<string, string> = {
             <div class="inline-err" *ngIf="stt.error()">{{ stt.error() }}</div>
           </div>
 
+          <!-- message input (moved here from the bottom area; chat is now audio-first) -->
+          <div class="chat-input">
+            <textarea rows="1" [(ngModel)]="convText" maxlength="1000"
+                      (keydown.enter)="onConvEnter($event)"
+                      [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
+                      [placeholder]="'Envía un mensaje a ' + assistantName() + '…'"></textarea>
+            <button class="send" (click)="sendTyped()"
+                    [disabled]="!convText.trim() || conv.state() === 'waiting_llm' || conv.state() === 'sending'"
+                    title="Enviar (Enter)">➤</button>
+          </div>
+
       </aside>
 
-      <!-- ===================== LEFT "CONTENIDO RELACIONADO" MEDIA PANEL ===================== -->
-      <!-- Compact, scrollable media history: newest carousel shown by default (auto-scrolled
-           to bottom), scroll up to revisit earlier responses' media. Hidden when empty. -->
-      <aside class="media-panel floating" *ngIf="mediaMessages().length">
+      <!-- ===================== "CONTENIDO RELACIONADO" MEDIA POPUP (top-bar icon) =====================
+           On-demand overlay (NOT inline) so it never pushes the audio controls down / creates overflow.
+           Scrollable media history: newest carousel shown by default (auto-scrolled to bottom),
+           scroll up to revisit earlier responses' media. -->
+      <aside class="media-panel popup" *ngIf="mediaOpen() && mediaMessages().length">
         <div class="media-head">
           <h2>Contenido relacionado</h2>
+          <button class="iconbtn-sm" (click)="closeMedia()" title="Cerrar">✕</button>
         </div>
         <div class="media-feed" #mediaFeedEl>
           <div class="media-entry" *ngFor="let m of mediaMessages(); trackBy: trackMsg">
@@ -254,26 +327,8 @@ const CHIP_LABELS: Record<string, string> = {
         </div>
       </aside>
 
-      <!-- ===================== FLOATING BOTTOM CLUSTER (center, over avatar) ===================== -->
+      <!-- ===================== AUDIO CONTROLS (raised, just above the static footer) ===================== -->
       <div class="bottom-cluster">
-        <!-- status pill -->
-        <div class="statuspill" [ngSwitch]="conv.state()">
-          <ng-container *ngSwitchCase="'listening'">
-            <span class="wave"><i></i><i></i><i></i><i></i><i></i></span> Escuchando…
-          </ng-container>
-          <ng-container *ngSwitchCase="'sending'">
-            <span class="dots"><i></i><i></i><i></i></span> Pensando…
-          </ng-container>
-          <ng-container *ngSwitchCase="'waiting_llm'">
-            <span class="dots"><i></i><i></i><i></i></span> Pensando…
-          </ng-container>
-          <ng-container *ngSwitchCase="'speaking'">
-            <span class="spk"></span> {{ tts.bridging() ? '…' : 'Hablando…' }}
-          </ng-container>
-          <ng-container *ngSwitchCase="'error'">⚠️ Error</ng-container>
-          <ng-container *ngSwitchDefault>🕐 Esperando…</ng-container>
-        </div>
-
         <!-- circular controls: Stop↔Repeat toggle / mic / mute -->
         <div class="microw">
           <!-- Speaking → Stop (clean halt + neutral pose). Otherwise → Repeat last response. -->
@@ -297,25 +352,12 @@ const CHIP_LABELS: Record<string, string> = {
         <p class="stt-unsupported" *ngIf="!stt.isSupported">
           Este navegador no soporta reconocimiento de voz — usa Chrome o Edge, o el Modo texto.
         </p>
-
-        <!-- suggested-prompt chips -->
-        <div class="chips" *ngIf="ragMode && suggestedPrompts().length">
-          <button class="chip" *ngFor="let p of suggestedPrompts()" (click)="sendChip(p)"
-                  [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
-                  [title]="p.prompt">{{ p.label }}</button>
-        </div>
-
-        <!-- message input -->
-        <div class="chat-input">
-          <textarea rows="1" [(ngModel)]="convText" maxlength="1000"
-                    (keydown.enter)="onConvEnter($event)"
-                    [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
-                    [placeholder]="'Envía un mensaje a ' + assistantName() + '…'"></textarea>
-          <button class="send" (click)="sendTyped()"
-                  [disabled]="!convText.trim() || conv.state() === 'waiting_llm' || conv.state() === 'sending'"
-                  title="Enviar (Enter)">➤</button>
-        </div>
+        <!-- NOTE: status pill moved ABOVE the avatar; prompt chips moved to the avatar's
+             bottom edge as a carousel; message input lives in the chat popup. -->
       </div>
+
+      <!-- ===================== THIN STATIC FOOTER (always visible, not scrollable) ===================== -->
+      <footer class="appfooter">Publicar3D</footer>
 
       <!-- ============================== FULL-SCREEN DETAIL ============================== -->
       <div class="detail-overlay" *ngIf="detailOpen() as dm">
@@ -345,73 +387,26 @@ const CHIP_LABELS: Record<string, string> = {
                          (closed)="closeMediaViewer()"></app-media-gallery>
 
       <!-- ============================== SETTINGS SLIDE-OVER ============================== -->
-      <div class="backdrop" *ngIf="settingsOpen" (click)="settingsOpen = false"></div>
-      <div class="slideover" [class.open]="settingsOpen">
+      <div class="backdrop" *ngIf="settingsOpen()" (click)="settingsOpen.set(false)"></div>
+      <div class="slideover" [class.open]="settingsOpen()">
         <div class="so-head">
           <h2>Ajustes</h2>
-          <button class="iconbtn" (click)="settingsOpen = false">✕</button>
+          <button class="do-x" (click)="settingsOpen.set(false)" title="Cerrar" aria-label="Cerrar">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M6 6l12 12M18 6L6 18"/>
+            </svg>
+          </button>
         </div>
 
-        <h4>Proveedor LLM — {{ providerLabels[llm.settings().provider] }}</h4>
-        <label>Proveedor
-          <select [ngModel]="llm.settings().provider" (ngModelChange)="setLlmProvider($event)">
-            <option *ngFor="let p of providerIds" [value]="p">{{ providerLabels[p] }}</option>
-          </select>
-        </label>
-        <label>Modelo
-          <input type="text" [ngModel]="activeCfg.model" (ngModelChange)="setCfg('model', $event)" />
-        </label>
-        <label *ngIf="llm.settings().provider === 'ollama' || llm.settings().provider === 'deepseek'">Base URL
-          <input type="text" [ngModel]="activeCfg.baseUrl" (ngModelChange)="setCfg('baseUrl', $event)" />
-        </label>
-        <label *ngIf="llm.settings().provider !== 'ollama'">API key
-          <input type="password" autocomplete="off" [ngModel]="activeCfg.apiKey" (ngModelChange)="setCfg('apiKey', $event)"
-                 placeholder="se guarda solo en este navegador" />
-        </label>
-        <p class="note warn-text">⚠️ Las API keys se guardan en localStorage y van directo desde el navegador: solo pruebas locales.</p>
-        <p class="note" *ngIf="llm.settings().provider === 'ollama'">
-          Ollama local: <code>OLLAMA_ORIGINS="*" ollama serve</code> y <code>ollama pull llama3.2</code>.
-        </p>
-
-        <h4>Conversación</h4>
-        <label class="chk"><input type="checkbox" [(ngModel)]="conv.continuous" /> Conversación continua</label>
-        <label class="chk"><input type="checkbox" [(ngModel)]="showMarkup" /> Mostrar chips de gestos (debug)</label>
-        <label class="chk"><input type="checkbox" [(ngModel)]="showProcess" /> Mostrar procesos (líneas de sistema)</label>
-        <label>Máx. turnos
-          <input type="number" min="1" max="50" [ngModel]="llm.settings().maxTurns" (ngModelChange)="setMaxTurns($event)" />
-        </label>
-        <label>Máx. tokens por respuesta
-          <input type="number" min="50" max="2000" [ngModel]="llm.settings().maxReplyTokens" (ngModelChange)="setMaxReplyTokens($event)" />
-        </label>
-
-        <h4>System prompt</h4>
-        <textarea rows="9" class="sysprompt" [ngModel]="llm.settings().systemPrompt" (ngModelChange)="setSystemPrompt($event)"></textarea>
-        <button class="ghost" (click)="llm.resetSystemPrompt()">↩️ Restaurar prompt por defecto</button>
-
-        <h4>Voz (TTS)</h4>
-        <label>Motor
-          <select [(ngModel)]="provider" (ngModelChange)="onProviderOrLangChange()">
-            <option value="piper">Piper (local, neural)</option>
-            <option value="webspeech">Web Speech (voces del SO)</option>
-          </select>
-        </label>
-        <label>Idioma
-          <select [ngModel]="lang" (ngModelChange)="setLang($event)">
-            <option value="es">Español (ES)</option>
-            <option value="en">English (EN)</option>
-          </select>
-        </label>
-        <label>Voz
-          <select [(ngModel)]="voiceId">
-            <option *ngFor="let v of piperVoices[lang]" [value]="v.id">{{ v.label }}</option>
-          </select>
-        </label>
-
+        <!-- ONLY setting: load another avatar, listed from the avatars/{id} DB collection.
+             Selecting a card loads its GLB AND closes the panel (pickAvatar). -->
         <h4>Avatar</h4>
+        <p class="note" *ngIf="!dbAvatars().length && !avatarLoadError()">Cargando avatares...</p>
         <div class="avatar-grid">
-          <div *ngFor="let a of catalog.catalog()"
+          <div *ngFor="let a of dbAvatars()"
                class="avatar-card" [class.selected]="catalog.selectedId() === a.id"
-               (click)="selectAvatar(a.id)" [title]="avatarCardTitle(a.id)">
+               (click)="pickAvatar(a.id)" [title]="a.name">
             <div class="avatar-thumb-wrapper">
               <img *ngIf="thumbUrl(a.id)" [src]="thumbUrl(a.id)" [alt]="a.name" class="avatar-thumb" />
               <span *ngIf="!thumbUrl(a.id)" class="avatar-thumb placeholder" aria-hidden="true">
@@ -429,29 +424,6 @@ const CHIP_LABELS: Record<string, string> = {
           <b>{{ confLabel(r.conformance) }}</b> — {{ r.matchedArkit.length }}/52 ARKit, head bone: {{ r.hasHeadBone ? '✓' : '✕' }}
           <div *ngFor="let w of r.warnings" class="conf-warn">⚠️ {{ w }}</div>
         </div>
-
-        <label class="manual-label">…o carga un GLB manual (dev/fallback)
-          <input type="text" [(ngModel)]="avatarUrlInput" placeholder="https://... .glb o /assets/models/avatar.glb" />
-        </label>
-        <button class="ghost" (click)="loadAvatar()" [disabled]="!avatarUrlInput.trim()">🧑 Cargar avatar manual</button>
-        <p class="note">Los avatares del catálogo se resuelven desde Firebase Storage por ruta (sin tokens). Ready Player Me cerró su hosting (2026-01-31).</p>
-
-        <h4>Modo informativo (RAG)</h4>
-        <label class="chk"><input type="checkbox" [ngModel]="ragMode" (ngModelChange)="setRagMode($event)" /> Activar respuestas desde la base de conocimiento (Cloud Function)</label>
-        <p class="note">Con esto activado, cada pregunta (voz o texto) se responde vía la Cloud Function (Vertex AI + RAG), no el LLM del navegador. El lead-in cubre la latencia.</p>
-        <label>Endpoint de la Function
-          <input type="text" [ngModel]="ragEndpoint" (ngModelChange)="onRagEndpointChange($event)" placeholder="https://…cloudfunctions.net/api/rag/query" />
-        </label>
-        <label>Assistant ID
-          <input type="text" [ngModel]="assistantId" (ngModelChange)="onAssistantIdChange($event)" placeholder="default" />
-          <button class="ghost small" (click)="reloadAssistant()">↻ Cargar asistente</button>
-        </label>
-        <div class="conf-detail" *ngIf="assistant() as d">
-          <b>{{ d.name || d.id }}</b> — avatar: {{ d.avatarId }} · tema: {{ d.ragCollection }} · voz: {{ d.voice || '—' }}<br>
-          lead: {{ d.leadGestureId || '—' }} · tail: {{ d.tailGestureId || '—' }}<span *ngIf="d.activationCommand"> · “{{ d.activationCommand }}”</span>
-        </div>
-        <p class="note err-text" *ngIf="assistantSvc.error()">⚠️ {{ assistantSvc.error() }}</p>
-        <p class="note err-text" *ngIf="ragError()">⚠️ {{ ragError() }}</p>
       </div>
     </div>
   `,
@@ -463,6 +435,15 @@ const CHIP_LABELS: Record<string, string> = {
       background: #0E0F13; color: #E8E9EE;
       font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
       --accent: #8B5CF6; --accent-soft: rgba(139, 92, 246, .18);
+      /* Detail-overlay PiP avatar box = base x scale. The box is taller than the visible
+         area on purpose: it is sunk below the bottom edge (--detail-pip-sink) so only the
+         chest-up shows, and wide enough that the shoulders are NOT sliced by the side edges.
+         Knobs: --detail-pip-scale (overall size), base-w (shoulder room), base-h (how much
+         body), --detail-pip-sink (how far it sinks below the bottom). */
+      --detail-pip-scale: 0.5;
+      --detail-pip-base-w: 200px;   /* x0.5 -> 100px wide: room for full shoulders */
+      --detail-pip-base-h: 280px;   /* x0.5 -> 140px tall: head..torso, lower half sunk */
+      --detail-pip-sink: 48%;       /* portion of the box hidden below the bottom edge (clips the waist; head has headroom so it never clips at the top) */
     }
     /* Floating top bar: faint gradient scrim for legibility, no solid bar. */
     .topbar.floating {
@@ -500,12 +481,28 @@ const CHIP_LABELS: Record<string, string> = {
     .lang b { color: #666; font-weight: 600; }
     .lang b.on { color: var(--accent); }
     .iconbtn {
+      position: relative; /* anchors the unread count badge */
       width: 36px; height: 36px; border-radius: 50%; border: 1px solid rgba(255,255,255,.14);
       background: rgba(20,18,30,.45); backdrop-filter: blur(8px); color: #E8E9EE; cursor: pointer; font-size: 15px;
       display: grid; place-items: center; transition: background .15s;
     }
     .iconbtn:hover:not(:disabled) { background: rgba(40,36,60,.65); }
     .iconbtn:disabled { opacity: .35; cursor: default; }
+    .iconbtn.active { background: rgba(139,92,246,.35); border-color: rgba(139,92,246,.6); color: #fff; }
+    /* Unread chat indicator: accent (violet) icon until the chat popup is opened. */
+    .iconbtn.unread { color: #c4b0f7; border-color: rgba(139,92,246,.6); box-shadow: 0 0 10px rgba(139,92,246,.35); }
+    /* New-media indicator: amber-green icon until the media popup is opened. */
+    .iconbtn.hasnew { color: #b6e84a; border-color: rgba(182,232,74,.6); box-shadow: 0 0 10px rgba(182,232,74,.35); }
+    .iconbtn svg { display: block; }
+    /* WhatsApp-style unread count bubble, top-right of the icon. */
+    .iconbtn .badge {
+      position: absolute; top: -3px; right: -3px;
+      min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
+      display: grid; place-items: center; font-size: 10px; font-weight: 700; line-height: 1;
+      background: var(--accent); color: #fff; border: 1.5px solid #0E0F13;
+      font-family: 'JetBrains Mono', ui-monospace, monospace; pointer-events: none;
+    }
+    .iconbtn .badge.media { background: #b6e84a; color: #15230a; }
     .iconbtn-sm {
       width: 26px; height: 26px; border-radius: 50%; border: 1px solid rgba(255,255,255,.12);
       background: rgba(255,255,255,.06); color: #cfd3dc; cursor: pointer; font-size: 12px;
@@ -521,14 +518,32 @@ const CHIP_LABELS: Record<string, string> = {
     }
     .viewport app-avatar-tts { position: absolute; inset: 0; }
     .viewport ::ng-deep .canvas-container { background-color: transparent !important; }
-    /* Picture-in-picture: shrink to a bottom-right corner. The avatar-tts
-       ResizeObserver resizes the existing canvas -- no GLB reload. */
+    /* Picture-in-picture (detail "Ver mas" overlay): pinned bottom-right corner.
+       Card-less + TRANSPARENT -- only the avatar silhouette floats over the detail
+       text. The canvas is already alpha (renderer alpha:true, scene.background unset,
+       .canvas-container forced transparent above); here we strip the .viewport CSS
+       chrome (gradient fill, rounded card, shadow) and the glow. This is scoped to the
+       .pip class only, so the MAIN full-screen .viewport keeps its dark/violet gradient.
+       The avatar-tts ResizeObserver resizes the existing canvas -- no GLB reload. */
     .viewport.pip {
-      position: fixed; right: 18px; bottom: 18px; left: auto; top: auto;
-      width: 220px; height: 165px; flex: none; z-index: 70;
-      border-radius: 16px; box-shadow: 0 10px 30px rgba(0,0,0,.5);
+      position: fixed; right: 8px; bottom: 0; left: auto; top: auto;
+      width: calc(var(--detail-pip-base-w) * var(--detail-pip-scale));
+      height: calc(var(--detail-pip-base-h) * var(--detail-pip-scale));
+      /* Sink the lower part below the viewport bottom edge: only chest-up shows, as if
+         the avatar is emerging from the bottom. The browser clips what is off-screen
+         (bottom only); the sides stay on-screen so the shoulders are NOT sliced. */
+      transform: translateY(var(--detail-pip-sink));
+      flex: none; z-index: 70;
+      background: transparent; /* override the base .viewport gradient -> no card box */
+      border-radius: 0; box-shadow: none;
+      overflow: visible;       /* the box never clips the avatar horizontally */
       transition: width .25s ease, height .25s ease;
     }
+    /* No background glow halo behind the floating PiP avatar. */
+    .viewport.pip .glow { display: none; }
+    /* The prompt carousel is hidden while the avatar is a small PiP (no room, and it
+       must not clutter the detail overlay). */
+    .viewport.pip .prompt-carousel { display: none; }
     .pip-x { position: absolute; top: 6px; right: 6px; z-index: 2; width: 26px; height: 26px;
       border-radius: 8px; border: 1px solid rgba(255,255,255,.2); background: rgba(0,0,0,.45);
       color: #fff; cursor: pointer; font-size: 13px; }
@@ -583,23 +598,25 @@ const CHIP_LABELS: Record<string, string> = {
     .toast.warn { background: rgba(160,120,20,.9); }
     .toast.err { background: rgba(160,30,30,.92); }
 
-    .microw { display: flex; align-items: center; justify-content: center; gap: 18px; flex: none; }
+    /* Slim audio strip: compact row; mic is a rounded-rectangle pill so it fits the
+       thin band; side buttons shrink to match the slim height (< half the old size). */
+    .microw { display: flex; align-items: center; justify-content: center; gap: 12px; flex: none; }
     .micbtn {
-      position: relative; width: 76px; height: 76px; border-radius: 50%;
+      position: relative; width: 128px; height: 40px; border-radius: 999px;
       border: 2px solid rgba(139,92,246,.55); background: transparent; color: #fff;
-      font-size: 26px; cursor: pointer; display: grid; place-items: center;
+      font-size: 19px; cursor: pointer; display: grid; place-items: center;
       transition: background .2s, border-color .2s, transform .1s;
     }
     .micbtn:hover:not(:disabled) { background: var(--accent-soft); transform: scale(1.03); }
     .micbtn:disabled { opacity: .35; cursor: default; }
-    .micbtn.listening { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 28px rgba(139,92,246,.6); }
-    .rings { position: absolute; inset: -2px; border-radius: 50%; border: 2px solid var(--accent); animation: ring 1.4s ease-out infinite; pointer-events: none; }
+    .micbtn.listening { background: var(--accent); border-color: var(--accent); box-shadow: 0 0 22px rgba(139,92,246,.6); }
+    .rings { position: absolute; inset: -2px; border-radius: 999px; border: 2px solid var(--accent); animation: ring 1.4s ease-out infinite; pointer-events: none; }
     @keyframes ring { 0% { transform: scale(1); opacity: .8; } 100% { transform: scale(1.55); opacity: 0; } }
-    .spinner { position: absolute; inset: -2px; border-radius: 50%; pointer-events: none; border: 2px solid transparent; border-top-color: var(--accent); animation: spin 1s linear infinite; }
+    .spinner { position: absolute; inset: -2px; border-radius: 999px; pointer-events: none; border: 2px solid transparent; border-top-color: var(--accent); animation: spin 1s linear infinite; }
     @keyframes spin { to { transform: rotate(360deg); } }
     .ctl {
-      width: 46px; height: 46px; border-radius: 50%; border: 1px solid rgba(255,255,255,.16);
-      background: rgba(20,18,30,.5); backdrop-filter: blur(8px); color: #e6e6ee; font-size: 16px; cursor: pointer;
+      width: 38px; height: 38px; border-radius: 50%; border: 1px solid rgba(255,255,255,.16);
+      background: rgba(20,18,30,.5); backdrop-filter: blur(8px); color: #e6e6ee; font-size: 15px; cursor: pointer;
       display: grid; place-items: center; transition: background .15s;
     }
     .ctl:hover:not(:disabled) { background: rgba(40,36,60,.7); }
@@ -681,25 +698,41 @@ const CHIP_LABELS: Record<string, string> = {
     .cmd-textarea:focus { outline: none; }
     .cmd-copy { margin-top: 2px; flex: none; }
 
-    /* Floating, semi-transparent full-height chat panel anchored on the right. */
-    .chat.floating {
-      position: absolute; top: 74px; right: 16px; bottom: 24px; z-index: 15;
-      width: 340px; max-width: 38vw;
+    /* On-demand chat POPUP: glass overlay docked to the right; leaves the avatar
+       visible. Opens from the top-bar button; auto-fades to opacity 0 when idle
+       (then *ngIf removes it). pointer-events drop while faded so it can't block. */
+    .chat.popup {
+      position: fixed; top: 70px; right: 16px; bottom: 92px; z-index: 40;
+      width: 360px; max-width: 40vw;
       display: flex; flex-direction: column; overflow: hidden;
-      background: rgba(14,13,22,.42); backdrop-filter: blur(16px);
-      border: 1px solid rgba(255,255,255,.12); border-radius: 18px;
-      box-shadow: 0 16px 48px rgba(0,0,0,.5);
+      background: rgba(14,13,22,.6); backdrop-filter: blur(18px);
+      border: 1px solid rgba(255,255,255,.14); border-radius: 18px;
+      box-shadow: 0 16px 48px rgba(0,0,0,.55);
+      opacity: 1; transition: opacity .9s ease; /* fade duration -> CHAT_FADE_ANIM_MS */
+      animation: chatpop .22s ease both;
     }
-    /* Compact, semi-transparent media history panel anchored on the left. */
-    .media-panel.floating {
-      position: absolute; left: 16px; top: 50%; transform: translateY(-50%); z-index: 15;
-      width: 248px; max-width: 26vw; max-height: 56vh;
+    .chat.popup.faded { opacity: 0; pointer-events: none; }
+    @keyframes chatpop { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
+    /* Input as a footer bar inside the popup (it used to be a floating pill at the bottom). */
+    .chat.popup .chat-input {
+      flex: none; margin: 0; border-radius: 0; border: none;
+      border-top: 1px solid rgba(255,255,255,.1);
+      background: rgba(10,9,16,.5); box-shadow: none; padding: 8px 8px 8px 14px;
+    }
+    /* On-demand media POPUP: left-docked glass overlay (chat is on the right), so it
+       never renders inline / never pushes the audio controls down. Opened from the
+       top-bar media button. */
+    .media-panel.popup {
+      position: fixed; top: 70px; left: 16px; bottom: 92px; z-index: 40;
+      width: 300px; max-width: 40vw;
       display: flex; flex-direction: column; overflow: hidden;
-      background: rgba(14,13,22,.42); backdrop-filter: blur(16px);
-      border: 1px solid rgba(255,255,255,.12); border-radius: 18px;
-      box-shadow: 0 16px 48px rgba(0,0,0,.5);
+      background: rgba(14,13,22,.6); backdrop-filter: blur(18px);
+      border: 1px solid rgba(255,255,255,.14); border-radius: 18px;
+      box-shadow: 0 16px 48px rgba(0,0,0,.55);
+      animation: chatpop .22s ease both;
     }
-    .media-head { padding: 10px 13px; border-bottom: 1px solid rgba(255,255,255,.08); flex: none; }
+    .media-head { display: flex; align-items: center; justify-content: space-between;
+      padding: 10px 13px; border-bottom: 1px solid rgba(255,255,255,.08); flex: none; }
     .media-head h2 { margin: 0; font-size: 12.5px; font-weight: 600; color: #eceaf6; text-shadow: 0 1px 4px rgba(0,0,0,.6); }
     .media-feed { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
     .media-entry { flex: none; }
@@ -763,10 +796,10 @@ const CHIP_LABELS: Record<string, string> = {
       background: transparent; border: 1px solid #22c55e; color: #4ade80; font-size: 11.5px; font-weight: 600;
       line-height: 1.5; transition: background .15s, color .15s; }
     .vermas:hover { background: #22c55e; color: #062b14; }
-    /* Floating bottom cluster: status pill + mic + chips + input, centered over avatar. */
+    /* Slim audio-control strip (responsive rules place it just above the footer). */
     .bottom-cluster {
       position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 15;
-      width: min(680px, 92vw); display: flex; flex-direction: column; align-items: center; gap: 12px;
+      width: min(680px, 92vw); display: flex; flex-direction: column; align-items: center; gap: 4px;
     }
     .chips { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; }
     .chip { background: rgba(20,18,30,.5); backdrop-filter: blur(8px); border: 1px solid rgba(160,120,255,.4); color: #d6c9fb;
@@ -774,6 +807,33 @@ const CHIP_LABELS: Record<string, string> = {
       text-shadow: 0 1px 3px rgba(0,0,0,.5); font-family: 'JetBrains Mono', ui-monospace, monospace; }
     .chip:hover:not(:disabled) { background: rgba(139,92,246,.4); }
     .chip:disabled { opacity: .45; cursor: default; }
+
+    /* Status pill: absolute overlay pinned just under the header so it does NOT consume
+       a layout row -- this frees the avatar to expand upward. --status-top is tuned per
+       breakpoint (header height differs desktop vs portrait). */
+    .statusband {
+      position: absolute; top: var(--status-top, 50px); left: 0; right: 0; z-index: 18;
+      display: flex; justify-content: center; align-items: center; padding: 0 12px;
+      pointer-events: none;
+    }
+    .statusband .statuspill { pointer-events: auto; }
+
+    /* Prompt-chip carousel pinned to the avatar's bottom edge (auto-rotating window). */
+    .prompt-carousel {
+      position: absolute; left: 0; right: 0; bottom: 8px; z-index: 12;
+      display: flex; gap: 8px; justify-content: center; align-items: center;
+      flex-wrap: nowrap; overflow: hidden; padding: 0 12px;
+    }
+    .prompt-carousel .chip { animation: chipfade .4s ease both; }
+    @keyframes chipfade { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+
+    /* Thin, always-visible static footer (never part of a scroll region). */
+    .appfooter {
+      flex: none; height: 26px; display: flex; align-items: center; justify-content: center;
+      font-size: 11px; letter-spacing: 1.5px; color: #8b85a6;
+      background: rgba(10,9,16,.6); border-top: 1px solid rgba(255,255,255,.06);
+      font-family: 'JetBrains Mono', ui-monospace, monospace; z-index: 16;
+    }
     .syncrow { display: flex; align-items: center; gap: 10px; font-size: 11px; color: #6b7384; flex-wrap: wrap; }
     .synced { color: #8b93a3; }
     .changes { color: #f0c674; font-weight: 600; }
@@ -805,10 +865,12 @@ const CHIP_LABELS: Record<string, string> = {
     .sysline.errline { color: #ff9c9c; font-size: 12px; }
     .inline-err { color: #ff9c9c; font-size: 12px; }
 
-    .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 9; }
+    /* Above EVERYTHING (top bar z-20, toasts 30, popups 40, detail 60, pip 70) so the
+       open settings panel + its backdrop fully cover the main-screen top-bar icons. */
+    .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 90; }
     .slideover {
       position: fixed; top: 0; right: -420px; width: 400px; max-width: 92vw; height: 100%;
-      background: #15161c; border-left: 1px solid rgba(255,255,255,.08); z-index: 10;
+      background: #15161c; border-left: 1px solid rgba(255,255,255,.08); z-index: 91;
       padding: 18px 20px 40px; overflow-y: auto; transition: right .25s ease;
       display: flex; flex-direction: column; gap: 10px;
     }
@@ -854,21 +916,105 @@ const CHIP_LABELS: Record<string, string> = {
     .manual-label { margin-top: 4px; }
     code { background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
 
-    /* Keep overlays clear of the avatar's face on smaller windows. */
-    @media (max-width: 900px) {
-      .chat.floating { width: 42vw; max-width: 42vw; top: 66px; bottom: 96px; }
-      .media-panel.floating { width: 30vw; max-width: 30vw; max-height: 44vh; }
-      .bottom-cluster { width: 94vw; bottom: 12px; }
-      .studio-overlay { width: 92vw; }
+    /* ============================================================
+       RESPONSIVE LAYOUTS  (breakpoint: 1024px)
+       Avatar is the HERO in both widths; chat is an overlay popup (NOT in flow).
+       Strict top-to-bottom order in BOTH layouts, with NO page scroll:
+         top bar -> status band -> avatar (hero) -> [prompt carousel at avatar's
+         bottom edge] -> audio controls -> thin static footer.
+       The avatar is the only flex/grid element that grows; every other band is a
+       fixed/auto height, so the controls + footer are always fully visible.
+       The avatar-tts ResizeObserver resizes the EXISTING canvas whenever its
+       cell/band changes size -- the canvas is never recreated.
+       ============================================================ */
+
+    /* ---- WIDE / DESKTOP (>= 1024px): single centered column; chat + media are overlay popups ---- */
+    @media (min-width: 1024px) {
+      .app {
+        display: grid;
+        grid-template-columns: 1fr;
+        /* No status row: the status pill is an absolute overlay, so the avatar row
+           expands UPWARD; the slim controls row lets it expand DOWNWARD. */
+        grid-template-rows: auto minmax(0, 1fr) auto auto;
+        grid-template-areas:
+          "top"
+          "avatar"
+          "controls"
+          "footer";
+        padding: 0 16px 0; /* footer sits flush to the bottom margin */
+        --status-top: 46px; /* pill sits just under the one-line desktop header */
+      }
+      /* Top bar becomes a real grid row (no scrim needed over its own band). */
+      .topbar.floating { position: relative; grid-area: top; padding: 12px 6px 6px; background: none; }
+      /* Avatar is a real grid cell (NOT full-screen), centered with a sane max width.
+         The canvas fills it; the ResizeObserver updates camera aspect + renderer. */
+      .viewport {
+        position: relative; inset: auto; grid-area: avatar; border-radius: 20px;
+        width: 100%; max-width: 820px; justify-self: center;
+      }
+      .glow { top: 30%; }
+      /* Slim audio strip directly BELOW the avatar, above the footer. */
+      .bottom-cluster {
+        position: relative; grid-area: controls; left: auto; bottom: auto; transform: none;
+        width: 100%; max-width: 720px; justify-self: center; gap: 4px; padding-bottom: 6px;
+      }
+      .appfooter { grid-area: footer; }
+      /* Chat (right) + media (left) are fixed overlay popups -- not part of the grid. */
     }
-    @media (max-width: 560px) {
-      /* Side panels would crowd the face: chat becomes a short top overlay, media hidden. */
-      .chat.floating { width: calc(100vw - 24px); max-width: none; left: 12px; right: 12px; top: 60px; bottom: auto; height: 30vh; }
-      .media-panel.floating { display: none; }
+
+    /* ---- NARROW / VERTICAL / MOBILE (<= 1023px): vertical stack, NO page scroll ---- */
+    @media (max-width: 1023px) {
+      .app {
+        display: flex; flex-direction: column;
+        height: 100%; overflow: hidden; /* controls + footer always visible, no scroll */
+        --status-top: 62px; /* pill sits under the taller two-line portrait header */
+      }
+      .topbar.floating { position: relative; order: 0; }
+      /* Avatar band is the ONLY element that grows; the status pill overlays its top
+         (absolute) so the avatar expands upward, and the slim strip lets it grow down. */
+      .viewport {
+        position: relative; inset: auto; order: 1;
+        flex: 1 1 auto; width: 100%; height: auto; min-height: 200px;
+      }
+      /* Slim audio strip: fixed-height band, fully visible, just above the footer. */
+      .bottom-cluster {
+        position: relative; left: auto; bottom: auto; transform: none; order: 2;
+        width: 100%; max-width: none; flex: none; gap: 4px; padding: 4px 12px;
+      }
+      .appfooter { order: 3; }
+      /* Chat + media popups become bottom sheets above the footer; avatar stays visible. */
+      .chat.popup {
+        top: auto; left: 8px; right: 8px; bottom: 34px;
+        width: auto; max-width: none; max-height: 70vh;
+      }
+      .media-panel.popup {
+        top: auto; left: 8px; right: 8px; bottom: 34px;
+        width: auto; max-width: none; max-height: 70vh;
+      }
+      /* Studio (admin debug) spans the width when open. */
+      .studio-overlay { width: calc(100vw - 24px); left: 12px; right: 12px; }
+
+      /* ---- narrow/portrait type scale + edge gutters (desktop unaffected) ---- */
+      /* Slightly smaller, better-proportioned text for small widths. */
+      .brandtext .name { font-size: 15px; }
+      .status-line { font-size: 9.5px; letter-spacing: .9px; }
+      .statuspill { font-size: 12px; padding: 6px 13px; }
+      .bubble { font-size: 12.5px; }
+      .vermas { font-size: 11px; }
+      /* Hint chips: keep them FULLY visible -- inset from both edges, smaller font/padding,
+         and WRAP (overflow visible) so a chip is never sliced by the screen edge. */
+      .prompt-carousel {
+        left: 0; right: 0; padding: 0 14px; overflow: visible;
+        flex-wrap: wrap; row-gap: 6px;
+      }
+      .prompt-carousel .chip { font-size: 11px; padding: 5px 11px; max-width: calc(100vw - 36px); }
+      /* Consistent side gutter for the other edge-touching bands. */
+      .statusband { padding-left: 14px; padding-right: 14px; }
+      .bottom-cluster { padding-left: 14px; padding-right: 14px; }
     }
   `]
 })
-export class TextAvatarComponent implements AfterViewChecked, OnInit {
+export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy {
     public tts = inject(TtsLipsyncService);
     public stt = inject(SpeechRecognitionService);
     public llm = inject(LlmService);
@@ -905,6 +1051,140 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
 
     /** Avatar shrinks to PiP whenever ANY full-screen overlay is open. */
     pipActive = computed(() => !!this.detailOpen() || !!this.mediaViewer());
+
+    // ----------------------------------------------------------- chat popup
+    /** Idle time (ms) the chat popup stays fully visible before it begins to fade. */
+    private readonly CHAT_FADE_IDLE_MS = 6000;
+    /** Fade-out transition duration (ms). Must match the .chat.popup opacity transition (.9s). */
+    private readonly CHAT_FADE_ANIM_MS = 900;
+    /** Whether the chat popup is mounted (drives *ngIf). Default closed: avatar is the hero. */
+    chatOpen = signal(false);
+    /** True = fully visible; false = fading out (adds .faded -> opacity 0). */
+    chatActive = signal(false);
+    private chatIdleTimer: any = null;
+    private chatFadeTimer: any = null;
+
+    // chat unread badge ----------------------------------------------------
+    /** Assistant-message count the user has already seen (snapshot on open). */
+    private chatSeenCount = signal(0);
+    /** Assistant responses that have FINISHED speaking (user's own messages are NOT
+     *  counted; a reply still being spoken is "live" and not yet counted). */
+    chatMsgCount = computed(() => this.conv.deliveredCount());
+    /** New assistant responses that arrived while the chat popup was closed. */
+    chatUnread = computed(() => Math.max(0, this.chatMsgCount() - this.chatSeenCount()));
+    /** Badge text with a 9+ cap. */
+    chatBadge = computed(() => this.badgeText(this.chatUnread()));
+    /** While the chat is open, keep "seen" synced to "count" so the badge stays cleared. */
+    private _chatSeenSync = effect(() => { if (this.chatOpen()) this.chatSeenCount.set(this.chatMsgCount()); });
+
+    /** Top-bar button: open if closed, close if open. */
+    toggleChat(): void { this.chatOpen() ? this.closeChat() : this.openChat(); }
+
+    /** Open (or re-show) the popup and arm the idle->fade timer. Clears the unread badge. */
+    openChat(): void {
+        this.clearChatTimers();
+        this.chatSeenCount.set(this.chatMsgCount()); // mark all current messages read -> badge to 0
+        this.chatOpen.set(true);
+        this.chatActive.set(true);
+        this.armChatIdle();
+    }
+
+    /** Close immediately (top-bar toggle off). */
+    closeChat(): void {
+        this.clearChatTimers();
+        this.chatActive.set(false);
+        this.chatOpen.set(false);
+    }
+
+    /** Any interaction in the popup (focus/keystroke/pointer/wheel) keeps it visible. */
+    chatActivity(): void {
+        if (!this.chatOpen()) return;
+        this.chatActive.set(true);
+        this.armChatIdle();
+    }
+
+    private armChatIdle(): void {
+        this.clearChatTimers();
+        this.chatIdleTimer = setTimeout(() => this.beginChatFade(), this.CHAT_FADE_IDLE_MS);
+    }
+    private beginChatFade(): void {
+        this.chatActive.set(false); // CSS transitions opacity -> 0
+        this.chatFadeTimer = setTimeout(() => this.chatOpen.set(false), this.CHAT_FADE_ANIM_MS);
+    }
+    private clearChatTimers(): void {
+        if (this.chatIdleTimer) { clearTimeout(this.chatIdleTimer); this.chatIdleTimer = null; }
+        if (this.chatFadeTimer) { clearTimeout(this.chatFadeTimer); this.chatFadeTimer = null; }
+    }
+
+    // ---------------------------------------------------------- media popup
+    /** Media popup open state (on-demand overlay, like the chat). */
+    mediaOpen = signal(false);
+    /** Count of media-bearing responses the user has already seen (cleared on open). */
+    private mediaSeenCount = signal(0);
+    /** Number of assistant responses that carry media (drives the new-content flag). */
+    /** Media-bearing responses that have FINISHED speaking (counts on speech-finish,
+     *  not on arrival), so the media badge/color stay in sync with the chat badge. */
+    mediaCount = computed(() => this.conv.deliveredMediaCount());
+    /** New-content indicator: more media has arrived than the user has seen. */
+    mediaHasNew = computed(() => this.mediaCount() > this.mediaSeenCount());
+    /** Count of NEW media-bearing responses since the media popup was last opened. */
+    mediaUnread = computed(() => Math.max(0, this.mediaCount() - this.mediaSeenCount()));
+    /** Badge text with a 9+ cap. */
+    mediaBadge = computed(() => this.badgeText(this.mediaUnread()));
+    /** While the popup is open, keep "seen" synced to "count" so the flag stays cleared. */
+    private _mediaSeenSync = effect(() => { if (this.mediaOpen()) this.mediaSeenCount.set(this.mediaCount()); });
+
+    /** WhatsApp-style unread badge text: caps at "9+" once the count exceeds 9. */
+    private badgeText(n: number): string { return n > 9 ? '9+' : String(n); }
+
+    toggleMedia(): void { this.mediaOpen() ? this.closeMedia() : this.openMedia(); }
+    openMedia(): void {
+        this.mediaSeenCount.set(this.mediaCount());
+        this.mediaOpen.set(true);
+        // Show the newest media when the popup mounts (newest is at the bottom of the feed).
+        setTimeout(() => {
+            const el = this.mediaFeedEl?.nativeElement;
+            if (el) el.scrollTop = el.scrollHeight;
+        }, 0);
+    }
+    closeMedia(): void { this.mediaOpen.set(false); }
+
+    // -------------------------------------------------------- prompt carousel
+    /** Auto-advance interval (ms) for the suggested-prompt carousel. */
+    private readonly PROMPT_CAROUSEL_INTERVAL_MS = 2000;
+    /** Chips visible in the carousel window at once (it slides through the full set). */
+    private readonly PROMPT_CAROUSEL_VISIBLE = 2;
+    /** Rotating start index into the full suggested-prompts list. */
+    carouselIndex = signal(0);
+    private carouselTimer: any = null;
+
+    /** A wrapping window of the FULL per-assistant suggested-prompts list. */
+    carouselPrompts = computed<SuggestedPrompt[]>(() => {
+        const all = this.suggestedPrompts();
+        const n = all.length;
+        if (n <= this.PROMPT_CAROUSEL_VISIBLE) return all;
+        const start = this.carouselIndex() % n;
+        const out: SuggestedPrompt[] = [];
+        for (let i = 0; i < this.PROMPT_CAROUSEL_VISIBLE; i++) out.push(all[(start + i) % n]);
+        return out;
+    });
+    trackPrompt = (_: number, p: SuggestedPrompt) => p.label + '|' + p.prompt;
+
+    private startCarousel(): void {
+        if (this.carouselTimer) return;
+        this.carouselTimer = setInterval(() => {
+            const n = this.suggestedPrompts().length;
+            if (n > this.PROMPT_CAROUSEL_VISIBLE) this.carouselIndex.update((i) => (i + 1) % n);
+        }, this.PROMPT_CAROUSEL_INTERVAL_MS);
+    }
+    private stopCarousel(): void {
+        if (this.carouselTimer) { clearInterval(this.carouselTimer); this.carouselTimer = null; }
+    }
+    /** Pause on hover/touch (nice-to-have). */
+    pauseCarousel(): void { this.stopCarousel(); }
+    resumeCarousel(): void { this.startCarousel(); }
+
+    ngOnDestroy(): void { this.clearChatTimers(); this.stopCarousel(); }
 
     openMediaViewer(m: ConvMessage, index: number): void {
         if (m.media?.length) this.mediaViewer.set({ media: m.media, index });
@@ -1004,8 +1284,16 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
         return src.split(/\n{2,}/).map((p) => p.trim()).filter(Boolean);
     }
 
-    // avatar catalog picker state
+    // avatar picker state (DB-driven: avatars/{id} Firestore collection)
     thumbUrls = signal<Record<string, string | null>>({});
+    /** Avatars listed from the DB, filtered to those whose GLB actually resolves. */
+    dbAvatars = signal<Avatar[]>([]);
+    /** Display name of the currently selected avatar (top-bar caption). Reactive: updates
+     *  immediately on avatar switch (catalog.selectedId + dbAvatars are signals). */
+    activeAvatarName = computed<string>(() => {
+        const id = this.catalog.selectedId();
+        return (id ? this.dbAvatars().find((a) => a.id === id)?.name : '') ?? '';
+    });
     avatarLoadError = signal<string>('');
     /** which catalog avatar (if any) is currently loaded — keys its rig report */
     private currentLoadedAvatarId: string | null = this.catalog.selectedId();
@@ -1042,13 +1330,17 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
     lang: TtsLang = 'es';
     voiceId = PIPER_VOICES.es[0].id;
     piperVoices = PIPER_VOICES;
-    avatarUrl = localStorage.getItem('textAvatar.avatarUrl') || DEFAULT_AVATAR_URL;
-    avatarUrlInput = this.avatarUrl;
+    /** Current GLB URL bound to <app-avatar-tts [avatarUrl]>. SIGNAL so that setting a
+     *  new avatar notifies the zoneless change detector -> the input updates -> avatar-tts
+     *  ngOnChanges swaps the model immediately (no panel reopen, no Zone.js, no timer). */
+    avatarUrl = signal(localStorage.getItem('textAvatar.avatarUrl') || DEFAULT_AVATAR_URL);
+    avatarUrlInput = this.avatarUrl();
 
     // view options
     showMarkup = false; // debug toggle: chips hidden by default, clean text only
     showProcess = true;
-    settingsOpen = false;
+    /** Settings slide-over open state (signal -> zoneless-friendly). */
+    settingsOpen = signal(false);
     providerLabels = LLM_PROVIDER_LABELS;
     providerIds: LlmProviderId[] = ['ollama', 'openai', 'gemini', 'anthropic', 'deepseek'];
 
@@ -1410,7 +1702,7 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
         this.catalog.select(null);
         this.currentLoadedAvatarId = null;
         this.avatarLoadError.set('');
-        this.avatarUrl = url;
+        this.avatarUrl.set(url);
         localStorage.setItem('textAvatar.avatarUrl', url);
     }
 
@@ -1420,15 +1712,10 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
         // Resolve admin status for UI gating (gear + Response Editor). UX only —
         // real enforcement is server-side in rules/callables.
         void this.admin.check();
-        // Resolve preview thumbnails (best-effort; missing → person-icon fallback).
-        for (const a of this.catalog.catalog()) {
-            this.catalog.resolveThumbnailUrl(a)
-                .then(url => this.thumbUrls.update(m => ({ ...m, [a.id]: url })))
-                .catch(() => {});
-        }
-        // Restore a previously selected catalog avatar (hot-loads its GLB).
-        const sel = this.catalog.selected();
-        if (sel) await this.selectAvatar(sel.id);
+        // Start the suggested-prompt carousel rotation (idempotent; paused on hover).
+        this.startCarousel();
+        // Load the avatar list from the DB (avatars/{id}) and restore the last selection.
+        await this.loadDbAvatars();
 
         // If launched from the /assistants selector (?assistant=ID), load that
         // assistant fully configured and turn RAG mode on. Falls back silently if
@@ -1439,6 +1726,55 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
             setAssistantId(dep);
             await this.setRagMode(true); // loads deployment (avatar/voice/lang/lead-tail) + wires RAG fetcher
         }
+    }
+
+    /**
+     * Load the avatar picker list from the DB (avatars/{id} collection via
+     * AvatarService.listAvatars), then KEEP only the avatars whose GLB actually
+     * resolves to a download URL (valid, existing glbPath). This drops docs with a
+     * missing/empty glbPath or a path pointing at a non-existent file -- the ones
+     * that would fail to load. Thumbnails are resolved best-effort (a miss just
+     * shows the person-icon; the avatar is still kept if its GLB loads). Finally,
+     * restores the previously selected avatar if it is still in the valid list.
+     */
+    private async loadDbAvatars(): Promise<void> {
+        this.avatarLoadError.set('');
+        let list: Avatar[] = [];
+        try {
+            list = await this.avatars.listAvatars(true);
+        } catch (e: any) {
+            this.avatarLoadError.set('No se pudieron cargar los avatares: ' + (e?.message ?? e));
+            return;
+        }
+        // Keep only avatars whose GLB resolves (valid glbPath + existing file).
+        const checks = await Promise.all(
+            list.map(async (a) => {
+                if (!a.glbPath) return null;
+                const url = await this.avatarMgr.resolveUrl(a.glbPath);
+                return url ? a : null;
+            }),
+        );
+        const valid = checks.filter((a): a is Avatar => !!a)
+            .sort((x, y) => x.name.localeCompare(y.name));
+        this.dbAvatars.set(valid);
+
+        // Resolve thumbnails (best-effort; missing -> person-icon placeholder).
+        for (const a of valid) {
+            this.avatars.resolveThumb(a.id)
+                .then((url) => this.thumbUrls.update((m) => ({ ...m, [a.id]: url })))
+                .catch(() => {});
+        }
+
+        // Restore the previously selected avatar if it is still valid.
+        const selId = this.catalog.selectedId();
+        if (selId && valid.some((a) => a.id === selId)) await this.selectAvatar(selId);
+    }
+
+    /** Picker tap: close the settings panel and load the chosen avatar (GLB via
+     *  AvatarService; canvas resizes, never recreates). Closing first is purely visual. */
+    pickAvatar(id: string): void {
+        this.settingsOpen.set(false);
+        void this.selectAvatar(id);
     }
 
     /**
@@ -1487,7 +1823,7 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
         }
 
         this.currentLoadedAvatarId = id;
-        this.avatarUrl = url;            // [avatarUrl] change -> avatar-tts hot-reloads
+        this.avatarUrl.set(url);         // signal set -> zoneless CD -> [avatarUrl] updates -> avatar-tts swaps the model
         this.avatarUrlInput = url;
         // Don't persist blob: URLs (they don't survive a reload); persist only
         // real URLs. Cold loads re-resolve via the assistant's avatarId anyway.
@@ -1495,16 +1831,17 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit {
         if (voice) this.applyDefaultVoice(voice);
     }
 
-    /** Preselect the avatar's default voice if it exists in the current voice list. */
+    /**
+     * Apply the avatar's default voice. Any vits-web voice id is valid (the catalog is
+     * now dynamic), so we don't gate on the old 6-entry list -- we derive the language
+     * from the id prefix (same rule synthesis uses) and apply it directly.
+     */
     private applyDefaultVoice(voiceId: string): void {
-        for (const l of ['es', 'en'] as TtsLang[]) {
-            if (PIPER_VOICES[l].some(v => v.id === voiceId)) {
-                this.lang = l;
-                this.voiceId = voiceId;
-                this.onProviderOrLangChange();
-                return;
-            }
-        }
+        const id = (voiceId || '').trim();
+        if (!id) return;
+        this.lang = id.toLowerCase().startsWith('en') ? 'en' : 'es';
+        this.voiceId = id;
+        this.onProviderOrLangChange();
     }
 
     /** Store the rig conformance report for whichever avatar just loaded. */

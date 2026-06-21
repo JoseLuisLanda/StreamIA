@@ -8,10 +8,8 @@ import { AdminService } from '../../services/admin.service';
 import { GlbViewerComponent } from './components/glb-viewer.component';
 import { Avatar, AvatarMeshStats } from '../../lib/avatars/avatar.models';
 import { RigReport, conformanceLabel } from '../../lib/avatars/rig-spec';
-import { PIPER_VOICES, TtsLang } from '../../services/tts-lipsync.service';
+import { VoiceCatalogService } from '../../services/voice-catalog.service';
 import { environment } from '../../../environments/environment';
-
-interface VoiceOpt { id: string; label: string; }
 
 /**
  * Avatar Manager (admin) -- CRUD for the reusable visual `avatars/{id}` catalog.
@@ -169,7 +167,9 @@ interface VoiceOpt { id: string; label: string; }
               <label class="fld"><span>Default Voice</span>
                 <select [(ngModel)]="form.defaultVoice">
                   <option value="">- none -</option>
-                  <option *ngFor="let v of voices" [value]="v.id">{{ v.label }}</option>
+                  <optgroup *ngFor="let g of catalog.groups()" [label]="g.langLabel">
+                    <option *ngFor="let v of g.voices" [value]="v.id">{{ v.label }}</option>
+                  </optgroup>
                 </select>
               </label>
 
@@ -285,6 +285,8 @@ export class AvatarManagerComponent implements OnInit {
   svc = inject(AvatarManagerService);
   private imgOpt = inject(ImageOptimizationService);
   admin = inject(AdminService);
+  /** Dynamic Piper voice catalog (vits-web manifest -> Firestore cache -> seed). */
+  catalog = inject(VoiceCatalogService);
 
   readonly avatars = signal<Avatar[]>([]);
   readonly loading = signal(true);
@@ -299,8 +301,6 @@ export class AvatarManagerComponent implements OnInit {
   readonly rig = signal<RigReport | null>(null);
   private thumbs = signal<Record<string, string | null>>({});
 
-  voices: VoiceOpt[] = this.buildVoices();
-
   form: Avatar = this.blank();
 
   /** Files chosen in the form, uploaded to Storage on Save (preview is local). */
@@ -313,20 +313,16 @@ export class AvatarManagerComponent implements OnInit {
 
   async ngOnInit(): Promise<void> {
     await this.admin.check();
-    if (this.allowed()) await this.reload();
+    if (this.allowed()) {
+      void this.catalog.ensureLoaded(); // dynamic voice list (non-blocking; seed shows instantly)
+      await this.reload();
+    }
   }
 
   private blank(): Avatar {
     return { id: '', name: '', description: '', glbPath: '', defaultVoice: '' };
   }
 
-  private buildVoices(): VoiceOpt[] {
-    const out: VoiceOpt[] = [];
-    for (const lang of ['es', 'en'] as TtsLang[]) {
-      for (const v of PIPER_VOICES[lang]) out.push({ id: v.id, label: `${v.label} (${lang.toUpperCase()})` });
-    }
-    return out;
-  }
 
   async reload(): Promise<void> {
     this.loading.set(true);

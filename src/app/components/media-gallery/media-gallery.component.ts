@@ -1,4 +1,4 @@
-import { Component, ElementRef, EventEmitter, Input, OnChanges, OnDestroy, OnInit, Output, SimpleChanges, ViewChild, inject, signal } from '@angular/core';
+import { Component, ElementRef, EventEmitter, Input, OnChanges, OnDestroy, OnInit, Output, SimpleChanges, ViewChild, computed, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { MediaItem } from '../../lib/rag/rag.models';
 import { MediaUnauthorizedError, RagAvatarService } from '../../services/rag-avatar.service';
@@ -45,41 +45,41 @@ type LoadState = 'idle' | 'loading' | 'ready' | 'unauthorized' | 'error';
       <div class="mg-dots" *ngIf="media.length > 1">{{ cur() + 1 }} / {{ media.length }}</div>
     </div>
 
-    <!-- ===== VIEWER: full-screen lightbox ===== -->
+    <!-- ===== VIEWER: SINGLE full-screen image (no carousel), pinch-to-zoom + pan ===== -->
     <div class="mg-backdrop" *ngIf="mode === 'viewer' && openIndex() !== null" (click)="requestClose()">
-      <div class="mg-modal" (click)="$event.stopPropagation()"
-           (touchstart)="onTouchStart($event)" (touchend)="onTouchEnd($event, 'viewer')">
-        <button class="mg-x" (click)="requestClose()" title="Cerrar">✕</button>
+      <div class="mg-modal" (click)="$event.stopPropagation()">
+        <button class="mg-x" (click)="requestClose()" title="Cerrar" aria-label="Cerrar">
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"
+               stroke-linecap="round" stroke-linejoin="round"><path d="M6 6l12 12M18 6L6 18"/></svg>
+        </button>
 
-        <div class="mg-stage">
-          <button class="mg-nav prev" *ngIf="media.length > 1" (click)="prev()" title="Anterior">‹</button>
+        <!-- Single image, maximized. Pinch (2 fingers) zooms; 1-finger drag pans when zoomed.
+             Desktop: wheel zoom + double-click toggle + Zoom button. -->
+        <div class="mg-media single" [class.zoomable]="current()?.type === 'image'"
+             (wheel)="onWheel($event)" (dblclick)="toggleZoom()"
+             (touchstart)="onViewerTouchStart($event)" (touchmove)="onViewerTouchMove($event)"
+             (touchend)="onViewerTouchEnd($event)">
+          <div class="mg-status" *ngIf="fullState() === 'loading'"><span class="mg-spin"></span> Cargando...</div>
+          <div class="mg-status err" *ngIf="fullState() === 'unauthorized'">No tienes acceso a este recurso.</div>
+          <div class="mg-status err" *ngIf="fullState() === 'error'">{{ fullError() }}</div>
 
-          <div class="mg-media">
-            <div class="mg-status" *ngIf="fullState() === 'loading'"><span class="mg-spin"></span> Cargando…</div>
-            <div class="mg-status err" *ngIf="fullState() === 'unauthorized'">🔒 No tienes acceso a este recurso.</div>
-            <div class="mg-status err" *ngIf="fullState() === 'error'">⚠️ {{ fullError() }}</div>
-
-            <ng-container *ngIf="fullState() === 'ready' && current() as m">
-              <img *ngIf="m.type === 'image'" [src]="fullUrl()!" [alt]="m.title" class="mg-full" [class.zoomed]="zoomed()" (click)="zoomed.set(!zoomed())" title="Click para zoom" />
-              <video *ngIf="m.type === 'video'" [src]="fullUrl()!" class="mg-full" controls autoplay></video>
-              <div *ngIf="m.type === 'document'" class="mg-doc">
-                <div class="mg-doc-ic">📄</div>
-                <div class="mg-doc-name">{{ m.title }}</div>
-                <a class="mg-doc-btn" [href]="fullUrl()!" [download]="m.title" target="_blank" rel="noopener">Abrir / Descargar</a>
-              </div>
-            </ng-container>
-          </div>
-
-          <button class="mg-nav next" *ngIf="media.length > 1" (click)="next()" title="Siguiente">›</button>
+          <ng-container *ngIf="fullState() === 'ready' && current() as m">
+            <img *ngIf="m.type === 'image'" [src]="fullUrl()!" [alt]="m.title" class="mg-full"
+                 [class.zoomed]="scale() > 1" [style.transform]="imgTransform()" draggable="false" />
+            <video *ngIf="m.type === 'video'" [src]="fullUrl()!" class="mg-full" controls autoplay></video>
+            <div *ngIf="m.type === 'document'" class="mg-doc">
+              <div class="mg-doc-name">{{ m.title }}</div>
+              <a class="mg-doc-btn" [href]="fullUrl()!" [download]="m.title" target="_blank" rel="noopener">Abrir / Descargar</a>
+            </div>
+          </ng-container>
         </div>
 
         <div class="mg-meta" *ngIf="current() as m">
           <div class="mg-title">{{ m.title }}</div>
           <div class="mg-caption" *ngIf="m.caption">{{ m.caption }}</div>
           <div class="mg-metafoot">
-            <span class="mg-counter" *ngIf="media.length > 1">{{ (openIndex() ?? 0) + 1 }} / {{ media.length }}</span>
             <span class="mg-ctrls" *ngIf="fullUrl()">
-              <button class="mg-cbtn" *ngIf="m.type === 'image'" (click)="zoomed.set(!zoomed())">{{ zoomed() ? 'Reducir' : 'Zoom' }}</button>
+              <button class="mg-cbtn" *ngIf="m.type === 'image'" (click)="toggleZoom()">{{ scale() > 1 ? 'Reducir' : 'Zoom' }}</button>
               <a class="mg-cbtn" [href]="fullUrl()!" [download]="m.title || 'media'" target="_blank" rel="noopener">Descargar</a>
             </span>
           </div>
@@ -109,21 +109,26 @@ type LoadState = 'idle' | 'loading' | 'ready' | 'unauthorized' | 'error';
     .mg-carnav:hover { background: rgba(139,92,246,.25); color: #fff; }
     .mg-dots { text-align: center; font-size: 11px; color: #778; margin-top: 4px; }
 
-    /* full-screen lightbox */
-    /* z-index 65: above the detail overlay (60), BELOW the PiP avatar (70) so the
-       minimized avatar stays visible in its corner over the viewer. */
-    .mg-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.85); z-index: 65;
-      display: grid; place-items: center; padding: 24px; }
+    /* single-image full-screen viewer */
+    /* z-index 80: ABOVE the PiP avatar (70) so the viewer + its controls are never
+       overlapped by the minimized avatar; the avatar keeps animating behind the backdrop. */
+    .mg-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.9); z-index: 80;
+      display: grid; place-items: center; padding: 16px; }
     .mg-modal { position: relative; background: #15161c; border: 1px solid rgba(255,255,255,.12);
-      border-radius: 16px; max-width: min(94vw, 1100px); max-height: 92vh; display: flex; flex-direction: column;
+      border-radius: 16px; width: min(96vw, 1200px); max-height: 94vh; display: flex; flex-direction: column;
       box-shadow: 0 20px 60px rgba(0,0,0,.6); overflow: hidden; }
-    .mg-x { position: absolute; top: 8px; right: 8px; z-index: 2; width: 32px; height: 32px; border-radius: 50%;
-      border: 1px solid rgba(255,255,255,.15); background: rgba(0,0,0,.4); color: #fff; cursor: pointer; font-size: 14px; }
-    .mg-x:hover { background: rgba(0,0,0,.7); }
-    .mg-stage { display: flex; align-items: center; gap: 6px; min-height: 240px; padding: 12px; }
-    .mg-media { flex: 1; display: grid; place-items: center; min-height: 240px; max-height: 80vh; overflow: hidden; }
-    .mg-full { max-width: 100%; max-height: 80vh; border-radius: 10px; display: block; cursor: zoom-in; transition: transform .2s ease; }
-    .mg-full.zoomed { transform: scale(1.8); cursor: zoom-out; }
+    .mg-x { position: absolute; top: 8px; right: 8px; z-index: 2; width: 36px; height: 36px; border-radius: 50%;
+      border: 1px solid rgba(255,255,255,.15); background: rgba(0,0,0,.45); color: #fff; cursor: pointer;
+      display: grid; place-items: center; }
+    .mg-x:hover { background: rgba(0,0,0,.75); }
+    /* Image stage fills the modal; the image is maximized (no carousel chrome). */
+    .mg-media.single { flex: 1; display: grid; place-items: center; min-height: 0; overflow: hidden;
+      touch-action: none; padding: 8px; } /* touch-action:none -> our pinch/pan owns the gesture */
+    .mg-media.single.zoomable { cursor: zoom-in; }
+    .mg-full { max-width: 100%; max-height: 86vh; border-radius: 10px; display: block;
+      transform-origin: center center; transition: transform .08s ease-out; will-change: transform;
+      user-select: none; -webkit-user-drag: none; }
+    .mg-full.zoomed { cursor: grab; }
     .mg-metafoot { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 6px; flex-wrap: wrap; }
     .mg-ctrls { display: flex; gap: 8px; }
     .mg-cbtn { font-size: 12px; padding: 5px 11px; border-radius: 8px; cursor: pointer; text-decoration: none;
@@ -165,9 +170,22 @@ export class MediaGalleryComponent implements OnChanges, OnInit, OnDestroy {
   readonly fullUrl = signal<string | null>(null);
   readonly fullState = signal<LoadState>('idle');
   readonly fullError = signal<string>('');
-  readonly zoomed = signal(false);
+
+  // Single-image zoom/pan state (viewer). scale 1 = fit; >1 = zoomed in.
+  readonly scale = signal(1);
+  readonly panX = signal(0);
+  readonly panY = signal(0);
+  readonly imgTransform = computed(
+    () => `translate(${this.panX()}px, ${this.panY()}px) scale(${this.scale()})`);
 
   private touchX: number | null = null;
+  // pinch/pan gesture refs (non-reactive)
+  private pinchBaseDist = 0;
+  private pinchBaseScale = 1;
+  private panStartX = 0;
+  private panStartY = 0;
+  private panBaseX = 0;
+  private panBaseY = 0;
   private blobUrls = new Set<string>();
 
   @ViewChild('strip') stripEl?: ElementRef<HTMLDivElement>;
@@ -216,18 +234,74 @@ export class MediaGalleryComponent implements OnChanges, OnInit, OnDestroy {
 
   async open(i: number): Promise<void> {
     this.openIndex.set(i);
-    this.zoomed.set(false);
+    this.resetZoom();
     await this.loadFull();
   }
 
   requestClose(): void {
     this.openIndex.set(null);
-    this.zoomed.set(false);
+    this.resetZoom();
     this.revokeFull();
     this.fullUrl.set(null);
     this.fullState.set('idle');
     this.fullError.set('');
-    this.closed.emit();
+    this.closed.emit(); // host clears mediaViewer -> returns to the carousel popup
+  }
+
+  // ---- single-image pinch-to-zoom + pan (viewer) ----
+  private clampScale(s: number): number { return Math.max(1, Math.min(5, s)); }
+  resetZoom(): void { this.scale.set(1); this.panX.set(0); this.panY.set(0); }
+
+  /** Toggle 1x <-> 2x (double-click / Zoom button). */
+  toggleZoom(): void {
+    if (this.current()?.type !== 'image') return;
+    this.scale.set(this.scale() > 1 ? 1 : 2);
+    this.panX.set(0); this.panY.set(0);
+  }
+
+  /** Desktop fallback: wheel zooms toward/away. */
+  onWheel(e: WheelEvent): void {
+    if (this.current()?.type !== 'image') return;
+    e.preventDefault();
+    const s = this.clampScale(this.scale() * (e.deltaY < 0 ? 1.15 : 0.87));
+    this.scale.set(s);
+    if (s <= 1) { this.panX.set(0); this.panY.set(0); }
+  }
+
+  private touchDist(t: TouchList): number {
+    return Math.hypot(t[0].clientX - t[1].clientX, t[0].clientY - t[1].clientY);
+  }
+
+  /** Two fingers -> start pinch; one finger (while zoomed) -> start pan. */
+  onViewerTouchStart(e: TouchEvent): void {
+    if (this.current()?.type !== 'image') return;
+    if (e.touches.length === 2) {
+      this.pinchBaseDist = this.touchDist(e.touches);
+      this.pinchBaseScale = this.scale();
+    } else if (e.touches.length === 1 && this.scale() > 1) {
+      this.panStartX = e.touches[0].clientX; this.panStartY = e.touches[0].clientY;
+      this.panBaseX = this.panX(); this.panBaseY = this.panY();
+    }
+  }
+
+  /** Pinch -> scale from finger distance ratio; drag -> pan when zoomed. */
+  onViewerTouchMove(e: TouchEvent): void {
+    if (this.current()?.type !== 'image') return;
+    if (e.touches.length === 2 && this.pinchBaseDist > 0) {
+      e.preventDefault();
+      const s = this.clampScale(this.pinchBaseScale * (this.touchDist(e.touches) / this.pinchBaseDist));
+      this.scale.set(s);
+      if (s <= 1) { this.panX.set(0); this.panY.set(0); }
+    } else if (e.touches.length === 1 && this.scale() > 1) {
+      e.preventDefault();
+      this.panX.set(this.panBaseX + (e.touches[0].clientX - this.panStartX));
+      this.panY.set(this.panBaseY + (e.touches[0].clientY - this.panStartY));
+    }
+  }
+
+  onViewerTouchEnd(_e: TouchEvent): void {
+    this.pinchBaseDist = 0;
+    if (this.scale() <= 1) this.resetZoom();
   }
 
   next(): void { this.step(1); }

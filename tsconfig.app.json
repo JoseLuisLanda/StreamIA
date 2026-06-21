@@ -4,7 +4,12 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "outDir": "./out-tsc/app",
-    "types": []
+    "types": [],
+    "baseUrl": ".",
+    "paths": {
+      "fs": ["src/shims/node-empty.ts"],
+      "path": ["src/shims/node-empty.ts"]
+    }
   },
   "include": [
     "src/**/*.ts"

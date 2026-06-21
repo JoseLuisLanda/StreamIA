@@ -4,10 +4,10 @@
  * off the main thread. Voice models are cached in OPFS (available in workers).
  *
  * SESSION CACHE (quick win): vits-web's predict() re-creates the ONNX
- * InferenceSession from the model bytes on EVERY call — measured as the
+ * InferenceSession from the model bytes on EVERY call -- measured as the
  * dominant time-to-first-word cost. Since classes aren't frozen, we wrap
  * ort.InferenceSession.create with a memoized version (keyed by model byte
- * length — one entry per voice, max 2 kept) so each utterance after the first
+ * length -- one entry per voice, max 2 kept) so each utterance after the first
  * reuses the warm session.
  *
  * Protocol: { id, text, voiceId } -> { id, wav: ArrayBuffer (transferred),
@@ -20,7 +20,9 @@ let lastSessionCached = false;
 
 async function patchOrtSessionCache(): Promise<void> {
     if (ortPatched) return;
+    console.log('[piper.worker] importing onnxruntime-web ...');
     const ort: any = await import('onnxruntime-web');
+    console.log('[piper.worker] onnxruntime-web loaded; wasm runs INSIDE this worker');
     // Single-thread WASM: avoids threaded WASM (SharedArrayBuffer / COOP-COEP),
     // which is unavailable here and only warns + auto-falls-back anyway. Harmless if
     // the env shape differs across versions.
@@ -31,6 +33,11 @@ async function patchOrtSessionCache(): Promise<void> {
     const orig = ort.InferenceSession.create.bind(ort.InferenceSession);
     const cache = new Map<number, Promise<any>>();
     ort.InferenceSession.create = (data: any, ...rest: any[]) => {
+        // vits-web's predict() sets numThreads = navigator.hardwareConcurrency right
+        // before calling create() (clobbering the value we set at import time and
+        // triggering the crossOriginIsolated warning). Reassert single-thread here,
+        // immediately before the real session build, so it actually takes effect.
+        try { ort.env.wasm.numThreads = 1; } catch { /* env shape changed */ }
         if (data instanceof ArrayBuffer && rest.length === 0) {
             const key = data.byteLength;
             const hit = cache.get(key);
@@ -51,6 +58,7 @@ async function patchOrtSessionCache(): Promise<void> {
 self.onmessage = async (e: MessageEvent) => {
     const { id, text, voiceId } = e.data as { id: number; text: string; voiceId: string };
     try {
+        console.log('[piper.worker] synth start (id=' + id + ', chars=' + (text?.length ?? 0) + ')');
         await patchOrtSessionCache();
         mod = mod ?? (await import('@diffusionstudio/vits-web'));
         lastSessionCached = true; // create() resets it to false on a real (uncached) build
@@ -60,8 +68,10 @@ self.onmessage = async (e: MessageEvent) => {
         });
         const synthMs = performance.now() - t0;
         const wav = await blob.arrayBuffer();
+        console.log('[piper.worker] synth done (id=' + id + ', ' + synthMs.toFixed(0) + ' ms, cached=' + lastSessionCached + ')');
         (self as any).postMessage({ id, wav, meta: { synthMs, sessionCached: lastSessionCached } }, [wav]);
     } catch (err: any) {
+        console.error('[piper.worker] synth ERROR (id=' + id + '): ' + (err?.message ?? String(err)));
         (self as any).postMessage({ id, error: err?.message ?? String(err) });
     }
 };

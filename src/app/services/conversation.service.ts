@@ -94,6 +94,26 @@ export class ConversationService {
     /** mic muted by the user */
     public muted = false;
 
+    /**
+     * Monotonic count of assistant responses whose SPEECH HAS FINISHED (normal end
+     * OR user-stopped mid-speech -- stopped content still exists to review). Drives
+     * the chat unread badge: it increments on speech-finish, NOT on response arrival,
+     * so a reply that is still being spoken is "live" and not yet counted as unread.
+     */
+    public deliveredCount: WritableSignal<number> = signal(0);
+    /** Of the delivered responses, how many carried media (drives the media badge). */
+    public deliveredMediaCount: WritableSignal<number> = signal(0);
+    /** Ids already counted as delivered, so stop-then-finish never double-counts. */
+    private deliveredIds = new Set<number>();
+
+    /** Mark an assistant message delivered exactly once (idempotent). */
+    private markDelivered(msg: ConvMessage | null | undefined): void {
+        if (!msg || msg.role !== 'assistant' || this.deliveredIds.has(msg.id)) return;
+        this.deliveredIds.add(msg.id);
+        this.deliveredCount.update((n) => n + 1);
+        if (msg.media?.length) this.deliveredMediaCount.update((n) => n + 1);
+    }
+
     private tts = inject(TtsLipsyncService);
     private stt = inject(SpeechRecognitionService);
     private llm = inject(LlmService);
@@ -326,6 +346,7 @@ export class ConversationService {
             if (gen !== this.gen) return;
             this.speakingMsgId.set(null);
             this.revealingMsgId.set(null);
+            this.markDelivered(msg); // speech finished -> now counts toward the chat badge
             if (tailId) this.gTail(tailId, undefined, undefined, true);
             this.afterSpeaking(opts);
         } catch (e: any) {
@@ -423,6 +444,7 @@ export class ConversationService {
             this.speakingMsgId.set(null);
             this.revealingMsgId.set(null);
             if (gen !== this.gen) return;
+            this.markDelivered(assistantMsg); // speech finished -> counts toward chat + media badges
 
             const tailId = this.liveTailGesture();
             if (tailId) this.gTail(tailId, undefined, undefined, true);
@@ -568,6 +590,7 @@ export class ConversationService {
             this.speakingMsgId.set(null);
             this.revealingMsgId.set(null);
             if (gen !== this.gen) return; // interrupted while speaking
+            this.markDelivered(assistantMsg); // speech finished -> counts toward the chat badge
 
             // Tail gesture (motion-only) plays after body speech completes
             const tailId = this.liveTailGesture();
@@ -617,6 +640,10 @@ export class ConversationService {
 
     private interruptInternals(): void {
         this.gen++;            // any in-flight turn becomes a no-op
+        // Stop-before-finish: the partially-spoken response still exists to review,
+        // so it counts as unread (idempotent: a later normal finish won't double-count).
+        const spId = this.speakingMsgId();
+        if (spId != null) this.markDelivered(this.messages().find((m) => m.id === spId));
         this.tts.stop();       // cancels audio via the TTS generation token
         this.stt.stop();       // hard mic off
         this.streaming.set('');

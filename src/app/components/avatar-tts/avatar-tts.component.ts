@@ -56,8 +56,33 @@ export const DEFAULT_AVATAR_URL = 'https://raw.githubusercontent.com/met4citizen
 export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
     @ViewChild('canvasContainer') canvasContainer!: ElementRef<HTMLDivElement>;
     @Input() avatarUrl: string = DEFAULT_AVATAR_URL;
+    /** Compact framing for the small detail "Ver mas" PiP: pulls the camera back so the
+        head AND shoulders fit. false = normal full-screen framing. Bound to pipActive(). */
+    @Input() compact: boolean = false;
     /** Emitted after a model loads + is inspected — drives the picker conformance badge. */
     @Output() rigReport = new EventEmitter<RigReport>();
+
+    /* Camera framing presets (camera-only; the ResizeObserver still owns aspect+size).
+       MAIN = full-screen head-and-shoulders (default, unchanged).
+       COMPACT = pulled back (larger z) + lowered target so head+shoulders fit the small PiP.
+       Tune fov / the z distance / y here. */
+    private readonly FRAMING_MAIN = { fov: 20, x: 0, y: -0.12, z: 1.12 };
+    /* Pulled back so the head + full shoulders + chest/torso fit the (taller, sunk) detail
+       PiP without side-slicing. y is raised vs the body center so there is HEADROOM above
+       the crown (the head can never clip the top edge) and the avatar sits lower in frame,
+       letting the sunk box clip the waist at the BOTTOM. Tune: z = distance (size), y =
+       higher -> more headroom + avatar lower in frame; pair with --detail-pip-sink. */
+    private readonly FRAMING_COMPACT = { fov: 22, x: 0, y: -0.50, z: 3.40 };
+
+    /* Automatic bounding-box framing (frameModel). Every loaded GLB is normalized to a
+       constant world HEIGHT and positioned so the TOP OF THE HEAD lands at a consistent
+       Y derived from the MAIN camera preset, leaving FRAMING_HEADROOM above the crown.
+       This makes head+chest framing identical for any avatar (no per-avatar offsets) and
+       removes the old hardcoded model.position.set(0,-1.75,0). The model placement always
+       targets FRAMING_MAIN; the detail PiP composition is achieved purely by moving the
+       CAMERA (applyFraming/FRAMING_COMPACT), so the two stay independent. */
+    private readonly FRAMING_TARGET_HEIGHT = 1.8; // world height every avatar is scaled to (height-only normalization)
+    private readonly FRAMING_HEADROOM = 0.07;      // fraction of the frame height kept above the crown
 
     private modelCache = inject(ModelCacheService);
     private tts = inject(TtsLipsyncService);
@@ -108,6 +133,63 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
         if (changes['avatarUrl'] && !changes['avatarUrl'].firstChange && this.scene) {
             this.loadAvatar(this.avatarUrl);
         }
+        // Switch camera framing when entering/leaving the compact detail PiP (camera-only;
+        // no canvas recreation). Guarded: camera exists only after initThree.
+        if (changes['compact'] && this.camera) {
+            this.applyFraming();
+        }
+    }
+
+    /** Apply the current framing preset to the (single, shared) camera. */
+    private applyFraming(): void {
+        if (!this.camera) return;
+        const f = this.compact ? this.FRAMING_COMPACT : this.FRAMING_MAIN;
+        this.camera.fov = f.fov;
+        this.camera.position.set(f.x, f.y, f.z);
+        this.camera.updateProjectionMatrix();
+    }
+
+    /**
+     * Automatic bounding-box framing -- runs on EVERY model load/switch so any avatar
+     * (current or future) gets the same close HEAD-AND-CHEST composition, with NO per-avatar
+     * constants. HEIGHT-ONLY normalization:
+     *   1) Scale the model so its world height == FRAMING_TARGET_HEIGHT (tall/short variance
+     *      gone -> consistent zoom for everyone).
+     *   2) Center it on x/z and translate it so the TOP OF THE HEAD (bbox.max.y) sits at the
+     *      FRAMING_HEADROOM line just below the frame top -> the crown is never clipped and
+     *      head+upper-chest fill the frame the same way every time.
+     * Width is intentionally NOT fitted: wide avatars (e.g. wings) extend beyond the sides /
+     * get cropped, which is the accepted trade-off for a consistent close framing.
+     * The target Y is computed from FRAMING_MAIN ONLY (never the live/compact camera), so the
+     * detail PiP -- a pulled-back CAMERA (FRAMING_COMPACT) viewing this same model -- keeps its
+     * own composition. No canvas/WebGL recreation: we only set scale/position.
+     */
+    private frameModel(model: THREE.Object3D): void {
+        const box = new THREE.Box3();
+        const size = new THREE.Vector3();
+        const center = new THREE.Vector3();
+
+        // 1) Normalize height so every avatar fills the frame consistently.
+        model.scale.setScalar(1);
+        model.position.set(0, 0, 0);
+        model.updateMatrixWorld(true);
+        box.setFromObject(model);
+        box.getSize(size);
+        if (size.y > 1e-4) model.scale.setScalar(this.FRAMING_TARGET_HEIGHT / size.y);
+
+        // 2) Recompute the scaled box, then place head-top at the framed Y, centered on x/z.
+        model.updateMatrixWorld(true);
+        box.setFromObject(model);
+        box.getCenter(center);
+
+        const main = this.FRAMING_MAIN;
+        const halfV = Math.tan(THREE.MathUtils.degToRad(main.fov) / 2) * main.z; // subject plane z=0
+        const headTopY = (main.y + halfV) - this.FRAMING_HEADROOM * (halfV * 2);
+
+        model.position.x += 0 - center.x;        // center horizontally
+        model.position.z += 0 - center.z;        // center in depth
+        model.position.y += headTopY - box.max.y; // crown to the framed top (with headroom)
+        model.updateMatrixWorld(true);
     }
 
     ngOnDestroy() {
@@ -123,8 +205,11 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
         const width = el.clientWidth, height = el.clientHeight;
 
         this.scene = new THREE.Scene();
-        this.camera = new THREE.PerspectiveCamera(25, width / height, 0.1, 1000);
-        this.camera.position.set(0, -.15, 1.25); // moved closer (~2x larger framing, head-and-shoulders)
+        // FOV/position come from a framing preset (MAIN vs COMPACT). applyFraming() sets
+        // them based on the current `compact` input. The aspect is still driven by the
+        // ResizeObserver (onWindowResize) -- canvas resizes, never recreated.
+        this.camera = new THREE.PerspectiveCamera(this.FRAMING_MAIN.fov, width / height, 0.1, 1000);
+        this.applyFraming();
 
         this.renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
         this.renderer.setSize(width, height);
@@ -205,9 +290,9 @@ export class AvatarTtsComponent implements AfterViewInit, OnDestroy, OnChanges {
             });
         }
         const model = gltf.scene;
-        model.position.set(0, -1.75, 0); // same placement as avatar-viewer
         this.currentModel = model;
         this.scene.add(model);
+        this.frameModel(model); // auto bbox framing (replaces the old fixed -1.75 offset)
 
         this.headMesh = [];
         this.nodes = {};
