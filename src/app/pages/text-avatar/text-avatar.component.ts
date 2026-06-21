@@ -1,4 +1,4 @@
-import { Component, ElementRef, ViewChild, AfterViewChecked, OnInit, OnDestroy, computed, effect, inject, signal } from '@angular/core';
+import { Component, ElementRef, ViewChild, AfterViewChecked, OnInit, OnDestroy, computed, effect, inject, signal, untracked } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { ActivatedRoute, Router } from '@angular/router';
@@ -59,7 +59,7 @@ const CHIP_LABELS: Record<string, string> = {
         <div class="topctl">
           <!-- Chat popup toggle (everyone). The written conversation lives in an on-demand
                popup so the avatar + voice stay the primary focus. -->
-          <button class="iconbtn" (click)="toggleChat()" [class.active]="chatOpen()"
+          <button #chatIconBtn class="iconbtn" (click)="toggleChat()" [class.active]="chatOpen()"
                   [class.unread]="chatUnread() > 0"
                   title="Conversacion" aria-label="Conversacion">
             <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor"
@@ -102,7 +102,14 @@ const CHIP_LABELS: Record<string, string> = {
             <span class="spk"></span> {{ tts.bridging() ? '…' : 'Hablando…' }}
           </ng-container>
           <ng-container *ngSwitchCase="'error'">⚠️ Error</ng-container>
-          <ng-container *ngSwitchDefault>🕐 Esperando…</ng-container>
+          <ng-container *ngSwitchDefault>
+            <svg class="warn-ico" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor"
+                 stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M10.3 3.86 1.82 18.5A1.5 1.5 0 0 0 3.12 21h17.76a1.5 1.5 0 0 0 1.3-2.5L13.7 3.86a1.5 1.5 0 0 0-2.6 0z"/>
+              <path d="M12 9v4"/><path d="M12 17h.01"/>
+            </svg>
+            Presiona el microfono para hablar
+          </ng-container>
         </div>
       </div>
 
@@ -116,13 +123,26 @@ const CHIP_LABELS: Record<string, string> = {
 
         <!-- suggested-prompt carousel pinned to the avatar's bottom edge; auto-advances
              through the FULL per-assistant prompt set (PROMPT_CAROUSEL_INTERVAL_MS).
-             Hover/touch pauses rotation. Tapping a chip still sends that prompt. -->
+             Hover/touch pauses rotation. Tapping a chip still sends that prompt.
+             Dimmed (faded out) while subtitles are showing; fades back when idle. -->
         <div class="prompt-carousel" *ngIf="ragMode && suggestedPrompts().length"
+             [class.dim]="subStage() !== 'hidden'"
              (pointerenter)="pauseCarousel()" (pointerleave)="resumeCarousel()">
           <button class="chip" *ngFor="let p of carouselPrompts(); trackBy: trackPrompt"
                   (click)="sendChip(p)"
                   [disabled]="conv.state() === 'waiting_llm' || conv.state() === 'sending'"
                   [title]="p.prompt">{{ p.label }}</button>
+        </div>
+
+        <!-- LIVE SUBTITLE (rolling caption): progressively revealed in sync with the voice
+             (reuses the SAME tts.revealedChars() timing as the chat karaoke). The inner
+             .subtitle-roll is a fixed-height clipped window (1 line desktop / 2 lines
+             portrait) auto-scrolled to the bottom so the NEWEST words stay visible and older
+             text rolls off the top. On natural finish the whole bar "flies" to the chat icon. -->
+        <div class="subtitle" *ngIf="subStage() !== 'hidden'" #subtitleBar
+             [class.flying]="subStage() === 'flying'"
+             [style.transform]="subStage() === 'flying' ? flyTransform() : null">
+          <div class="subtitle-roll" #subtitleRoll [style.height.em]="subtitleHeightEm()">{{ subtitleText() }}</div>
         </div>
       </div>
 
@@ -321,6 +341,12 @@ const CHIP_LABELS: Record<string, string> = {
         </div>
         <div class="media-feed" #mediaFeedEl>
           <div class="media-entry" *ngFor="let m of mediaMessages(); trackBy: trackMsg">
+            <!-- Originating user question for this media group (from m.srcQuery). Falls back
+                 to a neutral label for legacy entries with no stored query. -->
+            <div class="media-q" [title]="m.srcQuery || 'Contenido relacionado'">
+              <span class="media-q-kicker">Relacionado con:</span>
+              <span class="media-q-text">{{ m.srcQuery || 'tu consulta' }}</span>
+            </div>
             <app-media-gallery [media]="m.media!" mode="preview"
                                (openViewer)="openMediaViewer(m, $event)"></app-media-gallery>
           </div>
@@ -539,11 +565,19 @@ const CHIP_LABELS: Record<string, string> = {
       overflow: visible;       /* the box never clips the avatar horizontally */
       transition: width .25s ease, height .25s ease;
     }
+    /* Responsive detail PiP size: portrait keeps the small 0.5 scale (100x140); landscape/
+       desktop (>=1024px, same app breakpoint) triples it to 1.5 (300x420) since there is
+       room. Only the var changes -> the box (and the canvas via ResizeObserver) resizes;
+       camera framing (FRAMING_COMPACT, chest-up) and the canvas itself are untouched. The
+       width/height CSS transition keeps the resize smooth; it also re-evaluates on
+       orientation/size change. */
+    @media (min-width: 1024px) { .app { --detail-pip-scale: 1.5; } }
     /* No background glow halo behind the floating PiP avatar. */
     .viewport.pip .glow { display: none; }
     /* The prompt carousel is hidden while the avatar is a small PiP (no room, and it
        must not clutter the detail overlay). */
     .viewport.pip .prompt-carousel { display: none; }
+    .viewport.pip .subtitle { display: none; }
     .pip-x { position: absolute; top: 6px; right: 6px; z-index: 2; width: 26px; height: 26px;
       border-radius: 8px; border: 1px solid rgba(255,255,255,.2); background: rgba(0,0,0,.45);
       color: #fff; cursor: pointer; font-size: 13px; }
@@ -736,6 +770,14 @@ const CHIP_LABELS: Record<string, string> = {
     .media-head h2 { margin: 0; font-size: 12.5px; font-weight: 600; color: #eceaf6; text-shadow: 0 1px 4px rgba(0,0,0,.6); }
     .media-feed { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
     .media-entry { flex: none; }
+    /* Originating-question caption above each media group. Compact, dark/violet, single-line
+       with ellipsis (full text on hover via title). */
+    .media-q { margin: 0 2px 4px; display: flex; flex-direction: column; gap: 1px; }
+    .media-q-kicker { font-size: 9.5px; letter-spacing: .5px; text-transform: uppercase; color: #8b85a6; }
+    .media-q-text {
+      font-size: 12px; font-weight: 600; color: #d6c9fb; line-height: 1.25;
+      white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
+    }
     /* Themed scrollbar: transparent track, blue outline (media + chat feeds). */
     .media-feed::-webkit-scrollbar, .feed::-webkit-scrollbar { width: 8px; }
     .media-feed::-webkit-scrollbar-track, .feed::-webkit-scrollbar-track { background: transparent; }
@@ -826,6 +868,35 @@ const CHIP_LABELS: Record<string, string> = {
     }
     .prompt-carousel .chip { animation: chipfade .4s ease both; }
     @keyframes chipfade { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
+    /* Carousel fades out while subtitles show, fades back in when idle (220ms). */
+    .prompt-carousel { transition: opacity .22s ease; }
+    .prompt-carousel.dim { opacity: 0; pointer-events: none; }
+
+    /* Live subtitle bar over the lower avatar. Durations below MUST match the TS
+       constants SUBTITLE_FLY_MS (650) and SUBTITLE_FADE_MS (220). */
+    .subtitle {
+      position: absolute; left: 8%; right: 8%; bottom: 10px; z-index: 13;
+      margin: 0 auto; max-width: 92%; text-align: center;
+      font-size: 15px; font-weight: 600; color: #fff;
+      text-shadow: 0 1px 4px rgba(0,0,0,.85), 0 0 10px rgba(0,0,0,.6);
+      background: rgba(10,9,16,.5); backdrop-filter: blur(4px);
+      border: 1px solid rgba(255,255,255,.1); border-radius: 12px;
+      padding: 8px 14px; overflow: visible; /* inner .subtitle-roll does the clipping */
+      transform-origin: center center;
+      animation: subin .22s ease both;
+      transition: transform .65s cubic-bezier(.4,0,.2,1), opacity .65s ease;
+    }
+    /* Fixed-height rolling window: height (em) set inline from subtitleHeightEm(); clipped,
+       smooth-scrolled to the bottom so newest words show and older text rolls off the top. */
+    .subtitle-roll {
+      line-height: 1.35; overflow: hidden; scroll-behavior: smooth;
+      box-sizing: content-box;
+    }
+    @keyframes subin { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
+    /* Fly-to-history: transform is set inline (toward the chat icon); we just fade + shrink. */
+    .subtitle.flying { opacity: 0; }
+    /* Warning glyph in the idle status pill. */
+    .warn-ico { vertical-align: -2px; margin-right: 2px; color: #f0c674; }
 
     /* Thin, always-visible static footer (never part of a scroll region). */
     .appfooter {
@@ -1184,7 +1255,10 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     pauseCarousel(): void { this.stopCarousel(); }
     resumeCarousel(): void { this.startCarousel(); }
 
-    ngOnDestroy(): void { this.clearChatTimers(); this.stopCarousel(); }
+    ngOnDestroy(): void {
+        this.clearChatTimers(); this.stopCarousel(); this.clearFlyTimer();
+        this.subMql?.removeEventListener('change', this.subMqlHandler);
+    }
 
     openMediaViewer(m: ConvMessage, index: number): void {
         if (m.media?.length) this.mediaViewer.set({ media: m.media, index });
@@ -1308,6 +1382,118 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     @ViewChild('feedEl') feedEl?: ElementRef<HTMLDivElement>;
     @ViewChild('previewTextareaEl') previewTextareaEl?: ElementRef<HTMLTextAreaElement>;
     @ViewChild('mediaFeedEl') mediaFeedEl?: ElementRef<HTMLDivElement>;
+    @ViewChild('subtitleBar') subtitleBar?: ElementRef<HTMLDivElement>;
+    @ViewChild('subtitleRoll') subtitleRoll?: ElementRef<HTMLDivElement>;
+    @ViewChild('chatIconBtn') chatIconBtn?: ElementRef<HTMLButtonElement>;
+
+    // ---------------------------------------------------- live subtitles + fly
+    /** Fly-to-history animation duration (ms). Must match the .subtitle CSS transition. */
+    private readonly SUBTITLE_FLY_MS = 650;
+    /** Rolling-caption window: visible lines by orientation (responsive). */
+    private readonly SUBTITLE_MAX_LINES_PORTRAIT = 2;
+    private readonly SUBTITLE_MAX_LINES_DESKTOP = 1;
+    /** Line-height (em) of the subtitle text; must match the .subtitle-roll CSS line-height. */
+    private readonly SUBTITLE_LINE_EM = 1.35;
+    /** Desktop breakpoint (same 1024px used across the page). matchMedia keeps it reactive. */
+    private subMql = typeof window !== 'undefined' ? window.matchMedia('(min-width: 1024px)') : null;
+    private subMqlHandler = (e: MediaQueryListEvent) => this.isDesktopWide.set(e.matches);
+    /** True on wide/desktop (>=1024px); flips on orientation/size change. */
+    isDesktopWide = signal(this.subMql ? this.subMql.matches : false);
+    /** Active rolling-caption line limit (1 desktop / 2 portrait). */
+    subtitleMaxLines = computed(() =>
+        this.isDesktopWide() ? this.SUBTITLE_MAX_LINES_DESKTOP : this.SUBTITLE_MAX_LINES_PORTRAIT);
+    /** Fixed window height in em for that line limit. */
+    subtitleHeightEm = computed(() => this.subtitleMaxLines() * this.SUBTITLE_LINE_EM);
+
+    /**
+     * Rolling-caption auto-scroll: after each reveal tick (or a line-limit change), pin the
+     * clipped window to the BOTTOM so the newest words stay visible and older text rolls off
+     * the top. rAF runs after the DOM paints the new text; CSS scroll-behavior:smooth eases it.
+     */
+    private _subRollFx = effect(() => {
+        this.subtitleText();       // dep: re-run as words reveal (same speech-reveal timing)
+        this.subtitleMaxLines();   // dep: re-pin on orientation/size change
+        const open = this.subStage() !== 'hidden';
+        if (!open) return;
+        requestAnimationFrame(() => {
+            const el = this.subtitleRoll?.nativeElement;
+            if (el) el.scrollTop = el.scrollHeight;
+        });
+    });
+    /** Stage of the subtitle overlay: hidden -> live (revealing) -> flying (to chat icon). */
+    subStage = signal<'hidden' | 'live' | 'flying'>('hidden');
+    /** Message id whose text the subtitle shows (captured when it goes live). */
+    private subCurrentId = signal<number | null>(null);
+    /** Fly translation toward the chat icon (px), set in startFly(). */
+    private flyX = signal(0);
+    private flyY = signal(-160);
+    flyTransform = computed(() => `translate(${this.flyX()}px, ${this.flyY()}px) scale(0.32)`);
+    private flyTimer: any = null;
+    private lastCompleted = 0;
+
+    /**
+     * Subtitle text = the SAME reveal source as the chat karaoke. While the revealing
+     * message matches, slice its clean text to tts.revealedChars() (word/segment sync with
+     * the voice); otherwise (finished/flying, or a non-reveal engine) show the full line.
+     */
+    subtitleText = computed<string>(() => {
+        const revId = this.conv.revealingMsgId();
+        const id = revId ?? this.conv.speakingMsgId() ?? this.subCurrentId();
+        if (id == null) return '';
+        const m = this.conv.messages().find((x) => x.id === id);
+        if (!m) return '';
+        const model = this.displayModel(m);
+        if (revId === id) return model.clean.slice(0, Math.min(this.tts.revealedChars(), model.clean.length));
+        return model.clean;
+    });
+
+    /**
+     * Drives the hint<->subtitle swap from the speaking state + the natural-finish pulse:
+     *   (a) speechCompleted pulse while live  -> fly to history (then hide).
+     *   (b) state==='speaking'                -> show live subtitle (hints fade out).
+     *   (c) left speaking with NO pulse (Stop/interrupt) -> quick hide, hints fade back.
+     * untracked() wraps the writes so the effect only re-runs on state/completed changes.
+     */
+    private _subtitleFx = effect(() => {
+        const speaking = this.conv.state() === 'speaking';
+        const speakId = this.conv.speakingMsgId();
+        const completed = this.conv.speechCompleted();
+        untracked(() => {
+            if (completed !== this.lastCompleted) {
+                this.lastCompleted = completed;
+                if (this.subStage() === 'live') this.startFly(); // natural finish -> fly
+                return;
+            }
+            if (speaking && speakId != null) {
+                if (this.subStage() !== 'live') { this.clearFlyTimer(); this.subStage.set('live'); }
+                this.subCurrentId.set(speakId);
+                return;
+            }
+            if (!speaking && this.subStage() === 'live') {
+                // Stop/interrupt mid-speech: quick fade back to hints, no fly.
+                this.clearFlyTimer();
+                this.subStage.set('hidden');
+            }
+        });
+    });
+
+    /** Animate the live subtitle toward the chat icon, then remove it. */
+    private startFly(): void {
+        this.clearFlyTimer();
+        const sub = this.subtitleBar?.nativeElement;
+        const icon = this.chatIconBtn?.nativeElement;
+        if (sub && icon) {
+            const s = sub.getBoundingClientRect();
+            const i = icon.getBoundingClientRect();
+            this.flyX.set(Math.round((i.left + i.width / 2) - (s.left + s.width / 2)));
+            this.flyY.set(Math.round((i.top + i.height / 2) - (s.top + s.height / 2)));
+        } else {
+            this.flyX.set(0); this.flyY.set(-160);
+        }
+        this.subStage.set('flying');
+        this.flyTimer = setTimeout(() => { this.subStage.set('hidden'); this.flyTimer = null; }, this.SUBTITLE_FLY_MS);
+    }
+    private clearFlyTimer(): void { if (this.flyTimer) { clearTimeout(this.flyTimer); this.flyTimer = null; } }
     private stickToBottom = true;
     private lastMsgCount = 0;
     private lastMediaCount = 0;
@@ -1714,6 +1900,8 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         void this.admin.check();
         // Start the suggested-prompt carousel rotation (idempotent; paused on hover).
         this.startCarousel();
+        // React to orientation/size crossing the 1024px breakpoint (subtitle line limit).
+        this.subMql?.addEventListener('change', this.subMqlHandler);
         // Load the avatar list from the DB (avatars/{id}) and restore the last selection.
         await this.loadDbAvatars();
 
@@ -1873,8 +2061,17 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     }
 
     onProviderOrLangChange() {
-        const list = PIPER_VOICES[this.lang];
-        if (!list.some(v => v.id === this.voiceId)) this.voiceId = list[0].id;
+        // The dynamic voice catalog lets an avatar/assistant be configured with ANY valid
+        // vits-web voice id, not just the hardcoded PIPER_VOICES seed. Do NOT reset a
+        // configured voice just because it is not in that seed list -- that membership check
+        // is what forced every voice back to PIPER_VOICES[lang][0] (es_MX-claude-high). The
+        // spoken voice must follow the configured id independently of the dropdown catalog.
+        // Only fall back when the id is empty OR belongs to a DIFFERENT language than the
+        // current lang (the legitimate es<->en manual-switch case). The id prefix is the
+        // source of truth for language (same rule synthesis uses).
+        const id = (this.voiceId || '').trim();
+        const idLang: TtsLang = id.toLowerCase().startsWith('en') ? 'en' : 'es';
+        if (!id || idLang !== this.lang) this.voiceId = PIPER_VOICES[this.lang][0].id;
     }
 
     speakManual() {

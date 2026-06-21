@@ -106,6 +106,14 @@ export class ConversationService {
     /** Ids already counted as delivered, so stop-then-finish never double-counts. */
     private deliveredIds = new Set<number>();
 
+    /**
+     * Monotonic pulse that increments ONLY when speech finishes NATURALLY (the avatar
+     * spoke the whole reply), NOT on a user Stop/interrupt. The UI uses this to play the
+     * "fly subtitle to history" animation on a clean finish (and skip it on Stop).
+     */
+    public speechCompleted: WritableSignal<number> = signal(0);
+    private signalNaturalEnd(): void { this.speechCompleted.update((n) => n + 1); }
+
     /** Mark an assistant message delivered exactly once (idempotent). */
     private markDelivered(msg: ConvMessage | null | undefined): void {
         if (!msg || msg.role !== 'assistant' || this.deliveredIds.has(msg.id)) return;
@@ -347,6 +355,7 @@ export class ConversationService {
             this.speakingMsgId.set(null);
             this.revealingMsgId.set(null);
             this.markDelivered(msg); // speech finished -> now counts toward the chat badge
+            this.signalNaturalEnd(); // natural finish -> UI flies the subtitle to history
             if (tailId) this.gTail(tailId, undefined, undefined, true);
             this.afterSpeaking(opts);
         } catch (e: any) {
@@ -445,6 +454,7 @@ export class ConversationService {
             this.revealingMsgId.set(null);
             if (gen !== this.gen) return;
             this.markDelivered(assistantMsg); // speech finished -> counts toward chat + media badges
+            this.signalNaturalEnd(); // natural finish -> UI flies the subtitle to history
 
             const tailId = this.liveTailGesture();
             if (tailId) this.gTail(tailId, undefined, undefined, true);
@@ -591,6 +601,7 @@ export class ConversationService {
             this.revealingMsgId.set(null);
             if (gen !== this.gen) return; // interrupted while speaking
             this.markDelivered(assistantMsg); // speech finished -> counts toward the chat badge
+            this.signalNaturalEnd(); // natural finish -> UI flies the subtitle to history
 
             // Tail gesture (motion-only) plays after body speech completes
             const tailId = this.liveTailGesture();
