@@ -102,12 +102,22 @@ export class ConversationContentService {
     ]);
     const flags = meta.flags;
 
-    const [greetings, infoAcks, farewells, suggested] = await Promise.all([
-      flags.greetings ? this.fetchPhrases(assistantId, 'greetings') : Promise.resolve(globals.greetings),
-      flags.infoAcknowledgements ? this.fetchPhrases(assistantId, 'infoAcknowledgements') : Promise.resolve(globals.infoAcknowledgements),
-      flags.farewells ? this.fetchPhrases(assistantId, 'farewells') : Promise.resolve(globals.farewells),
-      flags.suggestedPrompts ? this.fetchPrompts(assistantId) : Promise.resolve(globals.suggestedPrompts),
+    // CONTENT-DRIVEN resolution: read each assistant subcollection and use it when
+    // it has enabled items; fall back to GLOBAL only when the assistant GENUINELY
+    // has none. This makes configured content win even if useCustomResponses drifted
+    // out of sync (chips present but flag false -> the bug where Pastor-IA showed
+    // global chips). 'revertCategory' clears the docs, so an empty subcollection
+    // unambiguously means "use global". A read error returns [] -> global last resort.
+    const [cg, ci, cf, cs] = await Promise.all([
+      this.fetchPhrases(assistantId, 'greetings'),
+      this.fetchPhrases(assistantId, 'infoAcknowledgements'),
+      this.fetchPhrases(assistantId, 'farewells'),
+      this.fetchPrompts(assistantId),
     ]);
+    const greetings = cg.length ? cg : globals.greetings;
+    const infoAcks = ci.length ? ci : globals.infoAcknowledgements;
+    const farewells = cf.length ? cf : globals.farewells;
+    const suggested = cs.length ? cs : globals.suggestedPrompts;
     // Capabilities (singleton) is resolved from the already-read assistant doc
     // (custom) or the already-loaded global doc -- NO extra Firestore reads.
     const capabilities: CapabilitiesConfig = flags.capabilities ? meta.capabilities : (globals.capabilities ?? {});
@@ -300,8 +310,14 @@ export class ConversationContentService {
     await this.invalidate(assistantId);
   }
 
-  /** Revert a category to the global defaults: flag -> false (optionally clear docs). */
-  async revertCategory(assistantId: string, kind: ConvKind, clearDocs = false): Promise<void> {
+  /**
+   * Revert a category to the global defaults. Clears the custom docs by DEFAULT so
+   * an empty subcollection unambiguously means "use global" under the content-driven
+   * resolver (a leftover doc would otherwise keep winning over global). Pass
+   * clearDocs=false only if you intend to keep the docs (they will still resolve as
+   * custom). Also sets the flag false (kept for change-detection).
+   */
+  async revertCategory(assistantId: string, kind: ConvKind, clearDocs = true): Promise<void> {
     if (clearDocs) {
       const existing = await getDocs(collection(this.db(), 'assistants', assistantId, kind));
       const batch = writeBatch(this.db());

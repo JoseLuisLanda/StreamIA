@@ -1,7 +1,8 @@
 import { Injectable, signal } from '@angular/core';
 import { getIdToken } from 'firebase/auth';
 import { getBlob, getDownloadURL, ref } from 'firebase/storage';
-import { getFirebaseAuth, getStorageForBucket } from './firebase-client';
+import { doc, getDoc } from 'firebase/firestore';
+import { getFirebaseAuth, getFirebaseFirestoreClient, getStorageForBucket } from './firebase-client';
 import {
   LegacyRagResponse,
   MediaItem,
@@ -37,8 +38,19 @@ export type RagErrorKind =
   | 'forbidden'
   | 'bad-request'
   | 'no-context'
+  | 'quota'
   | 'server'
   | 'network';
+
+/** Per-account quota snapshot returned with each rag answer (or on a 429 block). */
+export interface QuotaInfo {
+  remaining: number;
+  allocated: number;
+  used: number;
+  warnThresholds: number[];
+  /** threshold this interaction crossed (one-shot warning), or null. */
+  warnCrossed: number | null;
+}
 
 export class RagAvatarError extends Error {
   constructor(
@@ -75,6 +87,36 @@ export class RagAvatarError extends Error {
 export class RagAvatarService {
   /** media from the most recent answer (for the gallery) */
   readonly lastMedia = signal<MediaItem[]>([]);
+  /** latest per-account quota snapshot (updated on every rag answer / 429). */
+  readonly lastQuota = signal<QuotaInfo | null>(null);
+  /** true when the account has hit 0 -> the UI shows a hard-blocked state. */
+  readonly quotaBlocked = signal<boolean>(false);
+
+  /**
+   * Read users/{uid}/quota/current ONCE (owner-readable; never written client-side)
+   * so the live counter shows the account balance the moment an assistant loads,
+   * before the first interaction. Best-effort: a missing doc / denied read leaves
+   * the counter hidden until the first server response reconciles it.
+   */
+  async loadQuotaForUser(uid: string): Promise<void> {
+    if (!uid) return;
+    try {
+      const snap = await getDoc(doc(getFirebaseFirestoreClient(), 'users', uid, 'quota', 'current'));
+      if (!snap.exists()) { this.lastQuota.set(null); this.quotaBlocked.set(false); return; }
+      const v = snap.data() as any;
+      const remaining = Number(v.remaining ?? 0);
+      this.lastQuota.set({
+        remaining,
+        allocated: Number(v.allocated ?? 0),
+        used: Number(v.used ?? 0),
+        warnThresholds: Array.isArray(v.warnThresholds) ? v.warnThresholds : [],
+        warnCrossed: null,
+      });
+      this.quotaBlocked.set(remaining <= 0);
+    } catch {
+      /* read denied / offline -> leave counter to reconcile from the next response */
+    }
+  }
 
   /**
    * Call the Function. Throws `RagAvatarError` (with a `kind`) on any failure.
@@ -130,6 +172,17 @@ export class RagAvatarService {
       chunkIds: opts.chunkIds,
     };
 
+    // OPTIMISTIC quota decrement: only the rag (summary) interaction consumes a
+    // unit server-side, so decrement the local counter for that mode BEFORE the
+    // round-trip (feels instant). capabilities/detail/suggestions do NOT consume.
+    // The server response reconciles to the authoritative `remaining`; a network
+    // failure (request never reached the server) rolls this back.
+    const consumesQuota = (payload.mode ?? 'rag') === 'rag';
+    if (consumesQuota) {
+      this.lastQuota.update((qq) => (qq && qq.remaining > 0
+        ? { ...qq, remaining: qq.remaining - 1, used: qq.used + 1 } : qq));
+    }
+
     let res: Response;
     try {
       res = await fetch(endpoint, {
@@ -138,6 +191,11 @@ export class RagAvatarService {
         body: JSON.stringify(payload),
       });
     } catch (e: any) {
+      // Request never reached the server -> roll back the optimistic decrement.
+      if (consumesQuota) {
+        this.lastQuota.update((qq) => (qq
+          ? { ...qq, remaining: qq.remaining + 1, used: Math.max(0, qq.used - 1) } : qq));
+      }
       // A thrown fetch (TypeError "Failed to fetch") is the classic CORS / offline
       // signature — the browser blocked the response before we could read status.
       throw new RagAvatarError(
@@ -150,6 +208,16 @@ export class RagAvatarService {
     }
 
     if (!res.ok) {
+      // 429 = quota exhausted: latch the blocked state for the UI before throwing.
+      if (res.status === 429) {
+        this.quotaBlocked.set(true);
+        this.lastQuota.update((q) => (q ? { ...q, remaining: 0 } : { remaining: 0, allocated: 0, used: 0, warnThresholds: [], warnCrossed: null }));
+        throw new RagAvatarError(
+          'quota',
+          'Has agotado tus consultas; contacta para recargar.',
+          429,
+        );
+      }
       throw await this.toError(res);
     }
 
@@ -158,6 +226,19 @@ export class RagAvatarService {
       data = await res.json();
     } catch {
       throw new RagAvatarError('server', 'El asistente devolvió una respuesta no válida.', res.status);
+    }
+
+    // Capture the quota snapshot the server returns with a rag answer (if any).
+    const rawQuota = (data as any)?.quota;
+    if (rawQuota && typeof rawQuota === 'object') {
+      this.quotaBlocked.set(false);
+      this.lastQuota.set({
+        remaining: Number(rawQuota.remaining ?? 0),
+        allocated: Number(rawQuota.allocated ?? 0),
+        used: Number(rawQuota.used ?? 0),
+        warnThresholds: Array.isArray(rawQuota.warnThresholds) ? rawQuota.warnThresholds : [],
+        warnCrossed: rawQuota.warnCrossed ?? null,
+      });
     }
 
     const normalized = this.normalize(data);

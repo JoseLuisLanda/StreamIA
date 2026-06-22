@@ -55,6 +55,16 @@ service cloud.firestore {
       allow read, write: if isSignedIn() && request.auth.uid == uid;
     }
 
+    // --- Per-account query quota (users/{uid}/quota/current + .../ledger/**) ---
+    // CRITICAL: the owner may READ their balance (to display remaining), but writes
+    // are SERVER-ONLY (Admin SDK via the quota callables + chatRag's atomic
+    // consume). A client must NEVER be able to grant itself quota. The recursive
+    // {document=**} covers the current doc AND its nested ledger. DEV and PROD.
+    match /users/{uid}/quota/{document=**} {
+      allow read: if isSignedIn() && request.auth.uid == uid;
+      allow write: if false;
+    }
+
     // --- Assistants (avatar + RAG namespace + persona + voice + lead/tail) ---
     // PUBLIC READ: /assistants + /text-avatar are public kiosk surfaces, so the
     // client must read these configs even when signed out. They hold no secrets

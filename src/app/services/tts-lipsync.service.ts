@@ -18,7 +18,7 @@ import { splitProgressive } from '../lib/performance/progressive-split';
 
 export type TtsProvider = 'piper' | 'webspeech';
 export type TtsLang = 'es' | 'en';
-export type TtsState = 'idle' | 'loading-engine' | 'synthesizing' | 'speaking';
+export type TtsState = 'idle' | 'loading-engine' | 'synthesizing' | 'speaking' | 'paused';
 
 export interface SpeakOptions {
     provider: TtsProvider;
@@ -129,6 +129,8 @@ export class TtsLipsyncService {
     private pendingTimerResolvers: Array<() => void> = [];
     private clipCache = new Map<string, Promise<AudioBuffer>>();
     private generation = 0;
+    /** true while playback is paused via AudioContext.suspend() (clock frozen). */
+    private paused = false;
     private timing: TimingRecorder | null = null;
     private timingOpts: SpeakOptions | null = null;
     private firstSynthMarked = false;
@@ -232,7 +234,37 @@ export class TtsLipsyncService {
         this.stopInternal(false);
     }
 
+    /**
+     * TRUE pause: suspend the AudioContext. This freezes ctx.currentTime, so BOTH
+     * the avatar visemes (getMouthWeights reads ctx.currentTime) AND the karaoke
+     * reveal (sampled from ctx.currentTime) freeze in lockstep with the audio, and
+     * resume continues from the exact same sample -> zero drift. The audio-clock
+     * completion check (see playPlan) also pauses, so playback can't "end" while
+     * suspended. No generation bump -> this is NOT a stop/cancel.
+     */
+    pauseSpeech(): void {
+        if (this.audioCtx && this.state() === 'speaking' && !this.paused) {
+            this.paused = true;
+            this.state.set('paused');
+            this.audioCtx.suspend().catch(() => { /* best-effort */ });
+        }
+    }
+
+    resumeSpeech(): void {
+        if (this.audioCtx && this.paused) {
+            this.paused = false;
+            this.audioCtx.resume().catch(() => { /* best-effort */ });
+            this.state.set('speaking');
+        }
+    }
+
     private stopInternal(keepTransient: boolean): void {
+        // If paused (context suspended), resume the clock so future audio plays and
+        // this stop takes effect immediately.
+        if (this.paused && this.audioCtx) {
+            this.paused = false;
+            this.audioCtx.resume().catch(() => { /* best-effort */ });
+        }
         this.generation++;
         this.gestures.clear({ keepTransient });
         for (const source of this.currentSources) {
@@ -334,6 +366,10 @@ export class TtsLipsyncService {
     private async speakPiper(segments: SpeechTimelineSegment[], gestures: TimelineGesture[], opts: SpeakOptions, gen: number): Promise<void> {
         const voiceId = opts.voiceId ?? PIPER_VOICES[opts.lang][0].id;
         const ctx = this.ensureAudioCtx();
+        // Defensive: a prior pause may have left the context suspended -> resume so
+        // the audio clock advances and scheduled buffers actually play.
+        if (ctx.state === 'suspended') { try { await ctx.resume(); } catch { /* best-effort */ } }
+        this.paused = false;
         const expanded = expandSegments(segments);
 
         const deps = this.makeDeps(ctx, voiceId);
@@ -600,14 +636,33 @@ export class TtsLipsyncService {
             }, Math.max(0, (base - ctx.currentTime) * 1000));
             this.pendingTimers.push(killAt);
 
-            // karaoke reveal: sample spoken chars on a light interval
+            // karaoke reveal + completion, BOTH on the AUDIO clock. A pause
+            // (AudioContext.suspend) freezes ctx.currentTime -> t stops advancing ->
+            // the reveal freezes AND completion does not fire until the audio truly
+            // reaches the end on resume. So audio, avatar and highlight stay in sync
+            // across pause/resume with no drift and no early end.
             const maxSrcEnd = plan.events.reduce((a, e) => e.type === 'speech' ? Math.max(a, e.srcEnd) : a, 0);
+            let done = false;
+            const finish = (): void => {
+                if (done) return;
+                done = true;
+                window.clearInterval(iv);
+                this.pendingIntervals = this.pendingIntervals.filter(x => x !== iv);
+                this.pendingTimers = this.pendingTimers.filter(x => x !== backstop);
+                this.pendingTimerResolvers = this.pendingTimerResolvers.filter(r => r !== resolve);
+                if (maxSrcEnd > 0) {
+                    const r = revealOffset + maxSrcEnd;
+                    if (r > this.revealedChars()) this.revealedChars.set(r);
+                }
+                resolve();
+            };
             const iv = window.setInterval(() => {
                 const t = ctx.currentTime - base;
                 if (t >= 0) {
                     const r = revealOffset + revealAtTime(plan.events, t);
                     if (r > this.revealedChars()) this.revealedChars.set(r);
                 }
+                if (t >= plan.duration) finish(); // audio-clock completion (pause-safe)
             }, 60);
             this.pendingIntervals.push(iv);
 
@@ -617,18 +672,11 @@ export class TtsLipsyncService {
 
             this.active = { frames: plan.visemeTrack, anchor: base, duration: plan.duration, clock: 'audio' };
 
-            const timer = window.setTimeout(() => {
-                this.pendingTimers = this.pendingTimers.filter(t => t !== timer);
-                this.pendingTimerResolvers = this.pendingTimerResolvers.filter(r => r !== resolve);
-                window.clearInterval(iv);
-                this.pendingIntervals = this.pendingIntervals.filter(x => x !== iv);
-                if (maxSrcEnd > 0) {
-                    const r = revealOffset + maxSrcEnd;
-                    if (r > this.revealedChars()) this.revealedChars.set(r);
-                }
-                resolve();
-            }, (plan.duration + 0.1) * 1000);
-            this.pendingTimers.push(timer);
+            // WALL backstop: never fires in normal play; generous enough that even a
+            // long pause cannot trip it. Guards against a stuck clock so the promise
+            // can never hang.
+            const backstop = window.setTimeout(finish, (plan.duration * 4 + 15) * 1000);
+            this.pendingTimers.push(backstop);
             this.pendingTimerResolvers.push(resolve);
         });
     }

@@ -106,7 +106,10 @@ export interface AssistantConvContent {
  * incompatible cached envelopes (e.g. pre-flag) are treated as a miss and
  * re-synced instead of serving stale/empty content.
  */
-export const CACHE_SCHEMA = 3;
+// v4: content-driven resolution (custom subcollection wins over global when it has
+// items, regardless of the useCustomResponses flag). Bumped so pre-v4 envelopes
+// that cached a stale GLOBAL fallback are treated as a miss and re-resolved.
+export const CACHE_SCHEMA = 4;
 
 /** Cache envelope persisted in IndexedDB, keyed by assistantId. */
 export interface CachedConvContent {

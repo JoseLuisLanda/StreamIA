@@ -26,6 +26,7 @@ import {
 } from './firebase-client';
 import {
   ChunkPage,
+  ChunkStrategy,
   IngestDocumentRequest,
   IngestDocumentResponse,
   MediaType,
@@ -55,34 +56,49 @@ export class RagAdminService {
 
   // ----------------------------------------------------------- namespaces
 
+  /**
+   * List namespaces via the admin callable `listNamespaces`. The server returns a
+   * live documentCount per namespace (count of rag/{ns}/documents) so the UI can
+   * disable delete on non-empty namespaces.
+   */
   async listNamespaces(): Promise<RagNamespace[]> {
-    const snap = await getDocs(query(collection(this.db(), 'rag_namespaces'), orderBy(documentId())));
-    return snap.docs.map((d) => {
-      const data = d.data() as Partial<RagNamespace>;
-      return {
-        id: d.id,
-        name: data.name ?? d.id,
-        createdAt: this.toMs(data.createdAt),
-        documentCount: data.documentCount,
-        chunkCount: data.chunkCount,
-      };
-    });
+    const callable = httpsCallable<unknown, { namespaces: Array<{ id: string; name: string; createdAt?: number; documentCount: number }> }>(
+      getFirebaseFunctionsClient(),
+      'listNamespaces',
+    );
+    const res = await callable({});
+    return (res.data?.namespaces ?? []).map((n) => ({
+      id: n.id,
+      name: n.name ?? n.id,
+      createdAt: n.createdAt,
+      documentCount: n.documentCount,
+    }));
   }
 
   /**
-   * Create (or register) a namespace. Idempotent via merge, so it also serves to
-   * register a pre-existing namespace (e.g. grabovoi/ia/terapia) into the
-   * listable registry without disturbing its existing chunks.
+   * Create a namespace via the admin callable `createNamespace`. The server
+   * validates the id (lowercase [a-z0-9_-], non-empty, unique) and rejects with a
+   * clear error otherwise. The display name equals the id.
    */
-  async createNamespace(id: string, name?: string): Promise<RagNamespace> {
-    const ns = this.sanitizeId(id);
-    if (!ns) throw new Error('Invalid namespace id.');
-    await setDoc(
-      doc(this.db(), 'rag_namespaces', ns),
-      { name: name?.trim() || ns, createdAt: serverTimestamp() },
-      { merge: true },
+  async createNamespace(id: string): Promise<RagNamespace> {
+    const callable = httpsCallable<{ name: string }, { ok: true; id: string; name: string }>(
+      getFirebaseFunctionsClient(),
+      'createNamespace',
     );
-    return { id: ns, name: name?.trim() || ns, createdAt: Date.now() };
+    const res = await callable({ name: id });
+    return { id: res.data.id, name: res.data.name, createdAt: Date.now(), documentCount: 0 };
+  }
+
+  /**
+   * Delete an EMPTY namespace via the admin callable `deleteNamespace`. The server
+   * rejects (failed-precondition) if documents/chunks/media are not all empty.
+   */
+  async deleteNamespace(id: string): Promise<void> {
+    const callable = httpsCallable<{ name: string }, { ok: true; id: string }>(
+      getFirebaseFunctionsClient(),
+      'deleteNamespace',
+    );
+    await callable({ name: id });
   }
 
   // ------------------------------------------------------------ documents
@@ -192,6 +208,7 @@ export class RagAdminService {
   async ingest(
     d: RagDocument,
     options?: { chunkSize?: number; overlap?: number },
+    strategy: ChunkStrategy = 'auto',
   ): Promise<IngestDocumentResponse> {
     const recordRef = doc(this.db(), 'rag', d.namespace, 'documents', d.id);
     await updateDoc(recordRef, { status: 'processing', error: '' });
@@ -206,6 +223,7 @@ export class RagAdminService {
         namespace: d.namespace,
         storagePath: d.storagePath,
         docId: d.id,
+        strategy,
         options,
       });
       const data = res.data;
@@ -415,6 +433,9 @@ export class RagAdminService {
       error: data.error || undefined,
       ingestedAt: this.toMs(data.ingestedAt),
       contentType: data.contentType,
+      chunkStrategy: data.chunkStrategy || undefined,
+      chunkStrategyDetected: data.chunkStrategyDetected || undefined,
+      maxChunkTokens: typeof data.maxChunkTokens === 'number' ? data.maxChunkTokens : undefined,
     };
   }
 

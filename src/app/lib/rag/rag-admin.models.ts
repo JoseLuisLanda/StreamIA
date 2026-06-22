@@ -50,7 +50,17 @@ export interface RagDocument {
   /** epoch ms of last ingest attempt */
   ingestedAt?: number;
   contentType?: string;
+  /** chunk strategy actually used by the last ingest (resolved from 'auto'). */
+  chunkStrategy?: string;
+  /** what auto-detection found (may differ if the admin forced a strategy). */
+  chunkStrategyDetected?: string;
+  /** largest chunk's real token count from the last ingest. */
+  maxChunkTokens?: number;
 }
+
+/** The five chunk strategies + 'auto' (auto-detect at ingest). */
+export type ChunkStrategy = 'auto' | 'fixed' | 'recursive' | 'pericopal' | 'section' | 'semantic';
+export const CHUNK_STRATEGIES: ChunkStrategy[] = ['auto', 'fixed', 'recursive', 'pericopal', 'section', 'semantic'];
 
 /** Read-only chunk view (rag/{ns}/chunks/{chunkId}). Shape is tolerant: the
  *  Function owns the canonical schema; we only read common fields for display. */
@@ -112,6 +122,8 @@ export interface IngestDocumentRequest {
   storagePath: string;
   /** optional, for re-processing an existing document record */
   docId?: string;
+  /** chunk strategy; 'auto' (default) detects from the extracted text server-side. */
+  strategy?: ChunkStrategy;
   options?: { chunkSize?: number; overlap?: number };
 }
 
@@ -121,6 +133,8 @@ export interface IngestDocumentResponse {
   chunks: number;
   status: 'done' | 'error';
   message?: string;
+  /** strategy actually used (resolved from 'auto'). */
+  strategy?: string;
 }
 
 /** Upload progress callback payload. */

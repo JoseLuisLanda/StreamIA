@@ -30,8 +30,9 @@ export interface RagRequest {
    *  - absent/'rag'   = STAGE 1 summary-only (+ media). Fast; detail is empty.
    *  - 'capabilities' = metadata-only answer (no retrieval/media).
    *  - 'detail'       = STAGE 2 detail-only, reusing stage-1 chunks via `chunkIds`.
+   *  - 'textual_quote'= serve the LITERAL passage by reference (verbatim, no rewrite).
    */
-  mode?: 'rag' | 'capabilities' | 'detail' | 'suggestions';
+  mode?: 'rag' | 'capabilities' | 'detail' | 'suggestions' | 'textual_quote';
   /** STAGE 2: chunk ids from stage 1's `sources`, so the detail reuses the same context. */
   chunkIds?: string[];
 }
@@ -49,8 +50,8 @@ export interface RagAskOptions {
   language?: string;
   voice?: string;
   /** 'capabilities' = metadata-only; 'detail' = stage-2 detail-only; 'suggestions' =
-   *  3 follow-up prompts (reuses stage-1 chunks). Default = stage-1 summary. */
-  mode?: 'rag' | 'capabilities' | 'detail' | 'suggestions';
+   *  3 follow-up prompts; 'textual_quote' = literal passage by reference. Default = summary. */
+  mode?: 'rag' | 'capabilities' | 'detail' | 'suggestions' | 'textual_quote';
   /** STAGE 2/suggestions: chunk ids from stage 1's sources (reuses the same context). */
   chunkIds?: string[];
 }

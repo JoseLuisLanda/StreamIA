@@ -4,12 +4,10 @@ import { FormsModule } from '@angular/forms';
 import { RouterLink } from '@angular/router';
 import { RagAdminService } from '../../services/rag-admin.service';
 import { AdminService } from '../../services/admin.service';
-import { AssistantConfigService } from '../../services/assistant-config.service';
 import { ImageOptimizationService } from '../../services/image-optimization.service';
 import { RagChunkListComponent } from './components/rag-chunk-list.component';
 import { RagMediaManagerComponent } from './components/rag-media-manager.component';
-import { MediaType, RagDocument, RagMediaRecord, RagNamespace } from '../../lib/rag/rag-admin.models';
-import { AssistantConfig } from '../../lib/rag/rag.models';
+import { ChunkStrategy, CHUNK_STRATEGIES, MediaType, RagDocument, RagMediaRecord, RagNamespace } from '../../lib/rag/rag-admin.models';
 import { environment } from '../../../environments/environment';
 
 type Tab = 'documents' | 'chunks' | 'media';
@@ -69,34 +67,31 @@ interface MediaRow {
         <div class="denied" *ngIf="!allowed()">You do not have admin access to this panel.</div>
 
         <ng-container *ngIf="allowed()">
-          <!-- ---------- SIDEBAR (assistant selector) ---------- -->
+          <!-- ---------- SIDEBAR (namespace selector) ---------- -->
           <aside class="sidebar">
-            <div class="side-label">Assistants</div>
+            <div class="side-label">Namespaces</div>
 
             <div class="ns-loading" *ngIf="loadingNs()"><span class="spin"></span> Loading...</div>
 
-            <!-- Each assistant owns a 1:1 RAG namespace (ragCollection). Selecting an
-                 assistant drives uploads/ingestion into THAT assistant's namespace. -->
+            <!-- Namespaces are first-class entities (rag_namespaces). Selecting one
+                 drives the Documents / Chunks / Media views below. -->
             <div class="ns-list" *ngIf="!loadingNs()">
-              <button class="as-row" *ngFor="let a of assistants()"
-                      [class.sel]="a.id === selectedAssistantId()" (click)="selectAssistant(a)">
-                <span class="as-thumb">
-                  <img *ngIf="thumbs()[a.id]; else asInitial" [src]="thumbs()[a.id]" alt="" />
-                  <ng-template #asInitial>{{ (a.name || a.id).charAt(0).toUpperCase() }}</ng-template>
-                </span>
+              <button class="as-row" *ngFor="let n of namespaces()"
+                      [class.sel]="n.id === selectedNs()" (click)="selectNs(n.id)">
+                <span class="as-thumb">{{ (n.name || n.id).charAt(0).toUpperCase() }}</span>
                 <span class="as-meta">
-                  <span class="as-name">{{ a.name || a.id }}</span>
-                  <span class="as-role">{{ a.role || a.ragCollection }}</span>
+                  <span class="as-name">{{ n.name || n.id }}</span>
+                  <span class="as-role">{{ (n.documentCount ?? 0) }} doc(s)</span>
                 </span>
                 <span class="ns-tab"></span>
               </button>
 
-              <div class="ns-empty" *ngIf="!assistants().length">
-                No assistants yet - create one in the Assistant Manager.
+              <div class="ns-empty" *ngIf="!namespaces().length">
+                No namespaces yet - create one below.
               </div>
             </div>
 
-            <a class="btn ghost block mgr-link" routerLink="/assistant-manager">Manage assistants</a>
+            <button class="btn ghost block mgr-link" (click)="openNewNs()">+ New namespace</button>
 
             <div class="side-sep"></div>
 
@@ -127,21 +122,47 @@ interface MediaRow {
 
           <!-- ---------- CONTENT ---------- -->
           <main class="content">
+            <!-- Active-namespace toolbar: selector + create + delete. Always visible
+                 (when allowed) so namespaces are managed independently of assistants. -->
+            <div class="ns-bar" *ngIf="!loadingNs()">
+              <label class="ns-bar-lbl">Namespace</label>
+              <select class="ns-select" [ngModel]="selectedNs()" (ngModelChange)="selectNs($event)"
+                      [disabled]="!namespaces().length || busyNs()">
+                <option value="" *ngIf="!namespaces().length">- no namespaces -</option>
+                <option *ngFor="let n of namespaces()" [value]="n.id">{{ n.name || n.id }} ({{ n.documentCount ?? 0 }})</option>
+              </select>
+              <button class="btn ghost sm" (click)="openNewNs()" [disabled]="busyNs()">New namespace</button>
+              <button class="btn danger sm" (click)="deleteNs()"
+                      [disabled]="!canDeleteNs() || busyNs()"
+                      [title]="canDeleteNs() ? 'Delete this empty namespace' : 'Namespace must be emptied (remove its documents) before it can be deleted'">
+                Delete
+              </button>
+            </div>
+
+            <!-- Inline new-namespace form (client validation mirrors the server). -->
+            <div class="ns-new" *ngIf="showNewNs()">
+              <input type="text" [(ngModel)]="newNs" (keyup.enter)="createNs()"
+                     placeholder="lowercase-id (a-z 0-9 - _)" autocomplete="off" />
+              <button class="btn primary sm" (click)="createNs()" [disabled]="busyNs()">Create</button>
+              <button class="btn ghost sm" (click)="cancelNewNs()" [disabled]="busyNs()">Cancel</button>
+              <p class="err" *ngIf="nsError()">{{ nsError() }}</p>
+            </div>
+
             <!-- loading namespaces -->
             <div class="state" *ngIf="loadingNs()"><span class="spin big"></span><p>Loading namespaces...</p></div>
 
-            <!-- no assistant selected (covers fresh/empty DB) -->
+            <!-- no namespace selected (covers fresh/empty DB) -->
             <div class="hero-empty" *ngIf="!loadingNs() && !selectedNs()">
               <div class="he-icon">
                 <svg viewBox="0 0 24 24" width="30" height="30" fill="none" stroke="currentColor" stroke-width="1.6">
-                  <circle cx="12" cy="8" r="4"/><path d="M4 20c0-4 3.6-6 8-6s8 2 8 6"/>
+                  <rect x="3" y="7" width="18" height="13" rx="2"/><path d="M3 7l2-3h6l2 3"/>
                 </svg>
               </div>
-              <h2>{{ assistants().length ? 'Select an assistant' : 'No assistants yet' }}</h2>
-              <p *ngIf="!assistants().length">Create an assistant in the Assistant Manager; each one owns its own RAG namespace for uploading and ingesting PDFs.</p>
-              <p *ngIf="assistants().length">Choose an assistant from the left to manage the documents, chunks and media in its namespace.</p>
-              <div class="he-create" *ngIf="!assistants().length">
-                <a class="btn primary" routerLink="/assistant-manager">Open Assistant Manager</a>
+              <h2>{{ namespaces().length ? 'Select a namespace' : 'No namespaces yet' }}</h2>
+              <p *ngIf="!namespaces().length">Create a namespace to start uploading and ingesting PDFs. A namespace can be shared by multiple assistants.</p>
+              <p *ngIf="namespaces().length">Choose a namespace above (or from the left) to manage its documents, chunks and media.</p>
+              <div class="he-create" *ngIf="!namespaces().length">
+                <button class="btn primary" (click)="openNewNs()">+ New namespace</button>
               </div>
               <p class="err" *ngIf="error()">{{ error() }}</p>
             </div>
@@ -150,9 +171,9 @@ interface MediaRow {
             <ng-container *ngIf="selectedNs() as ns">
               <!-- ====== DOCUMENTS ====== -->
               <section *ngIf="tab() === 'documents'" class="view">
-                <div class="crumb">{{ selectedAssistantName() }} <i>&gt;</i> <b>{{ ns }}</b> <i>&gt;</i> Documents</div>
-                <h1 class="vtitle">{{ selectedAssistantName() }}</h1>
-                <p class="vsub">Uploading and ingesting into namespace <b>{{ ns }}</b> (this assistant's knowledge base).</p>
+                <div class="crumb">Namespaces <i>&gt;</i> <b>{{ ns }}</b> <i>&gt;</i> Documents</div>
+                <h1 class="vtitle">{{ ns }}</h1>
+                <p class="vsub">Uploading and ingesting into namespace <b>{{ ns }}</b> (its knowledge base).</p>
 
                 <!-- Dropzone (PDF only; TXT/DOCX not supported in phase one) -->
                 <label class="dropzone" (dragover)="onDragOver($event)" (drop)="onDrop($event)">
@@ -167,6 +188,18 @@ interface MediaRow {
                   <span class="dz-sub">Drag and drop your file here, or click to browse</span>
                   <span class="dz-hints"><span class="hint">Max size: depends on Storage</span><span class="hint">Format: PDF</span></span>
                 </label>
+
+                <!-- Chunk strategy: Auto detects from the text (verse markers ->
+                     pericopal, headings -> section, else recursive). Applies to new
+                     uploads AND to Re-ingest. -->
+                <div class="strat-row">
+                  <label>Chunking
+                    <select [(ngModel)]="selectedStrategy">
+                      <option *ngFor="let s of chunkStrategies" [value]="s">{{ stratLabel(s) }}</option>
+                    </select>
+                  </label>
+                  <span class="hint">Auto: versiculos -&gt; pericopal, encabezados -&gt; section, si no recursive.</span>
+                </div>
 
                 <div class="up-actions" *ngIf="pendingFile">
                   <button class="btn primary" (click)="uploadPdf()" [disabled]="uploading()">
@@ -199,7 +232,7 @@ interface MediaRow {
 
                   <table class="docs" *ngIf="!loadingDocs() && documents().length">
                     <thead>
-                      <tr><th>File name</th><th>Size</th><th>Created</th><th>Status</th><th>Chunks</th><th class="ar">Actions</th></tr>
+                      <tr><th>File name</th><th>Size</th><th>Created</th><th>Status</th><th>Chunks</th><th>Strategy</th><th class="ar">Actions</th></tr>
                     </thead>
                     <tbody>
                       <ng-container *ngFor="let d of filteredDocs()">
@@ -215,6 +248,11 @@ interface MediaRow {
                           <div class="st-err" *ngIf="d.status === 'error' && d.error" [title]="d.error">{{ d.error }}</div>
                         </td>
                         <td>{{ d.chunks ?? 0 }}</td>
+                        <td>
+                          <span class="strat-tag" *ngIf="d.chunkStrategy">{{ d.chunkStrategy }}</span>
+                          <span *ngIf="!d.chunkStrategy">-</span>
+                          <span class="hint" *ngIf="d.chunkStrategyDetected && d.chunkStrategyDetected !== d.chunkStrategy"> (auto: {{ d.chunkStrategyDetected }})</span>
+                        </td>
                         <td class="act">
                           <button class="btn sm" (click)="ingest(d)" [disabled]="d.status === 'processing'">
                             {{ d.status === 'processing' ? '...' : (d.status === 'done' || d.status === 'error' ? 'Re-ingest' : 'Ingest') }}
@@ -427,6 +465,10 @@ interface MediaRow {
     .dz-hints { display: flex; gap: 8px; margin-top: 6px; }
     .hint { font-size: 11px; color: #8b93a3; background: rgba(255,255,255,.05); border: 1px solid var(--line);
       border-radius: 7px; padding: 4px 9px; font-family: ui-monospace, Menlo, monospace; }
+    .strat-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; margin-top: 12px; }
+    .strat-row label { display: flex; align-items: center; gap: 8px; font-size: 12px; color: #cdd2db; }
+    .strat-row select { background: #15161c; color: #e8e9ee; border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; font-size: 12.5px; }
+    .strat-tag { font-size: 10.5px; padding: 1px 7px; border-radius: 999px; background: rgba(139,92,246,.18); border: 1px solid rgba(139,92,246,.4); color: #cbb8f8; }
     .up-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-top: 12px; }
     .bar { height: 6px; flex-basis: 100%; background: rgba(255,255,255,.08); border-radius: 4px; overflow: hidden; }
     .bar i { display: block; height: 100%; background: var(--accent); transition: width .15s; }
@@ -476,6 +518,19 @@ interface MediaRow {
     .btn.block { width: 100%; text-align: center; }
     .btn.sm { padding: 5px 11px; font-size: 11.5px; }
     .btn.on { background: rgba(139,92,246,.35); color: #fff; }
+    .btn.danger { background: rgba(220,70,70,.16); border-color: rgba(220,70,70,.5); color: #f0a6a6; }
+    .btn.danger:hover:not(:disabled) { background: rgba(220,70,70,.32); color: #fff; }
+    /* active-namespace toolbar */
+    .ns-bar { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; margin-bottom: 12px; }
+    .ns-bar-lbl { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: #6b7384; }
+    .ns-select { background: #15161c; color: #e8e9ee; border: 1px solid var(--line); border-radius: 9px;
+      padding: 7px 10px; font-size: 12.5px; min-width: 220px; max-width: 360px; cursor: pointer; }
+    .ns-select:disabled { opacity: .5; cursor: default; }
+    .ns-new { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 14px;
+      padding: 10px 12px; background: rgba(255,255,255,.03); border: 1px solid var(--line); border-radius: 10px; }
+    .ns-new input { background: #15161c; color: #e8e9ee; border: 1px solid var(--line); border-radius: 8px;
+      padding: 7px 10px; font-size: 12.5px; min-width: 240px; }
+    .ns-new .err { width: 100%; margin: 2px 0 0; }
     /* per-document media panel */
     .mediarow > td { background: rgba(255,255,255,.02); padding: 0 16px 14px; }
     .mediapanel { display: flex; flex-direction: column; gap: 10px; padding-top: 6px; }
@@ -523,18 +578,9 @@ interface MediaRow {
 export class RagAdminComponent implements OnInit {
   admin = inject(AdminService);
   private svc = inject(RagAdminService);
-  private assistantSvc = inject(AssistantConfigService);
   private imgOpt = inject(ImageOptimizationService);
 
-  /** Assistants drive the sidebar; each owns a 1:1 RAG namespace (ragCollection). */
-  readonly assistants = signal<AssistantConfig[]>([]);
-  readonly selectedAssistantId = signal<string>('');
-  readonly thumbs = signal<Record<string, string>>({});
-  readonly selectedAssistantName = computed(() => {
-    const a = this.assistants().find((x) => x.id === this.selectedAssistantId());
-    return a?.name || a?.id || this.selectedNs();
-  });
-
+  /** Namespaces are first-class entities (rag_namespaces), independent of assistants. */
   readonly namespaces = signal<RagNamespace[]>([]);
   readonly selectedNs = signal<string>('');
   readonly documents = signal<RagDocument[]>([]);
@@ -557,7 +603,25 @@ export class RagAdminComponent implements OnInit {
   });
 
   newNs = '';
+  /** Inline "new namespace" form visibility + its server/client error message. */
+  readonly showNewNs = signal(false);
+  readonly nsError = signal('');
   pendingFile: File | null = null;
+
+  /** Chunk strategy chosen at upload / re-ingest (default Auto -> server detects). */
+  selectedStrategy: ChunkStrategy = 'auto';
+  readonly chunkStrategies = CHUNK_STRATEGIES;
+  stratLabel(s: ChunkStrategy): string {
+    switch (s) {
+      case 'auto': return 'Auto (detectar)';
+      case 'fixed': return 'Fixed (tamano fijo)';
+      case 'recursive': return 'Recursive (separadores)';
+      case 'pericopal': return 'Pericopal (versiculos)';
+      case 'section': return 'Section (encabezados)';
+      case 'semantic': return 'Semantic (oraciones)';
+      default: return s;
+    }
+  }
 
   // ---- per-document attached media ----
   readonly openMediaDocId = signal<string>('');
@@ -629,18 +693,25 @@ export class RagAdminComponent implements OnInit {
 
   async ngOnInit(): Promise<void> {
     await this.admin.check();
-    if (this.allowed()) await this.loadAssistants();
+    if (this.allowed()) await this.loadNamespaces();
   }
 
-  /** Load the assistant list for the sidebar and resolve their thumbnails. */
-  async loadAssistants(): Promise<void> {
+  /**
+   * Load the namespace registry from the server callable (includes a live
+   * documentCount per namespace). Keeps the current selection if it still exists,
+   * otherwise selects the first namespace (or clears when none remain).
+   */
+  async loadNamespaces(): Promise<void> {
     this.loadingNs.set(true);
+    this.error.set('');
     try {
-      const list = await this.assistantSvc.listAssistants();
-      this.assistants.set(list);
-      // Resolve avatar thumbnails best-effort (non-blocking for selection).
-      void this.resolveThumbs(list);
-      if (!this.selectedAssistantId() && list.length) this.selectAssistant(list[0]);
+      const list = await this.svc.listNamespaces();
+      this.namespaces.set(list);
+      const cur = this.selectedNs();
+      if (!cur || !list.some((n) => n.id === cur)) {
+        if (list.length) this.selectNs(list[0].id);
+        else { this.selectedNs.set(''); this.documents.set([]); }
+      }
     } catch (e: any) {
       this.error.set(e?.message ?? String(e));
     } finally {
@@ -648,36 +719,63 @@ export class RagAdminComponent implements OnInit {
     }
   }
 
-  private async resolveThumbs(list: AssistantConfig[]): Promise<void> {
-    const map: Record<string, string> = {};
-    await Promise.all(list.map(async (a) => {
-      try {
-        const url = await this.assistantSvc.resolveCardThumbnail(a);
-        if (url) map[a.id] = url;
-      } catch { /* skip */ }
-    }));
-    this.thumbs.set(map);
+  /** The RagNamespace object for the active selection (drives delete gating). */
+  readonly selectedNsObj = computed(() =>
+    this.namespaces().find((n) => n.id === this.selectedNs()) ?? null,
+  );
+
+  /** Delete is allowed only when the selected namespace is registered and EMPTY
+   *  (documentCount === 0). The server re-checks documents/chunks/media anyway. */
+  readonly canDeleteNs = computed(() => {
+    const o = this.selectedNsObj();
+    return !!o && (o.documentCount ?? 0) === 0;
+  });
+
+  /** Client-side mirror of the server rule (instant inline feedback). */
+  private validateNsName(raw: string): string {
+    const v = (raw || '').trim();
+    if (!v) return 'Enter a namespace name.';
+    if (v !== v.toLowerCase()) return 'Use lowercase only.';
+    if (!/^[a-z0-9_-]+$/.test(v)) return "Only lowercase letters, digits, '-' and '_' (no spaces).";
+    if (this.namespaces().some((n) => n.id === v)) return `Namespace "${v}" already exists.`;
+    return '';
   }
 
-  /** Select an assistant -> drive the content area into its owned namespace. */
-  selectAssistant(a: AssistantConfig): void {
-    this.selectedAssistantId.set(a.id);
-    const ns = (a.ragCollection || a.ragNamespace || a.id).trim();
-    this.selectNs(ns);
-  }
+  openNewNs(): void { this.showNewNs.set(true); this.newNs = ''; this.nsError.set(''); }
+  cancelNewNs(): void { this.showNewNs.set(false); this.newNs = ''; this.nsError.set(''); }
 
   async createNs(): Promise<void> {
-    const id = this.newNs.trim();
-    if (!id) return;
+    const id = this.newNs.trim().toLowerCase();
+    const clientErr = this.validateNsName(id);
+    if (clientErr) { this.nsError.set(clientErr); return; }
+    this.busyNs.set(true);
+    this.nsError.set('');
+    try {
+      const ns = await this.svc.createNamespace(id);
+      await this.loadNamespaces();        // refresh list/counts from server
+      this.showNewNs.set(false);
+      this.newNs = '';
+      this.selectNs(ns.id);
+    } catch (e: any) {
+      this.nsError.set(e?.message ?? String(e)); // surface server validation inline
+    } finally {
+      this.busyNs.set(false);
+    }
+  }
+
+  async deleteNs(): Promise<void> {
+    const o = this.selectedNsObj();
+    if (!o || !this.canDeleteNs()) return;
+    const ok = typeof window !== 'undefined'
+      ? window.confirm(`Delete namespace "${o.id}"? This cannot be undone.`)
+      : true;
+    if (!ok) return;
     this.busyNs.set(true);
     this.error.set('');
     try {
-      const ns = await this.svc.createNamespace(id);
-      if (!this.namespaces().some((n) => n.id === ns.id)) {
-        this.namespaces.update((cur) => [...cur, ns].sort((a, b) => a.id.localeCompare(b.id)));
-      }
-      this.newNs = '';
-      this.selectNs(ns.id);
+      await this.svc.deleteNamespace(o.id);
+      this.selectedNs.set('');             // force reselection of the first remaining
+      await this.loadNamespaces();
     } catch (e: any) {
       this.error.set(e?.message ?? String(e));
     } finally {
@@ -828,15 +926,18 @@ export class RagAdminComponent implements OnInit {
     }
   }
 
-  /** Non-blocking ingest: flip local status to processing, then reflect result. */
+  /** Non-blocking ingest: flip local status to processing, then reflect result.
+   *  Uses the currently selected chunk strategy (Auto by default), so Re-ingest can
+   *  pick a different one by changing the dropdown first. */
   async ingest(d: RagDocument): Promise<void> {
     this.patchDoc(d.id, { status: 'processing', error: undefined });
     this.error.set('');
     try {
-      const res = await this.svc.ingest(d);
+      const res = await this.svc.ingest(d, undefined, this.selectedStrategy);
       this.patchDoc(d.id, {
         status: res.status === 'done' ? 'done' : 'error',
         chunks: res.chunks,
+        chunkStrategy: res.strategy ?? this.selectedStrategy,
         error: res.status === 'error' ? res.message : undefined,
       });
     } catch (e: any) {

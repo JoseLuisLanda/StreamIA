@@ -17,6 +17,11 @@ export const routes: Routes = [
     },
     { path: 'home', component: HomeComponent },
     { path: 'login', component: LoginComponent },
+    {
+        path: 'profile',
+        canActivate: [authGuard],
+        loadComponent: () => import('./pages/profile/profile.component').then(m => m.ProfileComponent)
+    },
     { path: 'live', component: LiveComponent, canActivate: [authGuard] },
     { path: 'ar', component: ArPageComponent, canActivate: [authGuard] },
     { path: 'ar-viewer', component: ArViewer, canActivate: [authGuard] },
@@ -64,6 +69,16 @@ export const routes: Routes = [
         path: 'llm-responses',
         canActivate: [adminGuard],
         loadComponent: () => import('./pages/llm-responses/llm-responses.component').then(m => m.LlmResponsesComponent)
+    },
+    {
+        path: 'costos',
+        canActivate: [adminGuard],
+        loadComponent: () => import('./pages/costos/costos.component').then(m => m.CostosComponent)
+    },
+    {
+        path: 'cuotas',
+        canActivate: [adminGuard],
+        loadComponent: () => import('./pages/cuotas/cuotas.component').then(m => m.CuotasComponent)
     },
     { path: '**', redirectTo: '' }
 ];

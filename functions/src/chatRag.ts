@@ -21,6 +21,8 @@ import { generateFromProfile } from './lib/llm';
 import { resolveProfileForAssistant, resolveStageProfile, loadRagStageModels } from './lib/llm-profiles';
 import { annotateGestures, stripGestureTags } from './lib/gestures';
 import { GESTURES_BODY_ENABLED } from './lib/flags';
+import { recordUsage } from './lib/usage';
+import { consumeOneQuota, ConsumeResult, QUOTA_COUNTS_DETAIL_SEPARATELY } from './lib/quota';
 
 const MAX_K = 8;
 const DEFAULT_K = 6;
@@ -46,8 +48,10 @@ interface ChatRagBody {
    *                      stage 1 (passed back as chunkIds) -> no embed, no findNearest.
    *  - 'suggestions'   = 3 follow-up prompts, reusing the SAME chunks (chunkIds) ->
    *                      no embed, no findNearest. Separate async call after the summary.
+   *  - 'textual_quote' = serve the LITERAL passage by reference (verbatim verses in
+   *                      order, NOT rewritten by the LLM). For scripture-style content.
    */
-  mode?: 'rag' | 'capabilities' | 'detail' | 'suggestions';
+  mode?: 'rag' | 'capabilities' | 'detail' | 'suggestions' | 'textual_quote';
   /** STAGE 2: the chunk doc ids from stage 1's `sources` (keeps detail consistent). */
   chunkIds?: string[];
 }
@@ -101,6 +105,7 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   const mode = body.mode === 'capabilities' ? 'capabilities'
     : body.mode === 'detail' ? 'detail'
     : body.mode === 'suggestions' ? 'suggestions'
+    : body.mode === 'textual_quote' ? 'textual_quote'
     : 'rag';
   const assistantId = (body.assistantId ?? '').trim();
   try {
@@ -152,6 +157,11 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   // chunks as stage 1 (passed as chunkIds) so it stays consistent. No embed, no
   // findNearest when ids are provided; one LLM call (detail-only). ===
   if (mode === 'detail') {
+    // Detail is part of the same interaction -> no quota by default (flag-gated).
+    if (QUOTA_COUNTS_DETAIL_SEPARATELY) {
+      const qr = await consumeOneQuota(req.user.uid);
+      if (!qr.ok) { res.status(429).json({ error: 'quota_exhausted', remaining: 0 }); return; }
+    }
     await answerDetail(res, {
       assistantId, llmProfileId, persona, language, query, namespace,
       chunkIds: body.chunkIds ?? [], k, stage,
@@ -166,12 +176,44 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   // speed is untouched. Never hard-fails: returns { suggestions: [] } on any error so
   // the client falls back to its static chips. ===
   if (mode === 'suggestions') {
+    // Suggestions are part of the same interaction -> no quota by default (flag-gated).
+    if (QUOTA_COUNTS_DETAIL_SEPARATELY) {
+      const qr = await consumeOneQuota(req.user.uid);
+      if (!qr.ok) { res.status(429).json({ error: 'quota_exhausted', remaining: 0 }); return; }
+    }
     await answerSuggestions(res, {
       assistantId, llmProfileId, persona, language, query, namespace,
       chunkIds: body.chunkIds ?? [], k, stage,
       overrideProfileId: asstSummaryProfileId, globalProfileId: stageModels.summaryProfileId,
     });
     return;
+  }
+
+  // === QUOTA GATE (rag interaction = 1 unit). Atomic check-and-decrement BEFORE
+  // any retrieval or LLM call, so an exhausted account never triggers paid work.
+  // Concurrent requests can't double-spend (Firestore transaction). ===
+  let quota: ConsumeResult;
+  try {
+    quota = await consumeOneQuota(req.user.uid);
+  } catch (e) {
+    logger.error('chatRag quota check failed', { uid: req.user.uid, error: String(e) });
+    res.status(500).json({ error: 'quota check failed' });
+    return;
+  }
+  if (!quota.ok) {
+    res.status(429).json({ error: 'quota_exhausted', remaining: 0 });
+    return;
+  }
+
+  // === TEXTUAL-QUOTE MODE: serve the LITERAL passage by reference (verbatim verses
+  // in order, NOT rewritten by the LLM). Falls back to normal rag if no verse
+  // markers / reference can be resolved. Consumes 1 quota unit (gated above). ===
+  if (mode === 'textual_quote') {
+    const served = await answerTextualQuote(res, {
+      assistantId, namespace, query, language, k, quota, stage,
+    });
+    if (served) return;
+    // not a resolvable scripture reference -> fall through to normal rag below.
   }
 
   // --- Retrieval: per-namespace findNearest (no collectionGroup, no extra index) ---
@@ -234,6 +276,8 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   let summary = '';
   let detailText = '';
   let chosenMediaIds: string[] = [];
+  // Captured for lightweight usage tracking (estimated tokens; recorded AFTER res.json).
+  let usageSummary: { model: string; provider: string; prompt: string; output: string } | null = null;
   try {
     const tProfile = Date.now();
     // STAGE-1 profile: assistant summary override -> global summary default -> legacy.
@@ -252,7 +296,7 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
     let genContext = context;
     let genPersona = `${persona ? persona + '\n\n' : ''}${SUMMARY_ONLY_DIRECTIVE}`;
     if (candidates.length) {
-      const catalog = candidates.map((m) => `- ${m.id}: ${m.title}${m.description ? ' — ' + m.description : ''}`).join('\n');
+      const catalog = candidates.map((m) => `- ${m.id}: ${m.title}${m.description ? ' - ' + m.description : ''}`).join('\n');
       genContext = `${context}\n\n[MEDIA DISPONIBLE]\n${catalog}`;
       genPersona = `${genPersona}\n\n${MEDIA_DIRECTIVE}`;
     }
@@ -269,6 +313,10 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
     const split = extractSummaryDetail(afterMedia.text);
     summary = split.summary;
     detailText = split.detail;
+    usageSummary = {
+      model: profile.model, provider: profile.provider,
+      prompt: `${genPersona}\n${genContext}\n${query}`, output: result.text,
+    };
     stage('7 response parse (media-tag + summary/detail split; regex only, NO 2nd LLM call)', tParse);
   } catch (e: any) {
     const meta = e?.meta ?? {};
@@ -322,7 +370,19 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   logger.info('chatRag: media surfaced', { namespace, candidates: candidates.length, chosen: media.length });
 
   // body = summary (back-compat with existing consumers). detail is on-demand only.
-  res.json({ summary, detail: detailText, body: summary, gestureCommands, media, sources });
+  // quota: post-decrement balance + any warn threshold this interaction crossed.
+  res.json({
+    summary, detail: detailText, body: summary, gestureCommands, media, sources,
+    quota: { remaining: quota.remaining, allocated: quota.allocated, used: quota.used, warnThresholds: quota.warnThresholds, warnCrossed: quota.warnCrossed },
+  });
+  // Usage tracking (estimated, AFTER the response so it never adds latency).
+  if (usageSummary) {
+    void recordUsage(assistantId, {
+      stage: 'summary', model: usageSummary.model, provider: usageSummary.provider,
+      promptText: usageSummary.prompt, outputText: usageSummary.output,
+      countQuery: true, embedQuery: query, vectorReads: matched.length,
+    });
+  }
   stage('8 gesture annotation + response assembly', tAssembly);
   // ONE LLM call total per request (the main generation). Media selection is in-band.
   console.log(`[chatRag.timing] TOTAL: ${ms(tStart)} ms (llmCalls=1, retrievedChunks=${matched.length}, mediaCandidates=${candidates.length})`);
@@ -354,6 +414,7 @@ async function answerCapabilities(
   const metaContext = buildCapabilitiesContext(meta, namespace);
   let summary = '';
   let detailText = '';
+  let usageCap: { model: string; provider: string; prompt: string; output: string } | null = null;
   try {
     const { profile, source } = await resolveProfileForAssistant(assistantId, llmProfileId);
     logger.info('chatRag capabilities: profile resolved', {
@@ -370,6 +431,10 @@ async function answerCapabilities(
     const split = extractSummaryDetail(result.text);
     summary = split.summary;
     detailText = split.detail;
+    usageCap = {
+      model: profile.model, provider: profile.provider,
+      prompt: `${genPersona}\n${metaContext}\n${query}`, output: result.text,
+    };
   } catch (e: any) {
     const m = e?.meta ?? {};
     const detail = e?.message ?? String(e);
@@ -395,6 +460,12 @@ async function answerCapabilities(
   }
   // No retrieval -> no media, no sources.
   res.json({ summary, detail: detailText, body: summary, gestureCommands, media: [], sources: [] });
+  if (usageCap) {
+    void recordUsage(assistantId, {
+      stage: 'capabilities', model: usageCap.model, provider: usageCap.provider,
+      promptText: usageCap.prompt, outputText: usageCap.output, countQuery: true,
+    });
+  }
 }
 
 /**
@@ -450,6 +521,7 @@ async function answerDetail(
   //    assistant detail override -> global detail default -> legacy assistant profile.
   //    Goes through the standard profile -> createProvider -> generateAnswer path.
   let detailText = '';
+  let usageDetail: { model: string; provider: string; prompt: string; output: string } | null = null;
   try {
     const genPersona = `${persona ? persona + '\n\n' : ''}${DETAIL_ONLY_DIRECTIVE}`;
     const tProfile = Date.now();
@@ -470,6 +542,10 @@ async function answerDetail(
     // Detail is TEXT-ONLY (never spoken) -> always strip any gesture tags, regardless
     // of the body flag, so the "Ver mas" text never shows markup.
     detailText = stripGestureTags(detailText);
+    usageDetail = {
+      model: profile.model, provider: profile.provider,
+      prompt: `${genPersona}\n${context}\n${query}`, output: result.text ?? '',
+    };
   } catch (e: any) {
     const m = e?.meta ?? {};
     const detail = e?.message ?? String(e);
@@ -482,6 +558,12 @@ async function answerDetail(
 
   // Detail is text-only and NOT spoken: no gesture tags, no media, no sources.
   res.json({ summary: '', detail: detailText, body: '', gestureCommands: '', media: [], sources: [] });
+  if (usageDetail) {
+    void recordUsage(assistantId, {
+      stage: 'detail', model: usageDetail.model, provider: usageDetail.provider,
+      promptText: usageDetail.prompt, outputText: usageDetail.output,
+    });
+  }
 }
 
 /**
@@ -517,6 +599,7 @@ async function answerSuggestions(
   if (!context.trim()) { res.json({ suggestions: [] }); return; }
 
   let suggestions: string[] = [];
+  let usageSug: { model: string; provider: string; prompt: string; output: string } | null = null;
   try {
     const genPersona = `${persona ? persona + '\n\n' : ''}${SUGGESTIONS_DIRECTIVE}`;
     const tProfile = Date.now();
@@ -533,6 +616,10 @@ async function answerSuggestions(
     const result = await generateFromProfile(sugProfile, query, context, language, genPersona);
     stage(`S3 suggestions LLM generation (${profile.provider}/${profile.model}, ONE call)`, tGen);
     suggestions = parseSuggestions(result.text);
+    usageSug = {
+      model: profile.model, provider: profile.provider,
+      prompt: `${genPersona}\n${context}\n${query}`, output: result.text ?? '',
+    };
   } catch (e: any) {
     const m = e?.meta ?? {};
     logger.warn('chatRag suggestions generation failed (returning empty -> client falls back)', {
@@ -541,6 +628,163 @@ async function answerSuggestions(
     suggestions = [];
   }
   res.json({ suggestions });
+  if (usageSug) {
+    void recordUsage(assistantId, {
+      stage: 'suggestions', model: usageSug.model, provider: usageSug.provider,
+      promptText: usageSug.prompt, outputText: usageSug.output,
+    });
+  }
+}
+
+// ============================ TEXTUAL-QUOTE PATH ============================
+// Serve the LITERAL passage by reference -- verbatim verses in order, NOT rewritten
+// by the LLM. Reference-aware retrieval: findNearest lands in the passage region,
+// then we expand by chunk DOC ID (`${docId}_${index}`) across the chapter so a
+// multi-chunk passage comes back complete and ordered. No semantic-only ranking.
+
+interface ParsedRef { chapter: number | null; vStart: number | null; vEnd: number | null; }
+
+/** Parse "Juan 3:16", "Salmo 23", "Genesis 1", "3:16-18" -> chapter (+ verse range). */
+function parseScriptureRef(query: string): ParsedRef {
+  const q = query || '';
+  const cv = q.match(/(\d+)\s*:\s*(\d+)(?:\s*-\s*(\d+))?/);
+  if (cv) {
+    const vStart = parseInt(cv[2], 10);
+    return { chapter: parseInt(cv[1], 10), vStart, vEnd: cv[3] ? parseInt(cv[3], 10) : vStart };
+  }
+  const ch = q.match(/(?:salmo|salmos|capitulo|cap\.?|proverbio|proverbios|psalm|psalms|chapter)\s+(\d+)/i)
+    || q.match(/\b(\d+)\b/);
+  if (ch) return { chapter: parseInt(ch[1], 10), vStart: null, vEnd: null };
+  return { chapter: null, vStart: null, vEnd: null };
+}
+
+interface VerseUnit { book: string; chapter: number; verse: number; text: string; }
+
+/** Split a chunk's text into verses on [BOOK c:v] markers, keeping text VERBATIM. */
+function parseVerses(text: string): VerseUnit[] {
+  const s = text || '';
+  const re = /\[([A-Z]{2,4}) (\d+):(\d+)\]/g;
+  const marks: { idx: number; book: string; chapter: number; verse: number }[] = [];
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(s)) !== null) {
+    marks.push({ idx: m.index, book: m[1], chapter: parseInt(m[2], 10), verse: parseInt(m[3], 10) });
+  }
+  const out: VerseUnit[] = [];
+  for (let i = 0; i < marks.length; i++) {
+    const end = i + 1 < marks.length ? marks[i + 1].idx : s.length;
+    out.push({ book: marks[i].book, chapter: marks[i].chapter, verse: marks[i].verse, text: s.slice(marks[i].idx, end).trim() });
+  }
+  return out;
+}
+
+/**
+ * Serve a literal passage. Returns true when it answered; false to fall back to the
+ * normal rag path (no resolvable reference / verse markers). Consumes no LLM call --
+ * the verbatim text is served from the retrieved chunks AS-IS, so the output budget
+ * is naturally the passage length (no summary cap). A brief interpretation is left
+ * to the on-demand detail stage (detailAvailable + sources), keeping the literal
+ * text first and complete.
+ */
+async function answerTextualQuote(
+  res: Response,
+  args: {
+    assistantId: string; namespace: string; query: string; language: string;
+    k: number; quota: ConsumeResult; stage: (label: string, from: number) => void;
+  },
+): Promise<boolean> {
+  const { namespace, query, k, quota, stage } = args;
+  const chunksCol = db.collection('rag').doc(namespace).collection('chunks');
+  const ref = parseScriptureRef(query);
+  if (ref.chapter == null) return false;
+
+  // 1) Locate the passage region (semantic landing only).
+  let matched: FirebaseFirestore.QueryDocumentSnapshot[];
+  try {
+    const tEmbed = Date.now();
+    const qv = await embedText([query], 'RETRIEVAL_QUERY');
+    const vq = chunksCol.findNearest({
+      vectorField: 'embedding', queryVector: FieldValue.vector(qv[0]),
+      limit: Math.max(k, 12), distanceMeasure: 'COSINE',
+    });
+    matched = (await vq.get()).docs;
+    stage('Q1 textual-quote locate (findNearest)', tEmbed);
+  } catch (e) {
+    logger.error('chatRag textual_quote retrieval failed', { namespace, error: String(e) });
+    return false;
+  }
+  if (!matched.length) return false;
+
+  // 2) Pick the book whose markers contain the requested chapter (most frequent
+  //    among matched), and a seed chunk (docId + chunkIndex) to expand from.
+  const tally = new Map<string, { count: number; docId: string; chunkIndex: number }>();
+  for (const d of matched) {
+    const docId = (d.get('docId') ?? '').toString();
+    const chunkIndex = Number(d.get('chunkIndex') ?? -1);
+    for (const v of parseVerses((d.get('text') ?? '').toString())) {
+      if (v.chapter !== ref.chapter) continue;
+      const cur = tally.get(v.book);
+      if (!cur) tally.set(v.book, { count: 1, docId, chunkIndex });
+      else cur.count++;
+    }
+  }
+  if (!tally.size) return false;
+  let book = ''; let best = -1; const seed = { docId: '', chunkIndex: 0 };
+  for (const [b, info] of tally) {
+    if (info.count > best) { best = info.count; book = b; seed.docId = info.docId; seed.chunkIndex = info.chunkIndex; }
+  }
+  if (!book || !seed.docId || seed.chunkIndex < 0) return false;
+
+  // 3) Expand by chunk DOC ID outward from the seed until the chapter ends, so a
+  //    multi-chunk chapter/psalm comes back complete. Bounded by-id reads (cheap,
+  //    no index). Also fold in any matched chunks of the same book+chapter.
+  const tExp = Date.now();
+  const MAX_WALK = 80;
+  const collected = new Map<string, string>();
+  const inChapter = (text: string): boolean => parseVerses(text).some((v) => v.book === book && v.chapter === ref.chapter);
+  const tryAdd = async (idx: number): Promise<boolean> => {
+    if (idx < 0) return false;
+    const id = `${seed.docId}_${idx}`;
+    if (collected.has(id)) return true;
+    const snap = await chunksCol.doc(id).get();
+    if (!snap.exists) return false;
+    const text = (snap.get('text') ?? '').toString();
+    if (!inChapter(text)) return false;
+    collected.set(id, text);
+    return true;
+  };
+  await tryAdd(seed.chunkIndex);
+  for (let step = 1; step <= MAX_WALK; step++) { if (!(await tryAdd(seed.chunkIndex - step))) break; }
+  for (let step = 1; step <= MAX_WALK; step++) { if (!(await tryAdd(seed.chunkIndex + step))) break; }
+  for (const d of matched) {
+    const text = (d.get('text') ?? '').toString();
+    if (inChapter(text)) collected.set(d.id, text);
+  }
+  stage('Q2 textual-quote expand (by-id chunk walk)', tExp);
+
+  // 4) Reconstruct verses in range, ordered, deduped by verse number.
+  const byVerse = new Map<number, VerseUnit>();
+  for (const text of collected.values()) {
+    for (const v of parseVerses(text)) {
+      if (v.book !== book || v.chapter !== ref.chapter) continue;
+      if (ref.vStart != null && (v.verse < ref.vStart || v.verse > (ref.vEnd ?? ref.vStart))) continue;
+      if (!byVerse.has(v.verse)) byVerse.set(v.verse, v);
+    }
+  }
+  const verses = Array.from(byVerse.values()).sort((a, b) => a.verse - b.verse);
+  if (!verses.length) return false;
+
+  const passage = verses.map((v) => v.text).join('\n');
+  const sourceIds = Array.from(collected.keys());
+
+  // 5) Serve verbatim. sources = chunk ids so the on-demand detail (Ver mas) can
+  //    add a brief reflexion reusing the SAME chunks (literal text stays first).
+  res.json({
+    summary: passage, detail: '', body: passage, gestureCommands: passage,
+    media: [], sources: sourceIds.map((id) => ({ id, metadata: {} })),
+    quota: { remaining: quota.remaining, allocated: quota.allocated, used: quota.used, warnThresholds: quota.warnThresholds, warnCrossed: quota.warnCrossed },
+  });
+  logger.info('chatRag textual_quote served', { namespace, book, chapter: ref.chapter, verses: verses.length, chunks: sourceIds.length });
+  return true;
 }
 
 /** Parse the LLM output into up to 3 trimmed suggestion strings (strict-JSON tolerant). */

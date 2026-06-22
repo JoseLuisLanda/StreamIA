@@ -53,7 +53,7 @@ const DEFAULT_SETTINGS: LlmSettings = {
         openai: { baseUrl: 'https://api.openai.com', model: 'gpt-4o-mini', apiKey: '' },
         gemini: { baseUrl: 'https://generativelanguage.googleapis.com', model: 'gemini-2.0-flash', apiKey: '' },
         anthropic: { baseUrl: 'https://api.anthropic.com', model: 'claude-haiku-4-5', apiKey: '' },
-        deepseek: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-chat', apiKey: '' },
+        deepseek: { baseUrl: 'https://api.deepseek.com', model: 'deepseek-v4-flash', apiKey: '' },
     },
     maxTurns: 8,
     maxReplyTokens: 160,

@@ -8,7 +8,7 @@ import { GESTURE_MAP } from '../lib/gestures/gesture-library';
 import { PlanCache } from '../lib/performance/plan-cache';
 import { speechStartLine } from '../lib/performance/timing';
 import { MediaItem, RagResponse } from '../lib/rag/rag.models';
-import { classifyIntentLocal, Intent } from '../lib/intent/intent-router';
+import { classifyIntentLocal, classifyQueryMode, Intent } from '../lib/intent/intent-router';
 import { GESTURES_LEADIN_ENABLED, GESTURES_TAIL_ENABLED, GESTURES_THINKING_ENABLED } from '../lib/config/feature-flags';
 
 /**
@@ -141,7 +141,7 @@ export class ConversationService {
      *  the Cloud Function via this fetcher instead of the client LLM. null = LLM.
      *  The optional `mode` selects the Function answer mode: undefined/'rag' =
      *  normal retrieval; 'capabilities' = fast metadata-only answer (no RAG). */
-    public ragFetcher: ((q: string, mode?: 'rag' | 'capabilities') => Promise<RagResponse>) | null = null;
+    public ragFetcher: ((q: string, mode?: 'rag' | 'capabilities' | 'textual_quote') => Promise<RagResponse>) | null = null;
 
     // ---- Intent router (greeting/farewell vs RAG query). Active only in RAG mode. ----
     /** Cached greeting phrases (random non-repeating pick). Falls back to greetingResponse. */
@@ -220,6 +220,16 @@ export class ConversationService {
     }
 
     /**
+     * Pause / resume the CURRENT speech in place (used by the detail "Ver mas"
+     * playback). Unlike interrupt(), this does NOT bump the generation token or
+     * stop the pipeline -- it suspends/resumes the audio clock, so audio, avatar
+     * visemes and the karaoke highlight freeze and continue together. No-op when
+     * nothing is speaking / not paused.
+     */
+    pauseSpeech(): void { this.tts.pauseSpeech(); }
+    resumeSpeech(): void { this.tts.resumeSpeech(); }
+
+    /**
      * Typed conversation input: EXACTLY the same turn as a final voice
      * transcript (same state transitions, history, sanitizer, compiler).
      * Sending while the avatar speaks interrupts playback, like the mic.
@@ -288,7 +298,14 @@ export class ConversationService {
             }
             return;
         }
-        // Info query -> optional infoAck filler spoken first, then the real RAG answer.
+        // Info query -> sub-classify: a LITERAL-scripture request ('textual_quote')
+        // serves the verbatim passage by reference; everything else is interpretive
+        // (the normal two-stage summary + on-demand detail).
+        const qmode = classifyQueryMode(text);
+        if (qmode === 'textual_quote') {
+            await this.runRagTurn(text, (q) => fetcher(q, 'textual_quote'), opts);
+            return;
+        }
         await this.runRagTurn(text, fetcher, opts);
     }
 

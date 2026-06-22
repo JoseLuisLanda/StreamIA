@@ -56,7 +56,11 @@ const CHIP_LABELS: Record<string, string> = {
           <button class="backbtn" (click)="goBack()" title="Volver a asistentes" aria-label="Volver a asistentes">←</button>
           <div class="brandtext">
             <span class="name">{{ assistantName() }}</span>
-            <span class="status-line"><i class="dot-online"></i> {{ activeAvatarName() }}</span>
+            <span class="status-line"><i class="dot-online"></i> {{ activeAvatarName() }}
+              <span class="quota-chip" *ngIf="rag.lastQuota() as q"
+                    [class.low]="q.remaining > 0 && q.remaining <= 50" [class.zero]="q.remaining <= 0"
+                    title="Consultas restantes en tu cuenta (aprox)">{{ q.remaining }} consultas</span>
+            </span>
           </div>
         </div>
         <div class="topctl">
@@ -156,6 +160,8 @@ const CHIP_LABELS: Record<string, string> = {
 
       <!-- floating toasts (top-center) -->
       <div class="toastwrap">
+        <div class="toast err" *ngIf="rag.quotaBlocked()">Has agotado tus consultas; contacta para recargar.</div>
+        <div class="toast warn" *ngIf="quotaWarn()">{{ quotaWarn() }}</div>
         <div class="toast warn" *ngIf="tts.gestureWarnings().length">
           <div *ngFor="let w of tts.gestureWarnings()">⚠️ {{ w }}</div>
         </div>
@@ -400,7 +406,16 @@ const CHIP_LABELS: Record<string, string> = {
             <span class="do-kicker">Análisis detallado</span>
             <h1>{{ detailTitle() }}</h1>
           </div>
-          <button class="do-x" (click)="closeDetail()" title="Cerrar">✕</button>
+          <div class="do-actions">
+            <!-- Play / Pause: speaks the detail with avatar lipsync + karaoke. -->
+            <button class="do-play" *ngIf="!detailLoading() && detailText()"
+                    (click)="toggleDetailSpeech()" [title]="detailPlayLabel()">
+              <svg *ngIf="detailPlaying()" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+              <svg *ngIf="!detailPlaying()" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+              <span>{{ detailPlayLabel() }}</span>
+            </button>
+            <button class="do-x" (click)="closeDetail()" title="Cerrar">✕</button>
+          </div>
         </header>
         <div class="do-scroll">
           <!-- STAGE 2 loading: detail is generated on demand when "Ver mas" is clicked. -->
@@ -408,10 +423,9 @@ const CHIP_LABELS: Record<string, string> = {
             <span class="do-spin"></span> Generando el detalle...
           </div>
           <p class="do-err" *ngIf="detailError() && !detailLoading()">No se pudo generar el detalle: {{ detailError() }}</p>
-          <!-- TEXT ONLY: media is handled separately via the chat carousel -->
-          <article class="do-text" *ngIf="!detailLoading()">
-            <p *ngFor="let p of detailParas()">{{ p }}</p>
-          </article>
+          <!-- TEXT ONLY + karaoke: the spoken prefix is highlighted; the text is
+               already fully visible (pre-wrap preserves the paragraph breaks). -->
+          <article class="do-text" *ngIf="!detailLoading()"><span class="do-hi">{{ detailHi() }}</span>{{ detailRest() }}</article>
         </div>
       </div>
 
@@ -432,6 +446,11 @@ const CHIP_LABELS: Record<string, string> = {
             </svg>
           </button>
         </div>
+
+        <!-- Quota: account-wide balance + a link to the full usage detail. -->
+        <button class="btn ghost block" *ngIf="auth.user()" (click)="goProfile()">
+          Mi cuenta y consultas<span *ngIf="rag.lastQuota() as q"> ({{ q.remaining }} restantes)</span>
+        </button>
 
         <!-- ONLY setting: load another avatar, listed from the avatars/{id} DB collection.
              Selecting a card loads its GLB AND closes the panel (pickAvatar). -->
@@ -492,17 +511,11 @@ const CHIP_LABELS: Record<string, string> = {
       background: #0E0F13; color: #E8E9EE;
       font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
       --accent: #8B5CF6; --accent-soft: rgba(139, 92, 246, .18);
-      /* Detail-overlay PiP avatar box = base x scale. The box is taller than the visible
-         area on purpose: it is sunk below the bottom edge (--detail-pip-sink) so only the
-         chest-up shows, and wide enough that the shoulders are NOT sliced by the side edges.
-         Knobs: --detail-pip-scale (overall size), base-w (shoulder room), base-h (how much
-         body), --detail-pip-sink (how far it sinks below the bottom). */
       --detail-pip-scale: 0.5;
-      --detail-pip-base-w: 200px;   /* x0.5 -> 100px wide: room for full shoulders */
-      --detail-pip-base-h: 280px;   /* x0.5 -> 140px tall: head..torso, lower half sunk */
-      --detail-pip-sink: 48%;       /* portion of the box hidden below the bottom edge (clips the waist; head has headroom so it never clips at the top) */
+      --detail-pip-base-w: 200px;
+      --detail-pip-base-h: 280px;
+      --detail-pip-sink: 48%;
     }
-    /* Floating top bar: faint gradient scrim for legibility, no solid bar. */
     .topbar.floating {
       position: absolute; top: 0; left: 0; right: 0; z-index: 20;
       display: flex; align-items: flex-start; justify-content: space-between;
@@ -517,6 +530,10 @@ const CHIP_LABELS: Record<string, string> = {
       font-family: 'JetBrains Mono', ui-monospace, monospace; text-shadow: 0 1px 4px rgba(0,0,0,.7);
       display: flex; align-items: center; gap: 6px; margin-top: 2px; }
     .dot-online { width: 7px; height: 7px; border-radius: 50%; background: #34d399; box-shadow: 0 0 7px #34d399; }
+    .quota-chip { margin-left: 8px; font-size: 10.5px; padding: 1px 7px; border-radius: 999px;
+      background: rgba(255,255,255,.08); color: #cdd2db; border: 1px solid rgba(255,255,255,.12); }
+    .quota-chip.low { background: rgba(224,179,65,.2); color: #e8c466; border-color: rgba(224,179,65,.4); }
+    .quota-chip.zero { background: rgba(220,70,70,.22); color: #f0a6a6; border-color: rgba(220,70,70,.5); }
     .backbtn {
       width: 34px; height: 34px; border-radius: 50%; border: 1px solid rgba(255,255,255,.14);
       background: rgba(20,18,30,.45); backdrop-filter: blur(8px); color: #E8E9EE; cursor: pointer;
@@ -546,12 +563,9 @@ const CHIP_LABELS: Record<string, string> = {
     .iconbtn:hover:not(:disabled) { background: rgba(40,36,60,.65); }
     .iconbtn:disabled { opacity: .35; cursor: default; }
     .iconbtn.active { background: rgba(139,92,246,.35); border-color: rgba(139,92,246,.6); color: #fff; }
-    /* Unread chat indicator: accent (violet) icon until the chat popup is opened. */
     .iconbtn.unread { color: #c4b0f7; border-color: rgba(139,92,246,.6); box-shadow: 0 0 10px rgba(139,92,246,.35); }
-    /* New-media indicator: amber-green icon until the media popup is opened. */
     .iconbtn.hasnew { color: #b6e84a; border-color: rgba(182,232,74,.6); box-shadow: 0 0 10px rgba(182,232,74,.35); }
     .iconbtn svg { display: block; }
-    /* WhatsApp-style unread count bubble, top-right of the icon. */
     .iconbtn .badge {
       position: absolute; top: -3px; right: -3px;
       min-width: 16px; height: 16px; padding: 0 4px; border-radius: 999px;
@@ -567,52 +581,28 @@ const CHIP_LABELS: Record<string, string> = {
     }
     .iconbtn-sm:hover:not(:disabled) { background: rgba(255,255,255,.14); }
     .iconbtn-sm:disabled { opacity: .35; cursor: default; }
-
-    /* BASE LAYER: avatar fills the entire screen, edge-to-edge. */
     .viewport {
       position: absolute; inset: 0; z-index: 1; overflow: hidden;
       background: radial-gradient(ellipse at 50% 30%, #1a1530 0%, #0a0a0f 70%);
     }
     .viewport app-avatar-tts { position: absolute; inset: 0; }
     .viewport ::ng-deep .canvas-container { background-color: transparent !important; }
-    /* Picture-in-picture (detail "Ver mas" overlay): pinned bottom-right corner.
-       Card-less + TRANSPARENT -- only the avatar silhouette floats over the detail
-       text. The canvas is already alpha (renderer alpha:true, scene.background unset,
-       .canvas-container forced transparent above); here we strip the .viewport CSS
-       chrome (gradient fill, rounded card, shadow) and the glow. This is scoped to the
-       .pip class only, so the MAIN full-screen .viewport keeps its dark/violet gradient.
-       The avatar-tts ResizeObserver resizes the existing canvas -- no GLB reload. */
     .viewport.pip {
       position: fixed; right: 8px; bottom: 0; left: auto; top: auto;
       width: calc(var(--detail-pip-base-w) * var(--detail-pip-scale));
       height: calc(var(--detail-pip-base-h) * var(--detail-pip-scale));
-      /* Sink the lower part below the viewport bottom edge: only chest-up shows, as if
-         the avatar is emerging from the bottom. The browser clips what is off-screen
-         (bottom only); the sides stay on-screen so the shoulders are NOT sliced. */
       transform: translateY(var(--detail-pip-sink));
       flex: none; z-index: 70;
-      background: transparent; /* override the base .viewport gradient -> no card box */
-      border-radius: 0; box-shadow: none;
-      overflow: visible;       /* the box never clips the avatar horizontally */
-      transition: width .25s ease, height .25s ease;
+      background: transparent; border-radius: 0; box-shadow: none;
+      overflow: visible; transition: width .25s ease, height .25s ease;
     }
-    /* Responsive detail PiP size: portrait keeps the small 0.5 scale (100x140); landscape/
-       desktop (>=1024px, same app breakpoint) triples it to 1.5 (300x420) since there is
-       room. Only the var changes -> the box (and the canvas via ResizeObserver) resizes;
-       camera framing (FRAMING_COMPACT, chest-up) and the canvas itself are untouched. The
-       width/height CSS transition keeps the resize smooth; it also re-evaluates on
-       orientation/size change. */
     @media (min-width: 1024px) { .app { --detail-pip-scale: 1.5; } }
-    /* No background glow halo behind the floating PiP avatar. */
     .viewport.pip .glow { display: none; }
-    /* The prompt carousel is hidden while the avatar is a small PiP (no room, and it
-       must not clutter the detail overlay). */
     .viewport.pip .prompt-carousel { display: none; }
     .viewport.pip .subtitle { display: none; }
     .pip-x { position: absolute; top: 6px; right: 6px; z-index: 2; width: 26px; height: 26px;
       border-radius: 8px; border: 1px solid rgba(255,255,255,.2); background: rgba(0,0,0,.45);
       color: #fff; cursor: pointer; font-size: 13px; }
-    /* full-screen detail overlay */
     .detail-overlay { position: fixed; inset: 0; z-index: 60; display: flex; flex-direction: column;
       background: radial-gradient(ellipse at 50% 0%, #15122a 0%, #0a0e14 70%); color: #e6e8ee;
       font-family: 'Segoe UI', system-ui, sans-serif; }
@@ -620,10 +610,20 @@ const CHIP_LABELS: Record<string, string> = {
       gap: 16px; padding: 22px 28px; border-bottom: 1px solid rgba(255,255,255,.08); }
     .do-kicker { font-size: 11px; letter-spacing: 1.5px; text-transform: uppercase; color: #a78bfa; }
     .do-head h1 { margin: 4px 0 0; font-size: 24px; font-weight: 700; max-width: 70ch; }
+    .do-actions { display: flex; align-items: center; gap: 10px; flex: none; }
+    .do-play { display: inline-flex; align-items: center; gap: 7px; height: 40px; padding: 0 14px;
+      border-radius: 999px; border: 1px solid rgba(139,92,246,.5); background: rgba(139,92,246,.2);
+      color: #cbb8f8; cursor: pointer; font-size: 13px; }
+    .do-play:hover { background: rgba(139,92,246,.32); color: #fff; }
     .do-x { width: 40px; height: 40px; border-radius: 999px; border: 1px solid rgba(255,255,255,.15);
       background: rgba(255,255,255,.06); color: #cfd3dc; cursor: pointer; font-size: 16px; flex: none; }
     .do-x:hover { background: rgba(255,255,255,.12); color: #fff; }
     .do-scroll { flex: 1; overflow-y: auto; padding: 24px 28px 120px; max-width: 980px; width: 100%; margin: 0 auto; }
+    /* Karaoke detail: single pre-wrap block (paragraph breaks preserved); the
+       spoken prefix is highlighted as speech advances. */
+    .do-text { font-size: 15px; line-height: 1.7; color: #c7ccd6; white-space: pre-wrap; }
+    .do-hi { color: #f3eefc; background: rgba(139,92,246,.28); border-radius: 3px;
+      box-decoration-break: clone; -webkit-box-decoration-break: clone; }
     .do-text p { font-size: 15px; line-height: 1.7; color: #c7ccd6; margin: 0 0 16px; }
     .do-text p:first-child { color: #e6e8ee; }
     .do-loading { display: flex; align-items: center; gap: 10px; color: #b9b2d6; font-size: 14px; padding: 8px 0; }
@@ -662,9 +662,6 @@ const CHIP_LABELS: Record<string, string> = {
     .toast { padding: 9px 14px; border-radius: 10px; font-size: 12.5px; box-shadow: 0 6px 20px rgba(0,0,0,.4); }
     .toast.warn { background: rgba(160,120,20,.9); }
     .toast.err { background: rgba(160,30,30,.92); }
-
-    /* Slim audio strip: compact row; mic is a rounded-rectangle pill so it fits the
-       thin band; side buttons shrink to match the slim height (< half the old size). */
     .microw { display: flex; align-items: center; justify-content: center; gap: 12px; flex: none; }
     .micbtn {
       position: relative; width: 128px; height: 40px; border-radius: 999px;
@@ -763,9 +760,6 @@ const CHIP_LABELS: Record<string, string> = {
     .cmd-textarea:focus { outline: none; }
     .cmd-copy { margin-top: 2px; flex: none; }
 
-    /* On-demand chat POPUP: glass overlay docked to the right; leaves the avatar
-       visible. Opens from the top-bar button; auto-fades to opacity 0 when idle
-       (then *ngIf removes it). pointer-events drop while faded so it can't block. */
     .chat.popup {
       position: fixed; top: 70px; right: 16px; bottom: 92px; z-index: 40;
       width: 360px; max-width: 40vw;
@@ -778,15 +772,11 @@ const CHIP_LABELS: Record<string, string> = {
     }
     .chat.popup.faded { opacity: 0; pointer-events: none; }
     @keyframes chatpop { from { opacity: 0; transform: translateY(-6px); } to { opacity: 1; transform: none; } }
-    /* Input as a footer bar inside the popup (it used to be a floating pill at the bottom). */
     .chat.popup .chat-input {
       flex: none; margin: 0; border-radius: 0; border: none;
       border-top: 1px solid rgba(255,255,255,.1);
       background: rgba(10,9,16,.5); box-shadow: none; padding: 8px 8px 8px 14px;
     }
-    /* On-demand media POPUP: left-docked glass overlay (chat is on the right), so it
-       never renders inline / never pushes the audio controls down. Opened from the
-       top-bar media button. */
     .media-panel.popup {
       position: fixed; top: 70px; left: 16px; bottom: 92px; z-index: 40;
       width: 300px; max-width: 40vw;
@@ -801,15 +791,12 @@ const CHIP_LABELS: Record<string, string> = {
     .media-head h2 { margin: 0; font-size: 12.5px; font-weight: 600; color: #eceaf6; text-shadow: 0 1px 4px rgba(0,0,0,.6); }
     .media-feed { flex: 1; overflow-y: auto; padding: 10px; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
     .media-entry { flex: none; }
-    /* Originating-question caption above each media group. Compact, dark/violet, single-line
-       with ellipsis (full text on hover via title). */
     .media-q { margin: 0 2px 4px; display: flex; flex-direction: column; gap: 1px; }
     .media-q-kicker { font-size: 9.5px; letter-spacing: .5px; text-transform: uppercase; color: #8b85a6; }
     .media-q-text {
       font-size: 12px; font-weight: 600; color: #d6c9fb; line-height: 1.25;
       white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 100%;
     }
-    /* Themed scrollbar: transparent track, blue outline (media + chat feeds). */
     .media-feed::-webkit-scrollbar, .feed::-webkit-scrollbar { width: 8px; }
     .media-feed::-webkit-scrollbar-track, .feed::-webkit-scrollbar-track { background: transparent; }
     .media-feed::-webkit-scrollbar-thumb, .feed::-webkit-scrollbar-thumb {
@@ -831,7 +818,6 @@ const CHIP_LABELS: Record<string, string> = {
     .reload-icon.spin { animation: spin 1s linear infinite; }
     .feed { flex: 1; overflow-y: auto; padding: 12px; display: flex; flex-direction: column; gap: 9px; }
     .empty { margin: auto; color: #9aa; font-size: 13px; text-align: center; text-shadow: 0 1px 4px rgba(0,0,0,.6); }
-    /* New messages fade in (stream-chat feel). Legible over a variable 3D backdrop. */
     .bubble { max-width: 92%; padding: 8px 12px; border-radius: 13px; font-size: 13px; line-height: 1.5;
       text-shadow: 0 1px 3px rgba(0,0,0,.5); animation: bubblein .35s ease both; }
     @keyframes bubblein { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: none; } }
@@ -856,20 +842,16 @@ const CHIP_LABELS: Record<string, string> = {
     .botfoot { margin-top: 5px; display: flex; align-items: center; gap: 8px; }
     .cursor { color: var(--accent); animation: blinkc 1s steps(2) infinite; margin-left: 1px; }
     @keyframes blinkc { 50% { opacity: 0; } }
-    .replay {
-      flex: none; width: 22px; height: 22px; padding: 0; border-radius: 50%;
+    .replay { flex: none; width: 22px; height: 22px; padding: 0; border-radius: 50%;
       background: rgba(139,92,246,.15); border: 1px solid rgba(139,92,246,.35);
       color: #c4b0f7; font-size: 12px; cursor: pointer; opacity: .45; transition: opacity .15s, background .15s;
-      display: grid; place-items: center;
-    }
+      display: grid; place-items: center; }
     .bubble.bot:hover .replay { opacity: 1; }
     .replay:hover { background: rgba(139,92,246,.35); }
-    /* Bootstrap outline-success: green outline, transparent bg, green text, fill on hover. Compact. */
     .vermas { display: inline-block; margin-top: 7px; padding: 3px 11px; border-radius: 6px; cursor: pointer;
       background: transparent; border: 1px solid #22c55e; color: #4ade80; font-size: 11.5px; font-weight: 600;
       line-height: 1.5; transition: background .15s, color .15s; }
     .vermas:hover { background: #22c55e; color: #062b14; }
-    /* Slim audio-control strip (responsive rules place it just above the footer). */
     .bottom-cluster {
       position: absolute; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 15;
       width: min(680px, 92vw); display: flex; flex-direction: column; align-items: center; gap: 4px;
@@ -880,24 +862,12 @@ const CHIP_LABELS: Record<string, string> = {
       text-shadow: 0 1px 3px rgba(0,0,0,.5); font-family: 'JetBrains Mono', ui-monospace, monospace; }
     .chip:hover:not(:disabled) { background: rgba(139,92,246,.4); }
     .chip:disabled { opacity: .45; cursor: default; }
-
-    /* Status pill: absolute overlay pinned just under the header so it does NOT consume
-       a layout row -- this frees the avatar to expand upward. --status-top is tuned per
-       breakpoint (header height differs desktop vs portrait). */
     .statusband {
       position: absolute; top: var(--status-top, 50px); left: 0; right: 0; z-index: 18;
       display: flex; justify-content: center; align-items: center; padding: 0 12px;
       pointer-events: none;
     }
     .statusband .statuspill { pointer-events: auto; }
-
-    /* Prompt-chip carousel pinned to the avatar's bottom edge (auto-rotating window). */
-    /* Carousel = a CENTERED, fixed-width clipped band for a slow marquee. The band is
-       centered on screen (left:50% + translateX(-50%)); landscape ~50vw, portrait ~75vw
-       (set in the media query). The inner .hint-track (doubled chips) starts FLUSH at the
-       band's left (no left padding/mask -> no left-edge clip on load) and drifts 0 -> -50%
-       linearly, looping seamlessly. Only ~2.5 chips fit -> 2 full + the 3rd peeking at the
-       RIGHT (soft right-edge fade). --hint-scroll-ms = tunable speed (higher = slower). */
     .prompt-carousel {
       position: absolute; left: 50%; bottom: 8px; transform: translateX(-50%); z-index: 12;
       width: 50vw; max-width: 720px;
@@ -922,9 +892,6 @@ const CHIP_LABELS: Record<string, string> = {
     .prompt-carousel .chip { animation: chipfade .4s ease both; }
     @keyframes chipfade { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
     @keyframes hint-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
-
-    /* Live subtitle bar over the lower avatar. Durations below MUST match the TS
-       constants SUBTITLE_FLY_MS (650) and SUBTITLE_FADE_MS (220). */
     .subtitle {
       position: absolute; left: 8%; right: 8%; bottom: 10px; z-index: 13;
       margin: 0 auto; max-width: 92%; text-align: center;
@@ -944,12 +911,8 @@ const CHIP_LABELS: Record<string, string> = {
       box-sizing: content-box;
     }
     @keyframes subin { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
-    /* Fly-to-history: transform is set inline (toward the chat icon); we just fade + shrink. */
     .subtitle.flying { opacity: 0; }
-    /* Warning glyph in the idle status pill. */
     .warn-ico { vertical-align: -2px; margin-right: 2px; color: #f0c674; }
-
-    /* Thin, always-visible static footer (never part of a scroll region). */
     .appfooter {
       flex: none; height: 26px; display: flex; align-items: center; justify-content: center;
       font-size: 11px; letter-spacing: 1.5px; color: #8b85a6;
@@ -964,7 +927,6 @@ const CHIP_LABELS: Record<string, string> = {
     .syncbtn:hover:not(:disabled) { background: rgba(255,255,255,.1); }
     .syncbtn:disabled { opacity: .5; cursor: default; }
     .syncbtn.hot { background: rgba(240,198,116,.18); border-color: rgba(240,198,116,.5); color: #f0c674; }
-    /* Floating input pill, full width of the bottom cluster. */
     .chat-input {
       width: 100%; display: flex; gap: 8px; align-items: flex-end;
       padding: 7px 7px 7px 16px; border-radius: 26px;
@@ -986,9 +948,6 @@ const CHIP_LABELS: Record<string, string> = {
     .send:disabled { opacity: .35; cursor: default; }
     .sysline.errline { color: #ff9c9c; font-size: 12px; }
     .inline-err { color: #ff9c9c; font-size: 12px; }
-
-    /* Above EVERYTHING (top bar z-20, toasts 30, popups 40, detail 60, pip 70) so the
-       open settings panel + its backdrop fully cover the main-screen top-bar icons. */
     .backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5); z-index: 90; }
     .slideover {
       position: fixed; top: 0; right: -420px; width: 400px; max-width: 92vw; height: 100%;
@@ -1034,7 +993,6 @@ const CHIP_LABELS: Record<string, string> = {
     .conf-partial { color: #d9a440; } .conf-incompatible { color: #f87171; }
     .conf-detail { font-size: 11px; color: #98a; background: rgba(255,255,255,.03); border: 1px solid rgba(255,255,255,.08); border-radius: 10px; padding: 8px 10px; margin: 2px 0 6px; }
     .conf-detail b { color: #c4b0f7; }
-    /* Conversation history list (Settings panel) */
     .hist-h { margin-top: 16px; }
     .hist-list { display: flex; flex-direction: column; gap: 6px; margin: 4px 0 6px; }
     .hist-row {
@@ -1055,97 +1013,54 @@ const CHIP_LABELS: Record<string, string> = {
     .conf-warn { color: #d9a440; margin-top: 3px; font-size: 10.5px; }
     .manual-label { margin-top: 4px; }
     code { background: rgba(255,255,255,.08); padding: 1px 5px; border-radius: 4px; font-size: 11px; }
-
-    /* ============================================================
-       RESPONSIVE LAYOUTS  (breakpoint: 1024px)
-       Avatar is the HERO in both widths; chat is an overlay popup (NOT in flow).
-       Strict top-to-bottom order in BOTH layouts, with NO page scroll:
-         top bar -> status band -> avatar (hero) -> [prompt carousel at avatar's
-         bottom edge] -> audio controls -> thin static footer.
-       The avatar is the only flex/grid element that grows; every other band is a
-       fixed/auto height, so the controls + footer are always fully visible.
-       The avatar-tts ResizeObserver resizes the EXISTING canvas whenever its
-       cell/band changes size -- the canvas is never recreated.
-       ============================================================ */
-
-    /* ---- WIDE / DESKTOP (>= 1024px): single centered column; chat + media are overlay popups ---- */
     @media (min-width: 1024px) {
       .app {
-        display: grid;
-        grid-template-columns: 1fr;
-        /* No status row: the status pill is an absolute overlay, so the avatar row
-           expands UPWARD; the slim controls row lets it expand DOWNWARD. */
+        display: grid; grid-template-columns: 1fr;
         grid-template-rows: auto minmax(0, 1fr) auto auto;
-        grid-template-areas:
-          "top"
-          "avatar"
-          "controls"
-          "footer";
-        padding: 0 16px 0; /* footer sits flush to the bottom margin */
-        --status-top: 46px; /* pill sits just under the one-line desktop header */
+        grid-template-areas: "top" "avatar" "controls" "footer";
+        padding: 0 16px 0; --status-top: 46px;
       }
-      /* Top bar becomes a real grid row (no scrim needed over its own band). */
       .topbar.floating { position: relative; grid-area: top; padding: 12px 6px 6px; background: none; }
-      /* Avatar is a real grid cell (NOT full-screen), centered with a sane max width.
-         The canvas fills it; the ResizeObserver updates camera aspect + renderer. */
       .viewport {
         position: relative; inset: auto; grid-area: avatar; border-radius: 20px;
         width: 100%; max-width: 820px; justify-self: center;
       }
       .glow { top: 30%; }
-      /* Slim audio strip directly BELOW the avatar, above the footer. */
       .bottom-cluster {
         position: relative; grid-area: controls; left: auto; bottom: auto; transform: none;
         width: 100%; max-width: 720px; justify-self: center; gap: 4px; padding-bottom: 6px;
       }
       .appfooter { grid-area: footer; }
-      /* Chat (right) + media (left) are fixed overlay popups -- not part of the grid. */
     }
-
-    /* ---- NARROW / VERTICAL / MOBILE (<= 1023px): vertical stack, NO page scroll ---- */
     @media (max-width: 1023px) {
-      .app {
-        display: flex; flex-direction: column;
-        height: 100%; overflow: hidden; /* controls + footer always visible, no scroll */
-        --status-top: 62px; /* pill sits under the taller two-line portrait header */
+      .app { display: flex; flex-direction: column;
+        height: 100%; overflow: hidden; --status-top: 62px;
       }
       .topbar.floating { position: relative; order: 0; }
-      /* Avatar band is the ONLY element that grows; the status pill overlays its top
-         (absolute) so the avatar expands upward, and the slim strip lets it grow down. */
       .viewport {
         position: relative; inset: auto; order: 1;
         flex: 1 1 auto; width: 100%; height: auto; min-height: 200px;
       }
-      /* Slim audio strip: fixed-height band, fully visible, just above the footer. */
       .bottom-cluster {
         position: relative; left: auto; bottom: auto; transform: none; order: 2;
         width: 100%; max-width: none; flex: none; gap: 4px; padding: 4px 12px;
       }
       .appfooter { order: 3; }
-      /* Chat + media popups become bottom sheets above the footer; avatar stays visible. */
       .chat.popup {
         top: auto; left: 8px; right: 8px; bottom: 34px;
         width: auto; max-width: none; max-height: 70vh;
       }
-      .media-panel.popup {
-        top: auto; left: 8px; right: 8px; bottom: 34px;
+      .media-panel.popup { top: auto; left: 8px; right: 8px; bottom: 34px;
         width: auto; max-width: none; max-height: 70vh;
       }
-      /* Studio (admin debug) spans the width when open. */
       .studio-overlay { width: calc(100vw - 24px); left: 12px; right: 12px; }
-
-      /* ---- narrow/portrait type scale + edge gutters (desktop unaffected) ---- */
-      /* Slightly smaller, better-proportioned text for small widths. */
       .brandtext .name { font-size: 15px; }
       .status-line { font-size: 9.5px; letter-spacing: .9px; }
       .statuspill { font-size: 12px; padding: 6px 13px; }
       .bubble { font-size: 12.5px; }
       .vermas { font-size: 11px; }
-      /* Hint chips on narrow screens: the centered band widens to ~75vw (still centered via
-         the base left:50% + translateX) with smaller chips; the marquee drifts within it. */
       .prompt-carousel { width: 75vw; max-width: none; }
       .prompt-carousel .chip { font-size: 11px; padding: 5px 11px; max-width: 70vw; }
-      /* Consistent side gutter for the other edge-touching bands. */
       .statusband { padding-left: 14px; padding-right: 14px; }
       .bottom-cluster { padding-left: 14px; padding-right: 14px; }
     }
@@ -1185,6 +1100,41 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     detailLoading = signal<boolean>(false);
     // Error from the on-demand detail call (shown in the overlay).
     detailError = signal<string>('');
+
+    // ---- detail spoken playback (TTS + avatar lipsync + karaoke) ----
+    /** Auto-start speaking the detail when the overlay opens. Flag so it can be
+     *  turned off later without code changes. */
+    private readonly DETAIL_AUTOSPEAK = true;
+    /** True while THIS detail's text is the active speech (gates the karaoke). */
+    readonly detailSpeaking = signal<boolean>(false);
+    /** Detail message id we already auto-started, so re-renders don't restart it. */
+    private detailSpokenId: number | null = null;
+    /** Spoken-char count to highlight up to -- the tts reveal signal (audio-anchored)
+     *  while this detail is speaking; 0 otherwise (no highlight). */
+    private detailReveal = computed(() => this.detailSpeaking() ? this.tts.revealedChars() : 0);
+    detailHi = computed(() => this.detailText().slice(0, this.detailReveal()));
+    detailRest = computed(() => this.detailText().slice(this.detailReveal()));
+    /** True when the detail audio is actively playing (not paused/idle). */
+    detailPlaying = computed(() => this.detailSpeaking() && this.tts.state() === 'speaking');
+    detailPlayLabel = computed(() => {
+        if (this.tts.state() === 'paused' && this.detailSpeaking()) return 'Reanudar';
+        if (this.detailPlaying()) return 'Pausar';
+        return 'Reproducir';
+    });
+
+    /** Auto-start detail speech once the text is loaded (flag-gated). */
+    private _detailSpeakFx = effect(() => {
+        const dm = this.detailOpen();
+        const txt = this.detailText();
+        const loading = this.detailLoading();
+        untracked(() => {
+            if (!dm || loading || !txt.trim() || !this.DETAIL_AUTOSPEAK) return;
+            if (this.detailSpokenId === dm.id) return; // already started for this message
+            this.detailSpokenId = dm.id;
+            this.playDetail();
+        });
+    });
+
     // Full-screen image-only viewer (root-level overlay).
     mediaViewer = signal<{ media: MediaItem[]; index: number } | null>(null);
 
@@ -1336,16 +1286,19 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
 
     /** Background 'suggestions' request reusing the turn's chunkIds (no re-embed). */
     private async fetchSuggestions(m: ConvMessage): Promise<void> {
+        const reqAssistant = this.assistantId; // pin the assistant for staleness checks
         try {
             const resp = await this.rag.ask((m.srcQuery || '').trim(), {
-                assistantId: this.assistantId,
+                assistantId: reqAssistant,
                 namespace: this.assistant()?.ragCollection,
                 language: this.lang,
                 voice: this.voiceId,
                 mode: 'suggestions',
                 chunkIds: m.sourceIds,
             });
-            if (this.lastSuggestionMsgId !== m.id) return; // a newer turn superseded this one
+            // Drop a stale result: a newer turn OR an assistant switch happened while
+            // this was in flight -> never overwrite the current assistant's chips.
+            if (this.lastSuggestionMsgId !== m.id || this.assistantId !== reqAssistant) return;
             const arr = resp.suggestions ?? [];
             const opts: SuggestedPrompt[] = arr
                 .map((s) => (s || '').trim())
@@ -1438,10 +1391,36 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         }
     }
     closeDetail(): void {
+        // Stop any in-flight detail speech + avatar animation cleanly (interrupt
+        // bumps the generation token so a stale playback can't continue/bleed).
+        if (this.detailSpeaking()) this.conv.interrupt();
+        this.detailSpeaking.set(false);
+        this.detailSpokenId = null;
         this.detailOpen.set(null);
         this.detailText.set('');
         this.detailError.set('');
         this.detailLoading.set(false);
+    }
+
+    /** Speak the detail text via TTS + avatar lipsync (drives revealedChars -> karaoke). */
+    private playDetail(): void {
+        const txt = this.detailText().trim();
+        if (!txt) return;
+        this.detailSpeaking.set(true);
+        // sayManual resolves on natural end OR when stopped/interrupted.
+        this.conv.sayManual(txt, this.opts()).finally(() => {
+            // Only clear if this is still the active detail speech (a newer turn /
+            // close already flips it). Leaves the highlight at its final position.
+            if (this.tts.state() === 'idle') this.detailSpeaking.set(false);
+        });
+    }
+
+    /** Play/pause toggle for the detail view: pause/resume in place, or (re)start. */
+    toggleDetailSpeech(): void {
+        const st = this.tts.state();
+        if (this.detailSpeaking() && st === 'speaking') { this.conv.pauseSpeech(); return; }
+        if (this.detailSpeaking() && st === 'paused') { this.conv.resumeSpeech(); return; }
+        this.playDetail(); // idle / finished -> start from the beginning
     }
 
     /** Title of the detail view = the user question that produced this answer. */
@@ -1659,6 +1638,14 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         void this.router.navigate(['/assistants']);
     }
 
+    /** Open the account/usage profile (full quota detail + ledger). Stops + clears
+     *  the session first, like goBack, so nothing keeps running while away. */
+    goProfile(): void {
+        this.settingsOpen.set(false);
+        this.resetSessionState();
+        void this.router.navigate(['/profile']);
+    }
+
     /** Language change from the settings slideover (replaces the removed navbar toggle). */
     setLang(l: TtsLang): void {
         this.lang = l;
@@ -1814,7 +1801,7 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         this.ragError.set('');
         if (on) {
             await this.reloadAssistant();
-            this.conv.ragFetcher = (q: string, mode?: 'rag' | 'capabilities') =>
+            this.conv.ragFetcher = (q: string, mode?: 'rag' | 'capabilities' | 'textual_quote') =>
                 this.rag.ask(q, {
                     assistantId: this.assistantId,
                     // namespace hint from the loaded assistant config; the Function
@@ -2083,7 +2070,10 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         this.clearFlyTimer();
         this.subStage.set('hidden');
         this.subCurrentId.set(null);
-        // Close any open overlays.
+        // Close any open overlays + stop detail speech state (conv.resetSession()
+        // already interrupted TTS/avatar; this clears the local playback flags).
+        this.detailSpeaking.set(false);
+        this.detailSpokenId = null;
         this.detailOpen.set(null);
         this.detailText.set('');
         this.detailLoading.set(false);
@@ -2105,6 +2095,28 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         const open = this.settingsOpen();
         const u = this.auth.user();
         if (open && u) untracked(() => void this.loadHistoryList());
+    });
+
+    /** Load the account quota balance ONCE when the user is known, so the live
+     *  counter shows on entry (before the first interaction). Server responses
+     *  then reconcile it; multi-tab staleness self-corrects on the next answer. */
+    private _quotaLoadFx = effect(() => {
+        const u = this.auth.user();
+        if (u) untracked(() => void this.rag.loadQuotaForUser(u.uid));
+    });
+
+    /** Transient "Te quedan N consultas" warning when a quota threshold is crossed. */
+    readonly quotaWarn = signal<string>('');
+    private quotaWarnTimer: any = null;
+    private _quotaWarnFx = effect(() => {
+        const q = this.rag.lastQuota(); // tracked: fires on each new answer
+        untracked(() => {
+            if (q && q.warnCrossed != null) {
+                this.quotaWarn.set(`Te quedan ${q.remaining} consultas`);
+                if (this.quotaWarnTimer) clearTimeout(this.quotaWarnTimer);
+                this.quotaWarnTimer = setTimeout(() => this.quotaWarn.set(''), 6000);
+            }
+        });
     });
 
     /** Debounce timer for incremental Firestore writes. */

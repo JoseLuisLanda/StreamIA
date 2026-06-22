@@ -21,13 +21,16 @@ import { db, bucket } from './admin';
 import { assertSignedIn, assertAdmin } from './lib/auth';
 import { ENFORCE_ADMIN_ROLE } from './lib/flags';
 import { extractPdfText } from './lib/pdf';
-import { chunkText, DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP } from './lib/chunk';
-import { embedText, EMBED_MODEL, EMBED_DIMENSIONS } from './lib/embeddings';
+import { DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP } from './lib/chunk';
+import { ChunkStrategy, chunkByStrategy, detectStrategy, resolveStrategy } from './lib/chunking';
+import { embedTextWithCounts, EMBED_MODEL, EMBED_DIMENSIONS } from './lib/embeddings';
 
 interface IngestRequest {
   namespace: string;
   storagePath: string;
   docId?: string;
+  /** chunking strategy; 'auto' (default) detects from the extracted text. */
+  strategy?: ChunkStrategy;
   options?: { chunkSize?: number; overlap?: number };
 }
 
@@ -36,16 +39,27 @@ interface IngestResponse {
   chunks: number;
   status: 'done' | 'error';
   message?: string;
+  /** the strategy actually used (resolved from 'auto'), for the UI. */
+  strategy?: string;
 }
 
 const WRITE_BATCH_LIMIT = 400; // < Firestore's 500 ops/batch
+
+// SCALING (see INGESTION_SCALING.md): A (540s/2GiB) + B (batched CountTokens +
+// concurrent embeds) handle current-scale docs (full Bible) in one execution.
+// For much larger corpora later, move to the async/resumable worker path in C
+// (enqueue -> background worker processes time-bounded slices -> incremental
+// status/progress -> done). NOT implemented now -- documented as the upgrade path.
 
 export const ingestDocument = onCall<IngestRequest, Promise<IngestResponse>>(
   // generic <RequestData, Return>; Return = Promise<IngestResponse> (async handler)
   // cors:true lets the callable reflect the request Origin. NOTE: this does NOT
   // bypass the Cloud Run public-invoker requirement -- if you still get a CORS
   // preflight error, the function isn't deployed/public (see CORS_FIX.md).
-  { region: 'us-central1', timeoutSeconds: 540, memory: '1GiB', cors: true },
+  // PART A: 540s is the callable max; memory 2GiB gives more CPU + headroom for a
+  // large document (full Bible ~5.5 MB). Requires redeploy to take effect:
+  //   firebase deploy --only functions:ingestDocument
+  { region: 'us-central1', timeoutSeconds: 540, memory: '2GiB', cors: true },
   async (request: CallableRequest<IngestRequest>): Promise<IngestResponse> => {
     // 1) Auth. ALWAYS require a signed-in user. The admin-role requirement is
     //    gated by ENFORCE_ADMIN_ROLE: false in dev (any signed-in user may
@@ -96,14 +110,24 @@ export const ingestDocument = onCall<IngestRequest, Promise<IngestResponse>>(
         return await fail(docRef, docId, 'No extractable text in PDF (is it scanned/image-only?).');
       }
 
-      // 4) Chunk.
+      // 4) Chunk via the selected strategy ('auto' -> detect from the text).
       const chunkSize = request.data?.options?.chunkSize ?? DEFAULT_CHUNK_SIZE;
       const overlap = request.data?.options?.overlap ?? DEFAULT_OVERLAP;
-      const pieces = chunkText(text, { chunkSize, overlap });
+      const requestedStrategy: ChunkStrategy = request.data?.strategy ?? 'auto';
+      const detected = detectStrategy(text);
+      const strategy = resolveStrategy(requestedStrategy, text);
+      logger.info('ingestDocument: chunk strategy', { docId, requested: requestedStrategy, detected, used: strategy });
+      const pieces = chunkByStrategy(text, strategy, { chunkSize, overlap });
       if (!pieces.length) return await fail(docRef, docId, 'Chunking produced no chunks.');
 
-      // 5) Embed (model/dimensions must match the vector index).
-      const vectors = await embedText(pieces);
+      // 5) Embed using REAL Vertex token counts for batching (CountTokens-validated;
+      //    conservative-estimate fallback). Returns real per-chunk token counts.
+      const { vectors, tokenCounts, maxBatchRealTokens, usedRealCounts } =
+        await embedTextWithCounts(pieces, 'RETRIEVAL_DOCUMENT', { docId });
+      logger.info('ingestDocument: embed done', {
+        docId, chunks: pieces.length, maxBatchRealTokens, usedRealCounts,
+        maxChunkTokens: tokenCounts.reduce((m, t) => Math.max(m, t), 0),
+      });
       if (vectors[0]?.length !== EMBED_DIMENSIONS) {
         logger.warn('ingestDocument: embedding dim != EMBED_DIMENSIONS', {
           got: vectors[0]?.length,
@@ -125,6 +149,8 @@ export const ingestDocument = onCall<IngestRequest, Promise<IngestResponse>>(
           batch.set(ref, {
             text: pieces[j],
             embedding: FieldValue.vector(vectors[j]),
+            // REAL Vertex token count for this chunk (reused for future batch packing).
+            tokenCount: tokenCounts[j] ?? 0,
             metadata: {
               namespace,
               docId,
@@ -140,7 +166,7 @@ export const ingestDocument = onCall<IngestRequest, Promise<IngestResponse>>(
         await batch.commit();
       }
 
-      // 8) Status record.
+      // 8) Status record (persists the chunk strategy used + what was detected).
       await docRef.set(
         {
           status: 'done',
@@ -151,13 +177,17 @@ export const ingestDocument = onCall<IngestRequest, Promise<IngestResponse>>(
           embedModel: EMBED_MODEL,
           embedDimensions: vectors[0]?.length ?? EMBED_DIMENSIONS,
           replacedChunks: removed,
+          chunkStrategy: strategy,                 // resolved strategy actually used
+          chunkStrategyRequested: requestedStrategy, // what the admin asked for ('auto' etc.)
+          chunkStrategyDetected: detected,         // what auto-detection found
+          maxChunkTokens: tokenCounts.reduce((m, t) => Math.max(m, t), 0),
           updatedAt: FieldValue.serverTimestamp(),
         },
         { merge: true },
       );
 
-      logger.info('ingestDocument done', { namespace, docId, chunks: written, removed });
-      return { docId, chunks: written, status: 'done' };
+      logger.info('ingestDocument done', { namespace, docId, chunks: written, removed, strategy });
+      return { docId, chunks: written, status: 'done', strategy };
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
       logger.error('ingestDocument failed', { namespace, docId, storagePath, error: message });

@@ -27,3 +27,7 @@ export {
 export { generateResponses } from './generateResponses';
 export { backfillAssistants } from './backfill';
 export { listProviderModels } from './listProviderModels';
+export { listNamespaces, createNamespace, deleteNamespace } from './ragNamespaces';
+export { getPricing, updatePricingRate, projectAssistantCost } from './costing';
+export { migrateDeepseekAliases } from './migrateDeepseek';
+export { allocateQuota, getQuota, resetQuotaPeriod } from './quotaAdmin';

@@ -89,6 +89,68 @@ export interface IntentLists {
 }
 
 /**
+ * Sub-mode of a 'query' intent for scripture-style assistants:
+ *  - 'textual_quote'  -> the user wants the LITERAL passage (recite/read/quote, a
+ *                        bare reference like "Salmo 23" / "Juan 3:16", "... completo").
+ *  - 'interpretive'   -> the user wants meaning/explanation/advice.
+ * Default is 'interpretive' when ambiguous.
+ */
+export type QueryMode = 'textual_quote' | 'interpretive';
+
+/** Wants the literal scripture text (es + en). */
+export const DEFAULT_TEXTUAL_QUOTE_KEYWORDS: string[] = [
+  // ES
+  'recita', 'recitame', 'cita', 'citame', 'lee', 'leeme', 'leer', 'transcribe', 'dame el texto',
+  'que dice', 'que dice el', 'que dice la', 'texto de', 'texto completo', 'completo', 'completa',
+  'versiculo', 'versiculos', 'capitulo', 'salmo', 'salmos', 'proverbio', 'proverbios', 'palabras de',
+  // EN
+  'read', 'recite', 'quote', 'full text', 'verbatim', 'what does it say', 'the text of',
+  'verse', 'verses', 'chapter', 'psalm', 'psalms',
+];
+
+/** Wants meaning/explanation/advice (es + en). Checked BEFORE quote so "que SIGNIFICA
+ *  el salmo 23" stays interpretive even though it names a reference. */
+export const DEFAULT_INTERPRETIVE_KEYWORDS: string[] = [
+  // ES
+  'que significa', 'significa', 'significado', 'explica', 'explicame', 'explicacion',
+  'que ensena', 'ensena sobre', 'que ensenanza', 'interpreta', 'interpretame', 'interpretacion',
+  'reflexion', 'que quiere decir', 'que aprendemos', 'aplicacion', 'como aplico', 'que aplicacion',
+  'analisis', 'analiza', 'comenta', 'comentario',
+  // EN
+  'what does it mean', 'meaning', 'explain', 'explanation', 'what does it teach', 'teach about',
+  'interpret', 'interpretation', 'reflection', 'lesson', 'application', 'analyze', 'comment',
+];
+
+/**
+ * A bare scripture reference signal. Takes BOTH the raw (lowercased) text and the
+ * normalized text: the chapter:verse colon is stripped by normalize(), so "3:16"
+ * is matched on `raw`, while the noun+number form is matched on the
+ * accent-stripped `norm`.
+ */
+function hasScriptureReference(raw: string, norm: string): boolean {
+  if (/\b\d+\s*:\s*\d+\b/.test(raw)) return true; // "3:16" (colon preserved on raw)
+  // a scripture noun followed by a number -> "salmo 23", "capitulo 1", "psalm 23"
+  if (/\b(salmo|salmos|capitulo|proverbio|proverbios|psalm|psalms|chapter|verse|versiculo)\s+\d+/.test(norm)) return true;
+  return false;
+}
+
+/**
+ * Sub-classify a 'query' as textual_quote vs interpretive. Interpretive wins on an
+ * explicit meaning/explanation phrase; otherwise a quote keyword or a bare
+ * reference selects textual_quote. Defaults to interpretive when neither is clear.
+ */
+export function classifyQueryMode(text: string, lists: { textualQuoteKeywords?: string[]; interpretiveKeywords?: string[] } = {}): QueryMode {
+  const raw = (text || '').toLowerCase();
+  const t = normalize(text);
+  if (!t) return 'interpretive';
+  const interp = [...DEFAULT_INTERPRETIVE_KEYWORDS, ...(lists.interpretiveKeywords ?? [])];
+  const quote = [...DEFAULT_TEXTUAL_QUOTE_KEYWORDS, ...(lists.textualQuoteKeywords ?? [])];
+  if (hasAny(t, interp) !== null) return 'interpretive';
+  if (hasAny(t, quote) !== null || hasScriptureReference(raw, t)) return 'textual_quote';
+  return 'interpretive';
+}
+
+/**
  * Local fast classification. Returns 'greeting' | 'farewell' | 'query' | 'ambiguous'.
  *  - A "capabilities/purpose" phrase -> capabilities (answered metadata-only, NO RAG).
  *  - Question mark or a query verb -> query (info must reach RAG).

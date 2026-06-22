@@ -53,7 +53,8 @@ export const PROVIDER_LABELS: Record<LlmProviderId, string> = {
  */
 export const MODEL_SUGGESTIONS: Record<LlmProviderId, string[]> = {
   openai: ['gpt-4o-mini', 'gpt-4o', 'gpt-4.1-mini', 'gpt-4.1'],
-  deepseek: ['deepseek-chat', 'deepseek-reasoner'],
+  // deepseek-chat / deepseek-reasoner are RETIRING 2026-07-24 -> use the V4 ids.
+  deepseek: ['deepseek-v4-flash', 'deepseek-v4-pro'],
   'gemini-api': [
     'gemini-flash-latest',
     'gemini-2.5-flash',

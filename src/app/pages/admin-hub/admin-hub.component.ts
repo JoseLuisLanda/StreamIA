@@ -53,6 +53,18 @@ export const ADMIN_MODULES: AdminModule[] = [
     description: 'Respuestas globales + por asistente (saludos, despedidas, sugerencias) con IA.',
     icon: 'M4 5h16v10H7l-3 3z M8 9h8 M8 12h5',
   },
+  {
+    title: 'Costos',
+    route: '/costos',
+    description: 'Modelo de costos: tarifas, uso real por asistente y proyeccion mensual (aproximado).',
+    icon: 'M12 1v22 M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6',
+  },
+  {
+    title: 'Cuotas',
+    route: '/cuotas',
+    description: 'Cuota de consultas por cuenta: asignar, recargar y ver consumo (ledger).',
+    icon: 'M3 3v18h18 M7 14l4-4 3 3 5-6',
+  },
 ];
 
 /**
