@@ -447,11 +447,15 @@ export class ConversationService {
             // and stash the chunk ids + question for the on-demand stage-2 call.
             const inlineDetail = ((payload as any).detail || '').trim();
             const srcIds = (payload.sources || []).map((s: any) => s?.id).filter((x: any): x is string => !!x);
+            // Detail is fetchable when the backend says so (RAG OR training/general-knowledge
+            // expansion -> training turns have no sources) or, for older backends, when we
+            // have chunk ids to reuse. Empty sourceIds => stage-2 expands from general knowledge.
+            const backendDetailAvailable = (payload as any).detailAvailable === true;
             const assistantMsg = this.push({
                 role: 'assistant', content: finalText, at: Date.now(),
                 meta: 'RAG', replayable: true, media: payload.media,
                 detail: inlineDetail || undefined,
-                detailAvailable: !inlineDetail && srcIds.length > 0,
+                detailAvailable: !inlineDetail && (backendDetailAvailable || srcIds.length > 0),
                 sourceIds: srcIds.length ? srcIds : undefined,
                 srcQuery: query,
                 leadGesture: leadId || undefined, tailGesture: this.liveTailGesture() || undefined,

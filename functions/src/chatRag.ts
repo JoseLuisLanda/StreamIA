@@ -52,6 +52,8 @@ interface ChatRagBody {
    *                      order, NOT rewritten by the LLM). For scripture-style content.
    */
   mode?: 'rag' | 'capabilities' | 'detail' | 'suggestions' | 'textual_quote';
+  /** Per-query knowledge-mode override (beats the assistant default). */
+  knowledgeMode?: 'rag_only' | 'hybrid' | 'training_only';
   /** STAGE 2: the chunk doc ids from stage 1's `sources` (keeps detail consistent). */
   chunkIds?: string[];
 }
@@ -102,6 +104,10 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   // Optional per-assistant custom capabilities prompt template (used only when the
   // capabilities flag is on). Read from the same doc -> zero extra reads, zero client trust.
   let capPromptTemplate = '';
+  // Knowledge mode: rag_only (default) | hybrid | training_only. Plus an optional
+  // per-assistant relevance-threshold override for hybrid. Read from the same doc.
+  let asstKnowledgeMode = '';
+  let asstRelevanceThreshold: number | null = null;
   const mode = body.mode === 'capabilities' ? 'capabilities'
     : body.mode === 'detail' ? 'detail'
     : body.mode === 'suggestions' ? 'suggestions'
@@ -126,6 +132,9 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
         if (ucr['capabilities'] === true && typeof cap['promptTemplate'] === 'string') {
           capPromptTemplate = (cap['promptTemplate'] as string).trim();
         }
+        asstKnowledgeMode = (dep.get('knowledgeMode') || '').toString().trim();
+        const rt = Number(dep.get('relevanceThreshold'));
+        if (Number.isFinite(rt)) asstRelevanceThreshold = rt;
       }
     }
   } catch (e) {
@@ -134,6 +143,23 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   // Fallback to the client-provided namespace hint (static/dev assistants that
   // have no Firestore doc). When the assistant doc exists, its ragCollection wins.
   if (!namespace) namespace = (body.namespace ?? '').trim();
+
+  // Knowledge mode resolution: query override -> assistant default -> rag_only.
+  const KM_VALID = ['rag_only', 'hybrid', 'training_only'];
+  const bodyKm = (body.knowledgeMode ?? '').toString();
+  const knowledgeMode: 'rag_only' | 'hybrid' | 'training_only' =
+    (KM_VALID.includes(bodyKm) ? bodyKm
+      : KM_VALID.includes(asstKnowledgeMode) ? asstKnowledgeMode
+      : 'rag_only') as 'rag_only' | 'hybrid' | 'training_only';
+  // Per-query resolution trace (verify the override wins + retrieval is skipped for
+  // training_only). retrievalRan: training_only never calls findNearest.
+  logger.info('chatRag knowledge_mode_resolved', {
+    phase: 'knowledge_mode_resolved',
+    requestedOverride: bodyKm || null,
+    assistantDefault: asstKnowledgeMode || null,
+    resolvedMode: knowledgeMode,
+    retrievalRan: knowledgeMode !== 'training_only',
+  });
   stage('1 parse + assistant doc resolve', tStart);
 
   // === CAPABILITIES MODE: metadata-only, NO retrieval/chunks/media. ===
@@ -208,7 +234,10 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   // === TEXTUAL-QUOTE MODE: serve the LITERAL passage by reference (verbatim verses
   // in order, NOT rewritten by the LLM). Falls back to normal rag if no verse
   // markers / reference can be resolved. Consumes 1 quota unit (gated above). ===
-  if (mode === 'textual_quote') {
+  // Skip the verbatim path under training_only (no retrieval/knowledge base) so the
+  // assistant never serves "scripture" from memory; it falls through to the training
+  // path whose directive forbids fabricating/completing verses.
+  if (mode === 'textual_quote' && knowledgeMode !== 'training_only') {
     const served = await answerTextualQuote(res, {
       assistantId, namespace, query, language, k, quota, stage,
     });
@@ -216,59 +245,93 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
     // not a resolvable scripture reference -> fall through to normal rag below.
   }
 
-  // --- Retrieval: per-namespace findNearest (no collectionGroup, no extra index) ---
+  // --- KNOWLEDGE MODE: rag_only | hybrid | training_only ---
+  // training_only SKIPS retrieval entirely (no embed, no findNearest -> saves cost
+  // + latency). rag_only/hybrid retrieve; hybrid then compares the best chunk's
+  // score to a relevance threshold to decide chunks-vs-training. `useTraining`
+  // means: answer from the model's training (clearly flagged), no chunks/media.
   const chunksCol = db.collection('rag').doc(namespace).collection('chunks');
-  let matched: FirebaseFirestore.QueryDocumentSnapshot[];
-  try {
-    const tEmbed = Date.now();
-    const queryVec = await embedText([query], 'RETRIEVAL_QUERY');
-    stage('2 query embedding (embedText)', tEmbed);
-    const vq = chunksCol.findNearest({
-      vectorField: 'embedding',
-      queryVector: FieldValue.vector(queryVec[0]),
-      limit: k,
-      distanceMeasure: 'COSINE',
-    });
-    const tFind = Date.now();
-    const snap = await vq.get();
-    stage('3 findNearest vector search', tFind);
-    matched = snap.docs;
-  } catch (e) {
-    logger.error('chatRag retrieval failed', { namespace, error: String(e) });
-    res.status(500).json({ error: 'retrieval failed' });
-    return;
-  }
+  const relevanceThreshold = asstRelevanceThreshold
+    ?? (typeof stageModels.relevanceThreshold === 'number' ? stageModels.relevanceThreshold : DEFAULT_RELEVANCE_THRESHOLD);
+  let matched: FirebaseFirestore.QueryDocumentSnapshot[] = [];
+  let useTraining = false;
+  let bestScore: number | null = null;
+  let retrievalPassed = false;
 
-  // Sanity: 0 results but non-empty collection -> 503; empty collection -> 404.
-  if (!matched.length) {
-    let any = false;
+  if (knowledgeMode === 'training_only') {
+    useTraining = true; // no retrieval at all
+  } else {
     try {
-      const probe = await chunksCol.limit(1).get();
-      any = !probe.empty;
-    } catch {
-      /* treat as empty */
+      const tEmbed = Date.now();
+      const queryVec = await embedText([query], 'RETRIEVAL_QUERY');
+      stage('2 query embedding (embedText)', tEmbed);
+      const vq = chunksCol.findNearest({
+        vectorField: 'embedding',
+        queryVector: FieldValue.vector(queryVec[0]),
+        limit: k,
+        distanceMeasure: 'COSINE',
+        // Ask Firestore to return the COSINE DISTANCE so we can threshold it.
+        // COSINE distance: LOWER = more similar (0 identical .. 2 opposite).
+        distanceResultField: 'vectorDistance',
+      });
+      const tFind = Date.now();
+      const snap = await vq.get();
+      stage('3 findNearest vector search', tFind);
+      matched = snap.docs;
+    } catch (e) {
+      logger.error('chatRag retrieval failed', { namespace, error: String(e) });
+      res.status(500).json({ error: 'retrieval failed' });
+      return;
     }
-    res.status(any ? 503 : 404).json({
-      error: any ? 'no relevant context found' : 'namespace has no ingested content',
-    });
-    return;
+
+    if (matched.length) {
+      // Results are sorted closest-first, so the first doc carries the best score.
+      const d0 = Number(matched[0].get('vectorDistance'));
+      bestScore = Number.isFinite(d0) ? d0 : null;
+      // pass when the best chunk is close enough (distance <= threshold).
+      retrievalPassed = bestScore != null && bestScore <= relevanceThreshold;
+    }
+
+    if (knowledgeMode === 'hybrid') {
+      // hybrid: good retrieval -> chunks; weak/none -> training fallback.
+      useTraining = !retrievalPassed;
+    } else {
+      // rag_only: must answer from chunks; 0 results -> decline (unchanged).
+      if (!matched.length) {
+        let any = false;
+        try { any = !(await chunksCol.limit(1).get()).empty; } catch { /* empty */ }
+        res.status(any ? 503 : 404).json({
+          error: any ? 'no relevant context found' : 'namespace has no ingested content',
+        });
+        return;
+      }
+      retrievalPassed = true;
+    }
   }
 
-  const context = matched.map((d) => (d.get('text') ?? '').toString()).join('\n---\n');
-  const sources = matched.map((d) => ({ id: d.id, metadata: d.get('metadata') ?? {} }));
+  // Per-query log so the threshold can be tuned from real data.
+  logger.info('chatRag knowledge_mode', {
+    phase: 'knowledge_mode', namespace, mode: knowledgeMode,
+    retrievalPassed, bestScore, threshold: relevanceThreshold, useTraining,
+  });
 
-  // --- Doc-scoped media candidates: gather media attached to the DOCUMENTS the
-  // retrieved chunks came from. The LLM later picks which (if any) are relevant. ---
+  // Build context/sources/media ONLY when answering from chunks.
+  const context = useTraining ? '' : matched.map((d) => (d.get('text') ?? '').toString()).join('\n---\n');
+  const sources = useTraining ? [] : matched.map((d) => ({ id: d.id, metadata: d.get('metadata') ?? {} }));
+
+  // --- Doc-scoped media candidates (only in the chunk-grounded path). ---
   let candidates: MediaOut[] = [];
-  try {
-    const tMedia = Date.now();
-    candidates = await gatherDocMedia(namespace, collectDocIds(matched));
-    // NOTE: gatherDocMedia does Firestore reads only (batched 'in' queries, <=10
-    // docIds per query). It performs NO Storage signed-URL/binary downloads --
-    // storagePath is returned as metadata and the bytes are fetched client-side.
-    stage('4 doc-scoped media gather (Firestore reads only, no Storage downloads)', tMedia);
-  } catch (e) {
-    logger.warn('chatRag media gather failed', { namespace, error: String(e) });
+  if (!useTraining) {
+    try {
+      const tMedia = Date.now();
+      candidates = await gatherDocMedia(namespace, collectDocIds(matched));
+      // NOTE: gatherDocMedia does Firestore reads only (batched 'in' queries, <=10
+      // docIds per query). It performs NO Storage signed-URL/binary downloads --
+      // storagePath is returned as metadata and the bytes are fetched client-side.
+      stage('4 doc-scoped media gather (Firestore reads only, no Storage downloads)', tMedia);
+    } catch (e) {
+      logger.warn('chatRag media gather failed', { namespace, error: String(e) });
+    }
   }
 
   // --- Generation. Produces a ~120w SUMMARY (spoken) + a full DETAIL (on demand),
@@ -293,8 +356,11 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
     // STAGE 1: summary ONLY (+ media-selection directive when candidates exist).
     // The detail is deferred to the on-demand 'detail' stage, so this prompt is
     // short and the output is token-capped -> the avatar starts speaking fast.
+    // Knowledge-mode instruction: chunk-grounded (summary-only) vs training fallback
+    // (answer from general knowledge, clearly flagged; never fabricate citations).
+    const instruction = useTraining ? TRAINING_DIRECTIVE : SUMMARY_ONLY_DIRECTIVE;
     let genContext = context;
-    let genPersona = `${persona ? persona + '\n\n' : ''}${SUMMARY_ONLY_DIRECTIVE}`;
+    let genPersona = `${persona ? persona + '\n\n' : ''}${instruction}`;
     if (candidates.length) {
       const catalog = candidates.map((m) => `- ${m.id}: ${m.title}${m.description ? ' - ' + m.description : ''}`).join('\n');
       genContext = `${context}\n\n[MEDIA DISPONIBLE]\n${catalog}`;
@@ -373,6 +439,9 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   // quota: post-decrement balance + any warn threshold this interaction crossed.
   res.json({
     summary, detail: detailText, body: summary, gestureCommands, media, sources,
+    // Stage-2 detail is ALWAYS fetchable here: RAG turns reuse the chunk ids; training
+    // turns (no sources) expand from general knowledge. The client shows "Ver mas".
+    detailAvailable: true,
     quota: { remaining: quota.remaining, allocated: quota.allocated, used: quota.used, warnThresholds: quota.warnThresholds, warnCrossed: quota.warnCrossed },
   });
   // Usage tracking (estimated, AFTER the response so it never adds latency).
@@ -487,24 +556,20 @@ async function answerDetail(
     stage: (label: string, from: number) => void;
   },
 ): Promise<void> {
-  const { assistantId, llmProfileId, persona, language, query, namespace, chunkIds, k, stage } = args;
+  const { assistantId, llmProfileId, persona, language, query, namespace, chunkIds, stage } = args;
 
   // 1) Context: reuse the exact stage-1 chunks by id (no embed, no findNearest).
+  //    No chunkIds => stage 1 ran in TRAINING mode (training_only or hybrid fallback);
+  //    the detail is then a long-form GENERAL-KNOWLEDGE answer (no context, no 404).
   let context = '';
+  const useTrainingDetail = chunkIds.length === 0;
   try {
     const tCtx = Date.now();
     if (chunkIds.length) {
       context = await fetchChunksByIds(namespace, chunkIds.slice(0, MAX_K));
       stage('D1 detail context: chunks by id (no embed, no findNearest)', tCtx);
     } else {
-      // Fallback (stage-1 sent no ids): re-run retrieval so detail still works.
-      const queryVec = await embedText([query], 'RETRIEVAL_QUERY');
-      const vq = db.collection('rag').doc(namespace).collection('chunks').findNearest({
-        vectorField: 'embedding', queryVector: FieldValue.vector(queryVec[0]), limit: k, distanceMeasure: 'COSINE',
-      });
-      const snap = await vq.get();
-      context = snap.docs.map((d) => (d.get('text') ?? '').toString()).join('\n---\n');
-      stage('D1 detail context: findNearest fallback (no chunkIds provided)', tCtx);
+      stage('D1 detail context: TRAINING (general knowledge, no retrieval)', tCtx);
     }
   } catch (e) {
     logger.error('chatRag detail context failed', { namespace, error: String(e) });
@@ -512,7 +577,8 @@ async function answerDetail(
     return;
   }
 
-  if (!context.trim()) {
+  // Only RAG-grounded detail requires context; training detail uses general knowledge.
+  if (!useTrainingDetail && !context.trim()) {
     res.status(404).json({ error: 'no context for detail' });
     return;
   }
@@ -523,7 +589,8 @@ async function answerDetail(
   let detailText = '';
   let usageDetail: { model: string; provider: string; prompt: string; output: string } | null = null;
   try {
-    const genPersona = `${persona ? persona + '\n\n' : ''}${DETAIL_ONLY_DIRECTIVE}`;
+    const detailDirective = useTrainingDetail ? DETAIL_TRAINING_DIRECTIVE : DETAIL_ONLY_DIRECTIVE;
+    const genPersona = `${persona ? persona + '\n\n' : ''}${detailDirective}`;
     const tProfile = Date.now();
     const { profile, source } = await resolveStageProfile({
       assistantId, overrideProfileId: args.overrideProfileId,
@@ -850,6 +917,32 @@ const SUMMARY_ONLY_DIRECTIVE =
   'Este texto se hablara en voz alta: di solo lo esencial y se muy conciso, en el mismo idioma de la pregunta. ' +
   'Termina siempre la idea (sin cortes a media frase). El analisis completo se mostrara aparte ' +
   '(boton "Ver mas"), asi que NO incluyas detalles extensos ni una version larga.';
+
+/** Default hybrid relevance threshold: COSINE DISTANCE (lower = more similar).
+ *  The best chunk "passes" when its distance <= this. Tune via config/ragModels
+ *  (relevanceThreshold) or per-assistant (assistants/{id}.relevanceThreshold). */
+const DEFAULT_RELEVANCE_THRESHOLD = 0.45;
+
+/** Training-fallback instruction (hybrid retrieval failed OR training_only). Answer
+ *  from general knowledge (NO "general info" prefix), and NEVER fabricate
+ *  citations/verses. The assistant persona (e.g. Pastor-IA's no-fabricated-scripture
+ *  rule) is still prepended, so its safety rules also apply here. Short (spoken summary). */
+const TRAINING_DIRECTIVE =
+  'No hay informacion relevante en la base de conocimiento para esta consulta, ' +
+  'asi que responde desde tu CONOCIMIENTO GENERAL en 1 a 2 frases cortas (MAXIMO 30 palabras), ' +
+  'en el mismo idioma de la pregunta. ' +
+  'NUNCA inventes ni completes citas textuales, versiculos, cifras o referencias que no puedas verificar; ' +
+  'si no lo sabes con certeza, dilo abiertamente. Sin saludos ni despedidas ni marcadores.';
+
+/** Detail-stage training directive: long-form GENERAL-KNOWLEDGE analysis when stage 1
+ *  had no chunks (training_only or hybrid fallback). No context needed; persona safety
+ *  rules (no fabricated citations) still apply via the prepended persona. */
+const DETAIL_TRAINING_DIRECTIVE =
+  'Genera un analisis COMPLETO y EXTENSO (varios parrafos) sobre la pregunta, ' +
+  'desde tu CONOCIMIENTO GENERAL (no hay informacion en la base de conocimiento). ' +
+  'Escribelo en el mismo idioma de la pregunta, sin saludos ni despedidas y sin marcadores. ' +
+  'NUNCA inventes ni completes citas textuales, versiculos, cifras o referencias que no puedas ' +
+  'verificar. Este texto se mostrara como lectura (no se habla).';
 
 /**
  * STAGE 2 directive: detail ONLY. Long-form analysis for the SAME question, grounded

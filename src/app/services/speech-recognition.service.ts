@@ -9,15 +9,23 @@ const dlog = (...a: unknown[]) => { if (DEBUG()) console.log('[SpeechRecognition
  * Local-first: no keys (Chrome/Edge route audio through their own speech
  * service; Firefox desktop unsupported -> isSupported=false).
  *
- * continuous=true keeps listening across short pauses; finalization happens by:
- *  - the engine emitting isFinal (long pause), or
- *  - finish(): graceful rec.stop() that FLUSHES the pending result
- *    (unlike abort(), which discards it - this was the bug that froze the
- *    pipeline at the interim stage), or
- *  - the silence watchdog: no new results for SILENCE_MS while interim text
- *    exists -> finish() automatically (hands-free turn taking).
- * If the engine ends without ever emitting isFinal, the last interim text is
- * delivered as the final transcript.
+ * MOBILE handling: mobile Chrome (Android) ENDS recognition on its own after a
+ * couple seconds regardless of `continuous`, capturing only the first phrase.
+ * Fixes:
+ *  - continuous=true + interimResults=true (do not cut off after the first word).
+ *  - AUTO-RESTART on `onend` while the mic is still "active" (the user has not
+ *    toggled it off), so the user can speak as long as they want. Each restart is
+ *    a fresh recognition session, so the final transcript is ACCUMULATED across
+ *    sessions (`finalAccum`) and only delivered on finish()/idle/tap-off.
+ *  - IDLE backstop (idleTimeoutMs, default 8000): if NO speech is detected for the
+ *    window, auto-stop so it never listens forever. RESET on every result /
+ *    speechstart so an actively-speaking user is never cut off.
+ *  - onerror: fatal errors (not-allowed / network) stop cleanly with the UI off;
+ *    transient ones (no-speech / aborted) let the auto-restart logic continue.
+ *
+ * The `listening` signal stays TRUE across auto-restarts and only flips false on a
+ * real stop (tap-off, idle timeout, hard stop, or fatal error) so the mic UI
+ * always reflects the true state.
  */
 @Injectable({ providedIn: 'root' })
 export class SpeechRecognitionService {
@@ -29,13 +37,21 @@ export class SpeechRecognitionService {
     private ngZone = inject(NgZone);
     private recognition: any = null;
     private onFinal: ((text: string) => void) | null = null;
+    private lang: 'es' | 'en' = 'es';
 
+    /** user wants the mic ON -> drives auto-restart (source of truth for restarts). */
+    private active = false;
+    /** final transcript accumulated ACROSS auto-restart sessions. */
+    private finalAccum = '';
+    /** latest interim of the CURRENT session (reset each restart). */
     private lastInterim = '';
     private deliveredFinal = false;
-    private finishing = false;
-    private silenceTimer: any = null;
-    /** ms without new results (while interim text exists) before auto-finalizing */
-    public silenceMs = 1800;
+
+    private idleTimer: any = null;
+    private restartTimer: any = null;
+
+    /** Idle backstop: ms with NO speech before auto-stopping. Configurable. */
+    public idleTimeoutMs = 8000;
 
     constructor() {
         const Ctor = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
@@ -48,35 +64,44 @@ export class SpeechRecognitionService {
         this.error.set(null);
         this.interim.set('');
         this.onFinal = onFinal;
+        this.lang = lang;
+        this.finalAccum = '';
         this.lastInterim = '';
         this.deliveredFinal = false;
-        this.finishing = false;
+        this.active = true;
+        this.listening.set(true);
+        this.armIdle();
+        this.createAndStart();
+    }
 
+    /** (Re)create a recognition session and start it. Used on first start AND on
+     *  each auto-restart. Keeps `active`/`finalAccum` so the turn continues. */
+    private createAndStart(): void {
+        if (!this.active) return;
         const Ctor = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
         const rec = new Ctor();
-        rec.lang = lang === 'es' ? 'es-MX' : 'en-US';
+        rec.lang = this.lang === 'es' ? 'es-MX' : 'en-US';
         rec.continuous = true;
         rec.interimResults = true;
         rec.maxAlternatives = 1;
 
+        rec.onspeechstart = () => this.ngZone.run(() => this.armIdle());
+
         rec.onresult = (ev: any) => this.ngZone.run(() => {
+            this.armIdle(); // speech detected -> never cut off an active speaker
             let interim = '';
-            let finalText = '';
-            for (let i = 0; i < ev.results.length; i++) {
+            let sessionFinal = '';
+            for (let i = ev.resultIndex; i < ev.results.length; i++) {
                 const r = ev.results[i];
-                if (r.isFinal) finalText += r[0].transcript + ' ';
+                if (r.isFinal) sessionFinal += r[0].transcript + ' ';
                 else interim += r[0].transcript;
             }
-            dlog('onresult', { interim, finalText });
-            this.armSilenceWatchdog();
-            if (finalText.trim()) {
-                this.deliverFinal((finalText + ' ' + interim).trim());
-                return;
-            }
-            if (interim) {
-                this.lastInterim = interim;
-                this.interim.set(interim);
-            }
+            if (sessionFinal.trim()) this.finalAccum = (this.finalAccum + ' ' + sessionFinal).trim();
+            this.lastInterim = interim;
+            // Show the full building transcript (accumulated finals + current interim).
+            const shown = (this.finalAccum + ' ' + interim).trim();
+            this.interim.set(shown);
+            dlog('onresult', { sessionFinal, interim, accum: this.finalAccum });
         });
 
         rec.onerror = (ev: any) => this.ngZone.run(() => {
@@ -84,62 +109,67 @@ export class SpeechRecognitionService {
             switch (ev.error) {
                 case 'not-allowed':
                 case 'service-not-allowed':
-                    this.error.set('Permiso de micrófono denegado. Habilítalo en el navegador.');
+                    this.error.set('Permiso de microfono denegado. Habilitalo en el navegador.');
+                    this.hardOff();            // fatal -> stop, UI off, no restart
+                    break;
+                case 'network':
+                    this.error.set('El servicio de reconocimiento no esta disponible (red).');
+                    this.hardOff();            // can't recover by restarting
                     break;
                 case 'no-speech':
-                    this.error.set('No se detectó voz. Intenta de nuevo.');
-                    break;
                 case 'aborted':
-                    break; // intentional
-                case 'network':
-                    this.error.set('El servicio de reconocimiento no está disponible (red).');
-                    break;
+                    break;                     // transient -> onend decides restart/stop
                 default:
                     this.error.set('Error de reconocimiento: ' + ev.error);
+                    break;                     // let onend handle it
             }
         });
 
         rec.onend = () => this.ngZone.run(() => {
-            dlog('onend', { finishing: this.finishing, delivered: this.deliveredFinal, lastInterim: this.lastInterim });
-            // engine ended without a final result: salvage the interim text
-            if (!this.deliveredFinal && this.lastInterim.trim() && this.finishing) {
-                this.deliverFinal(this.lastInterim.trim());
+            dlog('onend', { active: this.active, accum: this.finalAccum, lastInterim: this.lastInterim });
+            // Mobile ends the session on its own. If the user still wants the mic on,
+            // RESTART (a fresh session) to keep listening. Guard: only while active.
+            if (this.active) {
+                this.recognition = null;
+                if (this.restartTimer) clearTimeout(this.restartTimer);
+                this.restartTimer = setTimeout(() => this.ngZone.run(() => {
+                    this.restartTimer = null;
+                    if (this.active) this.createAndStart(); // re-check: user may have toggled off
+                }), 250); // small gap avoids tight restart loops / "already started"
+                return;
             }
-            this.clearWatchdog();
-            this.listening.set(false);
-            this.interim.set('');
+            // Not active -> a real stop is in progress; cleanup handled by finish()/stop().
             this.recognition = null;
         });
 
         this.recognition = rec;
-        this.listening.set(true);
-        try { rec.start(); dlog('started, lang=', rec.lang); } catch {
-            this.listening.set(false);
-            this.error.set('No se pudo iniciar el micrófono.');
+        try { rec.start(); dlog('session started, lang=', rec.lang); } catch {
+            // "already started" or transient -> drop; onend/idle will recover.
         }
     }
 
     /**
-     * Graceful finish: stops the engine but lets it FLUSH the pending final
-     * result (or salvages the interim). Use this when the user taps the mic
-     * to end their turn.
+     * Graceful finish: the user ended their turn (tapped the mic). Stop restarting,
+     * stop the engine, and DELIVER the accumulated transcript (+ pending interim).
      */
     finish(): void {
-        if (!this.recognition) return;
-        this.finishing = true;
-        this.clearWatchdog();
-        try { this.recognition.stop(); } catch { /* already stopped */ }
-        // safety net: if the engine never calls onend, salvage after 700 ms
-        setTimeout(() => this.ngZone.run(() => {
-            if (!this.deliveredFinal && this.lastInterim.trim()) {
-                this.deliverFinal(this.lastInterim.trim());
-            }
-        }), 700);
+        if (!this.active && !this.recognition) return;
+        this.active = false;
+        this.clearIdle();
+        if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null; }
+        try { this.recognition?.stop(); } catch { /* already stopped */ }
+        this.recognition = null;
+        const text = (this.finalAccum + ' ' + this.lastInterim).trim();
+        this.listening.set(false);
+        this.interim.set('');
+        this.deliverFinal(text);
     }
 
     /** Hard stop: discards anything pending (interruptions, echo prevention). */
     stop(): void {
-        this.clearWatchdog();
+        this.active = false;
+        this.clearIdle();
+        if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null; }
         this.onFinal = null; // never deliver after a hard stop
         if (this.recognition) {
             try { this.recognition.abort(); } catch { /* already stopped */ }
@@ -148,32 +178,45 @@ export class SpeechRecognitionService {
         this.listening.set(false);
         this.interim.set('');
         this.lastInterim = '';
+        this.finalAccum = '';
     }
 
     // ----------------------------------------------------------------- internals
 
-    private deliverFinal(text: string): void {
-        if (this.deliveredFinal || !text) return;
-        this.deliveredFinal = true;
-        this.clearWatchdog();
+    /** Fatal-error path: stop cleanly so the mic UI is never stuck "on". */
+    private hardOff(): void {
+        this.active = false;
+        this.clearIdle();
+        if (this.restartTimer) { clearTimeout(this.restartTimer); this.restartTimer = null; }
+        try { this.recognition?.abort(); } catch { /* already stopped */ }
+        this.recognition = null;
+        this.listening.set(false);
         this.interim.set('');
-        dlog('FINAL:', text);
+    }
+
+    private deliverFinal(text: string): void {
+        if (this.deliveredFinal) return;
+        this.deliveredFinal = true;
         const cb = this.onFinal;
         this.onFinal = null;
-        cb?.(text);
+        if (text) { dlog('FINAL:', text); cb?.(text); }
     }
 
-    private armSilenceWatchdog(): void {
-        this.clearWatchdog();
-        this.silenceTimer = setTimeout(() => this.ngZone.run(() => {
-            if (this.lastInterim.trim() && !this.deliveredFinal) {
-                dlog('silence watchdog -> finish()');
-                this.finish();
+    /** Idle backstop: no speech for idleTimeoutMs -> auto-stop (deliver if any text). */
+    private armIdle(): void {
+        this.clearIdle();
+        this.idleTimer = setTimeout(() => this.ngZone.run(() => {
+            dlog('idle timeout -> auto-stop');
+            if ((this.finalAccum + ' ' + this.lastInterim).trim()) {
+                this.finish();   // spoke then went silent -> deliver what we have
+            } else {
+                this.error.set('No se detecto voz. Intenta de nuevo.');
+                this.stop();     // never spoke -> just stop, UI off
             }
-        }), this.silenceMs);
+        }), this.idleTimeoutMs);
     }
 
-    private clearWatchdog(): void {
-        if (this.silenceTimer) { clearTimeout(this.silenceTimer); this.silenceTimer = null; }
+    private clearIdle(): void {
+        if (this.idleTimer) { clearTimeout(this.idleTimer); this.idleTimer = null; }
     }
 }

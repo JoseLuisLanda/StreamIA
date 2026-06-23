@@ -164,6 +164,9 @@ export class AssistantConfigService {
         // Per-stage profile overrides (empty -> use global default / legacy).
         summaryProfileId: cfg.summaryProfileId ?? null,
         detailProfileId: cfg.detailProfileId ?? null,
+        // Knowledge mode + optional hybrid relevance-threshold override.
+        knowledgeMode: cfg.knowledgeMode ?? 'rag_only',
+        relevanceThreshold: typeof cfg.relevanceThreshold === 'number' ? cfg.relevanceThreshold : null,
         // New docs are stamped at the current schema with all fields present.
         schemaVersion: ASSISTANT_SCHEMA_VERSION,
         useCustomResponses: cfg.useCustomResponses ?? {
@@ -234,6 +237,8 @@ export class AssistantConfigService {
       llmProfileId: data.llmProfileId ?? undefined,
       summaryProfileId: data.summaryProfileId ?? undefined,
       detailProfileId: data.detailProfileId ?? undefined,
+      knowledgeMode: data.knowledgeMode ?? 'rag_only',
+      relevanceThreshold: typeof data.relevanceThreshold === 'number' ? data.relevanceThreshold : undefined,
       useCustomResponses: data.useCustomResponses ?? undefined,
       systemPrompt: data.systemPrompt,
       greetingResponse: data.greetingResponse,

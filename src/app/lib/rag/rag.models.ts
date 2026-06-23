@@ -35,6 +35,8 @@ export interface RagRequest {
   mode?: 'rag' | 'capabilities' | 'detail' | 'suggestions' | 'textual_quote';
   /** STAGE 2: chunk ids from stage 1's `sources`, so the detail reuses the same context. */
   chunkIds?: string[];
+  /** Per-query knowledge-mode override (beats the assistant default). API capability. */
+  knowledgeMode?: 'rag_only' | 'hybrid' | 'training_only';
 }
 
 /**
@@ -54,6 +56,8 @@ export interface RagAskOptions {
   mode?: 'rag' | 'capabilities' | 'detail' | 'suggestions' | 'textual_quote';
   /** STAGE 2/suggestions: chunk ids from stage 1's sources (reuses the same context). */
   chunkIds?: string[];
+  /** Per-query knowledge-mode override (beats the assistant default). */
+  knowledgeMode?: 'rag_only' | 'hybrid' | 'training_only';
 }
 
 export type MediaType = 'image' | 'video' | 'document';
@@ -149,6 +153,16 @@ export interface AssistantConfig {
    */
   summaryProfileId?: string;
   detailProfileId?: string;
+  /**
+   * Knowledge mode (default 'rag_only'):
+   *  - 'rag_only'      answer strictly from retrieved chunks; decline if none.
+   *  - 'hybrid'        chunks when relevant (>= threshold) else training, flagged.
+   *  - 'training_only' skip retrieval; answer from training, flagged.
+   */
+  knowledgeMode?: 'rag_only' | 'hybrid' | 'training_only';
+  /** Hybrid relevance threshold (COSINE distance; lower = more similar). Per-assistant
+   *  override of the global config default. */
+  relevanceThreshold?: number;
   /**
    * Per-category resolution flags. true => read that assistant subcollection;
    * false/absent => serve the global default responses (no subcollection read).

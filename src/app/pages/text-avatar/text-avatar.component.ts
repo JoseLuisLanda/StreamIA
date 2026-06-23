@@ -452,6 +452,16 @@ const CHIP_LABELS: Record<string, string> = {
           Mi cuenta y consultas<span *ngIf="rag.lastQuota() as q"> ({{ q.remaining }} restantes)</span>
         </button>
 
+        <!-- Per-session knowledge-mode override (defaults to the assistant's mode;
+             affects only this session, does NOT change the saved default). -->
+        <h4>Modo de conocimiento</h4>
+        <select class="km-select" [ngModel]="kmOverride()" (ngModelChange)="kmOverride.set($event)">
+          <option value="rag_only">Solo RAG (responde solo de la base)</option>
+          <option value="hybrid">Hibrido (base si es relevante; si no, general)</option>
+          <option value="training_only">Solo entrenamiento (conocimiento general)</option>
+        </select>
+        <p class="note">Solo para esta sesion. No cambia el modo guardado del asistente.</p>
+
         <!-- ONLY setting: load another avatar, listed from the avatars/{id} DB collection.
              Selecting a card loads its GLB AND closes the panel (pickAvatar). -->
         <h4>Avatar</h4>
@@ -1463,6 +1473,16 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     assistant = signal<AssistantConfig | null>(null);
     ragError = signal<string>('');
 
+    // Per-session knowledge-mode OVERRIDE (Ajustes selector). Defaults to the
+    // assistant's saved mode; changing it overrides only this session (passed to
+    // chatRag as knowledgeMode). Does NOT change the assistant's stored default.
+    // An effect re-defaults it whenever the assistant changes.
+    readonly kmOverride = signal<'rag_only' | 'hybrid' | 'training_only'>('rag_only');
+    private _kmDefaultFx = effect(() => {
+        const a = this.assistant();
+        untracked(() => this.kmOverride.set((a?.knowledgeMode as any) || 'rag_only'));
+    });
+
     @ViewChild('feedEl') feedEl?: ElementRef<HTMLDivElement>;
     @ViewChild('previewTextareaEl') previewTextareaEl?: ElementRef<HTMLTextAreaElement>;
     @ViewChild('mediaFeedEl') mediaFeedEl?: ElementRef<HTMLDivElement>;
@@ -1811,6 +1831,9 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
                     voice: this.voiceId,
                     // 'capabilities' -> metadata-only answer (no RAG retrieval).
                     mode,
+                    // Per-session knowledge-mode override from the Ajustes selector
+                    // (server falls back to the assistant default if this matches it).
+                    knowledgeMode: this.kmOverride(),
                 });
             // Intent router: greetings answered instantly (no RAG); info queries
             // go to the namespace. Per-assistant lists/reply override the defaults;

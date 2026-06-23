@@ -55,7 +55,7 @@ interface VoiceOpt { id: string; label: string; }
 
       <div class="denied" *ngIf="!allowed()">You do not have admin access to this panel.</div>
 
-      <main class="main" *ngIf="allowed()">
+      <main class="main" [class.editing]="view() === 'edit'" *ngIf="allowed()">
         <!-- ============ LIST ============ -->
         <ng-container *ngIf="view() === 'list'">
           <div class="head">
@@ -137,6 +137,21 @@ interface VoiceOpt { id: string; label: string; }
                 </select>
               </label>
               <p class="hint" *ngIf="!namespaces().length">No namespaces found. Create + ingest one in RAG Admin first.</p>
+
+              <label class="fld"><span>Modo de conocimiento</span>
+                <select [(ngModel)]="form.knowledgeMode">
+                  <option value="rag_only">Solo RAG (responde solo de la base; si no hay, lo dice)</option>
+                  <option value="hybrid">Hibrido (RAG si es relevante; si no, conocimiento general marcado)</option>
+                  <option value="training_only">Solo entrenamiento (sin retrieval; conocimiento general marcado)</option>
+                </select>
+              </label>
+              <p class="hint">Solo RAG es lo mas seguro (recomendado para Pastor-IA). Hibrido y Solo entrenamiento marcan claramente cuando la respuesta es informacion general.</p>
+
+              <label class="fld" *ngIf="form.knowledgeMode === 'hybrid'"><span>Umbral de relevancia (hibrido)</span>
+                <input type="number" step="0.05" min="0" max="2" [(ngModel)]="form.relevanceThreshold"
+                       placeholder="por defecto global (~0.45)" />
+              </label>
+              <p class="hint" *ngIf="form.knowledgeMode === 'hybrid'">Distancia COSENO del mejor fragmento: MENOR = mas similar. Pasa a RAG si la distancia &lt;= umbral; si no, usa entrenamiento. Vacio = usa el valor global.</p>
 
               <label class="fld"><span>Persona (system prompt)</span>
                 <textarea rows="5" [(ngModel)]="form.systemPrompt" placeholder="Eres Sofia, una asesora experta de una tienda de muebles..."></textarea>
@@ -296,6 +311,9 @@ interface VoiceOpt { id: string; label: string; }
     .topnav a:hover { background: rgba(255,255,255,.06); color: #fff; border-color: rgba(255,255,255,.1); }
     .denied { margin: 80px auto; color: #ffb3b3; }
     .main { flex: 1; min-height: 0; overflow-y: auto; width: 100%; max-width: 1100px; margin: 0 auto; padding: 26px 24px 64px; }
+    /* The editor is a two-column form -> give it more room so it is not squeezed
+       into a narrow centered column on wide screens. */
+    .main.editing { max-width: 1320px; }
     .head { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; margin-bottom: 22px; }
     h1 { font-size: 28px; font-weight: 800; margin: 0 0 6px; }
     .sub { color: #8b93a3; font-size: 13.5px; max-width: 720px; line-height: 1.5; margin: 0; }
@@ -410,7 +428,7 @@ export class AssistantManagerComponent implements OnInit {
   }
 
   private blank(): AssistantConfig {
-    return { id: '', name: '', role: '', description: '', avatarId: '', ragCollection: '', systemPrompt: '', voice: '', language: 'es', enabled: true };
+    return { id: '', name: '', role: '', description: '', avatarId: '', ragCollection: '', systemPrompt: '', voice: '', language: 'es', enabled: true, knowledgeMode: 'rag_only' };
   }
 
   private buildVoices(): VoiceOpt[] {

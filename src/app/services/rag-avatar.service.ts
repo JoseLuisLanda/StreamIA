@@ -170,6 +170,7 @@ export class RagAvatarService {
       // stage-1 chunks via chunkIds). Absent = stage-1 summary (normal RAG).
       mode: opts.mode,
       chunkIds: opts.chunkIds,
+      knowledgeMode: opts.knowledgeMode,
     };
 
     // OPTIMISTIC quota decrement: only the rag (summary) interaction consumes a
