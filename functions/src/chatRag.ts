@@ -26,11 +26,26 @@ import { consumeOneQuota, ConsumeResult, QUOTA_COUNTS_DETAIL_SEPARATELY } from '
 
 const MAX_K = 8;
 const DEFAULT_K = 6;
-/** Token cap for the spoken STAGE-1 summary: short (1-2 sentences, <=30 words) +
- *  optional media tag. Headroom so it never cuts mid-sentence. */
-const SUMMARY_MAX_TOKENS = 160;
-/** Output-token cap for the on-demand DETAIL stage. */
-const DETAIL_MAX_TOKENS = 768;
+/** DETAIL stage retrieval breadth: the deep stage runs its OWN, broader findNearest
+ *  (more chunks than the summary's k) so it has genuinely MORE material to expand on,
+ *  not just the summary's ~6 chunks rephrased. Default; overridable per assistant
+ *  (assistants/{id}.detailK) or globally (config/ragModels.detailK). Clamped to DETAIL_MAX_K. */
+const DEFAULT_DETAIL_K = 12;
+const DETAIL_MAX_K = 30;
+/** DEFAULT token cap for the spoken STAGE-1 summary. Overridable per assistant
+ *  (assistants/{id}.summaryMaxTokens) or globally (config/ragModels.summaryMaxTokens).
+ *  Tuned +20% (160 -> 192) so the summary can include brief supporting detail
+ *  (names/examples/context) from the retrieved chunks, not just the headline fact.
+ *  NOTE: this value is being TUNED to observe the TTS/lipsync time-to-first-word and
+ *  animation-delay tradeoff, since the summary is spoken -- a larger cap can delay the
+ *  first audible word. Adjust down if responsiveness suffers. */
+const SUMMARY_MAX_TOKENS = 170;
+/** DEFAULT output-token cap for the on-demand DETAIL stage. Overridable per assistant
+ *  (assistants/{id}.detailMaxTokens) or globally (config/ragModels.detailMaxTokens).
+ *  Raised 768 -> 1536 so the deep stage can enumerate a full list (e.g. 12 items with
+ *  their attributes) without being cut off. The detail is NOT spoken and is shown on
+ *  demand, so a larger cap here does NOT affect TTS time-to-first-word. */
+const DETAIL_MAX_TOKENS = 1250;
 /** Output-token cap for the SUGGESTIONS stage (3 short follow-up prompts as JSON). */
 const SUGGESTIONS_MAX_TOKENS = 128;
 
@@ -108,6 +123,12 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   // per-assistant relevance-threshold override for hybrid. Read from the same doc.
   let asstKnowledgeMode = '';
   let asstRelevanceThreshold: number | null = null;
+  // Optional per-assistant spoken-summary token cap override (config value).
+  let asstSummaryMaxTokens: number | null = null;
+  // Optional per-assistant DETAIL (Ver mas) token cap override (config value).
+  let asstDetailMaxTokens: number | null = null;
+  // Optional per-assistant DETAIL retrieval breadth override (config value).
+  let asstDetailK: number | null = null;
   const mode = body.mode === 'capabilities' ? 'capabilities'
     : body.mode === 'detail' ? 'detail'
     : body.mode === 'suggestions' ? 'suggestions'
@@ -135,6 +156,12 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
         asstKnowledgeMode = (dep.get('knowledgeMode') || '').toString().trim();
         const rt = Number(dep.get('relevanceThreshold'));
         if (Number.isFinite(rt)) asstRelevanceThreshold = rt;
+        const smt = Number(dep.get('summaryMaxTokens'));
+        if (Number.isFinite(smt) && smt > 0) asstSummaryMaxTokens = Math.floor(smt);
+        const dmt = Number(dep.get('detailMaxTokens'));
+        if (Number.isFinite(dmt) && dmt > 0) asstDetailMaxTokens = Math.floor(dmt);
+        const dk = Number(dep.get('detailK'));
+        if (Number.isFinite(dk) && dk > 0) asstDetailK = Math.floor(dk);
       }
     }
   } catch (e) {
@@ -188,10 +215,18 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
       const qr = await consumeOneQuota(req.user.uid);
       if (!qr.ok) { res.status(429).json({ error: 'quota_exhausted', remaining: 0 }); return; }
     }
+    // DETAIL cap: per-assistant override -> global default -> code default.
+    const detailMaxTokens = asstDetailMaxTokens
+      ?? (typeof stageModels.detailMaxTokens === 'number' ? stageModels.detailMaxTokens : DETAIL_MAX_TOKENS);
+    // DETAIL retrieval breadth: per-assistant -> global -> code default, clamped.
+    const detailKResolved = asstDetailK
+      ?? (typeof stageModels.detailK === 'number' ? stageModels.detailK : DEFAULT_DETAIL_K);
+    const detailK = Math.min(Math.max(1, Math.floor(detailKResolved)), DETAIL_MAX_K);
     await answerDetail(res, {
       assistantId, llmProfileId, persona, language, query, namespace,
       chunkIds: body.chunkIds ?? [], k, stage,
       overrideProfileId: asstDetailProfileId, globalProfileId: stageModels.detailProfileId,
+      detailMaxTokens, detailK,
     });
     return;
   }
@@ -367,7 +402,10 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
       genPersona = `${genPersona}\n\n${MEDIA_DIRECTIVE}`;
     }
     // Cap output tokens for the spoken summary (clone keeps key/secret lookup intact).
-    const summaryProfile = { ...profile, maxOutputTokens: Math.min(profile.maxOutputTokens ?? SUMMARY_MAX_TOKENS, SUMMARY_MAX_TOKENS) };
+    // Spoken-summary cap: per-assistant override -> global default -> code default.
+    const summaryMaxTokens = asstSummaryMaxTokens
+      ?? (typeof stageModels.summaryMaxTokens === 'number' ? stageModels.summaryMaxTokens : SUMMARY_MAX_TOKENS);
+    const summaryProfile = { ...profile, maxOutputTokens: Math.min(profile.maxOutputTokens ?? summaryMaxTokens, summaryMaxTokens) };
     // ONE LLM call. Media relevance selection is IN-BAND (the model appends a
     // <<MEDIA: ids>> line parsed below) -- there is NO separate 2nd LLM call.
     const tGen = Date.now();
@@ -539,11 +577,12 @@ async function answerCapabilities(
 
 /**
  * STAGE 2 (DETAIL) handler: regenerate ONLY the long-form detail for the SAME
- * question, reusing the SAME chunks as stage 1. Consistency is guaranteed by
- * fetching the exact chunk docs whose ids came back in stage 1's `sources`
- * (no embedding, no findNearest). Falls back to findNearest only if no ids are
- * provided. One LLM call (detail-only). Returns the standard contract with detail
- * filled and summary/media/sources empty.
+ * question. The detail runs its OWN, BROADER retrieval (detailK > the summary's k)
+ * via findNearest for the same query, so it has genuinely MORE material to go deeper
+ * rather than rephrasing the summary's ~6 chunks. Empty chunkIds => stage 1 ran in
+ * TRAINING mode -> the detail answers from general knowledge (no retrieval). One LLM
+ * call (detail-only). Returns the standard contract with detail filled and
+ * summary/media/sources empty.
  */
 async function answerDetail(
   res: Response,
@@ -553,21 +592,36 @@ async function answerDetail(
     chunkIds: string[]; k: number;
     /** Per-stage profile selection: assistant detail override + global detail default. */
     overrideProfileId?: string; globalProfileId?: string;
+    /** Resolved output-token cap for this detail call (per-assistant/global/default). */
+    detailMaxTokens?: number;
+    /** Resolved retrieval breadth for the detail's OWN findNearest (> summary k). */
+    detailK?: number;
     stage: (label: string, from: number) => void;
   },
 ): Promise<void> {
   const { assistantId, llmProfileId, persona, language, query, namespace, chunkIds, stage } = args;
 
-  // 1) Context: reuse the exact stage-1 chunks by id (no embed, no findNearest).
-  //    No chunkIds => stage 1 ran in TRAINING mode (training_only or hybrid fallback);
-  //    the detail is then a long-form GENERAL-KNOWLEDGE answer (no context, no 404).
+  // 1) Context: the detail runs its OWN, BROADER retrieval (detailK > summary k) for the
+  //    SAME query -- NOT a reuse of the summary's chunk ids -- so it has genuinely MORE
+  //    material to go deeper instead of rephrasing the same ~6 chunks. Empty chunkIds =>
+  //    stage 1 ran in TRAINING mode (training_only/hybrid fallback) -> general knowledge,
+  //    no retrieval, no 404.
   let context = '';
+  let docChunks = 0;
   const useTrainingDetail = chunkIds.length === 0;
+  const detailK = Math.min(Math.max(1, Math.floor(args.detailK ?? DEFAULT_DETAIL_K)), DETAIL_MAX_K);
   try {
     const tCtx = Date.now();
-    if (chunkIds.length) {
-      context = await fetchChunksByIds(namespace, chunkIds.slice(0, MAX_K));
-      stage('D1 detail context: chunks by id (no embed, no findNearest)', tCtx);
+    if (!useTrainingDetail) {
+      const queryVec = await embedText([query], 'RETRIEVAL_QUERY');
+      const vq = db.collection('rag').doc(namespace).collection('chunks').findNearest({
+        vectorField: 'embedding', queryVector: FieldValue.vector(queryVec[0]),
+        limit: detailK, distanceMeasure: 'COSINE',
+      });
+      const snap = await vq.get();
+      docChunks = snap.size;
+      context = snap.docs.map((d) => (d.get('text') ?? '').toString()).join('\n---\n');
+      stage(`D1 detail context: broader findNearest (detailK=${detailK}, got ${docChunks})`, tCtx);
     } else {
       stage('D1 detail context: TRAINING (general knowledge, no retrieval)', tCtx);
     }
@@ -575,6 +629,16 @@ async function answerDetail(
     logger.error('chatRag detail context failed', { namespace, error: String(e) });
     res.status(500).json({ error: 'detail retrieval failed' });
     return;
+  }
+
+  // Cost/visibility: detail chunk count + estimated input tokens (CHARS_PER_TOKEN ~3).
+  // Lets us see whether a thin detail is narrow retrieval (docChunks < detailK -> source
+  // has little on the topic) or just limited budget. NOT for training (no retrieval).
+  if (!useTrainingDetail) {
+    logger.info('chatRag detail_retrieval', {
+      phase: 'detail_retrieval', namespace, detailK, docChunks,
+      inputTokens: Math.ceil(context.length / 3),
+    });
   }
 
   // Only RAG-grounded detail requires context; training detail uses general knowledge.
@@ -601,7 +665,8 @@ async function answerDetail(
       assistantId, source, profile: profile.name, provider: profile.provider, model: profile.model,
     });
     // Cap tokens for the detail stage (clone keeps key/secret lookup intact).
-    const detailProfile = { ...profile, maxOutputTokens: Math.min(profile.maxOutputTokens ?? DETAIL_MAX_TOKENS, DETAIL_MAX_TOKENS) };
+    const detailCap = args.detailMaxTokens && args.detailMaxTokens > 0 ? args.detailMaxTokens : DETAIL_MAX_TOKENS;
+    const detailProfile = { ...profile, maxOutputTokens: Math.min(profile.maxOutputTokens ?? detailCap, detailCap) };
     const tGen = Date.now();
     const result = await generateFromProfile(detailProfile, query, context, language, genPersona);
     stage(`D3 detail LLM generation (${profile.provider}/${profile.model}, ONE call)`, tGen);
@@ -912,11 +977,16 @@ const CAPABILITIES_DIRECTIVE =
  * No <<DETAIL>> section is requested here (detail is deferred to the detail stage).
  */
 const SUMMARY_ONLY_DIRECTIVE =
-  'Responde con un resumen CORTO de 1 a 2 frases, MAXIMO 30 palabras en total, directo y claro, ' +
-  'fundado UNICAMENTE en el CONTEXTO, sin saludos ni despedidas y sin marcadores. ' +
-  'Este texto se hablara en voz alta: di solo lo esencial y se muy conciso, en el mismo idioma de la pregunta. ' +
-  'Termina siempre la idea (sin cortes a media frase). El analisis completo se mostrara aparte ' +
-  '(boton "Ver mas"), asi que NO incluyas detalles extensos ni una version larga.';
+  'Primero da la RESPUESTA DIRECTA a la pregunta en una frase. Luego aprovecha el espacio disponible ' +
+  'para agregar los detalles de apoyo MAS relevantes tomados del CONTEXTO: nombra algunos elementos de ' +
+  'una lista, da ejemplos concretos o un poco de contexto util, en vez de quedarte solo en el dato o la ' +
+  'cifra principal. Apunta a 3 a 5 frases (aproximadamente 60 a 90 palabras): llena el espacio de forma ' +
+  'util, sin relleno ni repeticiones. Fundado UNICAMENTE en el CONTEXTO: NO inventes ni completes datos, ' +
+  'listas, nombres, cifras, citas ni versiculos que no esten en el CONTEXTO; si el CONTEXTO no lo trae, ' +
+  'no lo agregues. Cita las referencias cuando correspondan. Sin saludos ni despedidas y sin marcadores. ' +
+  'Este texto se hablara en voz alta, en el mismo idioma de la pregunta; termina siempre la idea (sin ' +
+  'cortes a media frase). El analisis COMPLETO y extenso se mostrara aparte (boton "Ver mas"), asi que ' +
+  'aqui da un resumen util y enriquecido, NO la version larga.';
 
 /** Default hybrid relevance threshold: COSINE DISTANCE (lower = more similar).
  *  The best chunk "passes" when its distance <= this. Tune via config/ragModels
@@ -949,9 +1019,17 @@ const DETAIL_TRAINING_DIRECTIVE =
  * in the SAME context as the summary. Text-only (not spoken); no markers.
  */
 const DETAIL_ONLY_DIRECTIVE =
-  'Genera un analisis COMPLETO y EXTENSO (varios parrafos) que amplie la respuesta breve, ' +
-  'fundado UNICAMENTE en el CONTEXTO, sin saludos ni despedidas y sin marcadores. ' +
-  'Escribelo en el mismo idioma de la pregunta. Este texto se mostrara como lectura (no se habla).';
+  'Genera un analisis COMPLETO, EXTENSO y BIEN ORGANIZADO que cubra a fondo la pregunta usando TODO el ' +
+  'espacio disponible con contenido sustantivo del CONTEXTO (no relleno). Da primero la respuesta directa ' +
+  '(por ejemplo, el conteo) y luego el desglose completo. Si el CONTEXTO contiene una lista o varios ' +
+  'elementos, ENUMERALOS todos, uno por uno, con sus atributos relevantes (por ejemplo, para cada elemento: ' +
+  'color, atributo, arquetipo, arcangel, impacto u otros datos presentes), de forma clara y estructurada. ' +
+  'Cubre el material por COMPLETO en lugar de resumir brevemente: este es el analisis profundo. ' +
+  'Fundado UNICAMENTE en el CONTEXTO: NO inventes ni completes elementos, nombres, cifras, listas, citas ni ' +
+  'versiculos que no esten en el CONTEXTO; si un dato no aparece, omitelo. Cita las referencias cuando ' +
+  'correspondan. Escribelo en el mismo idioma de la pregunta, sin saludos ni despedidas y sin marcadores. ' +
+  'CIERRA la idea dentro del espacio disponible (no te cortes a media lista). Este texto se mostrara como ' +
+  'lectura (no se habla).';
 
 /**
  * SUGGESTIONS directive: exactly 3 short, natural follow-up prompts the user might ask
@@ -974,7 +1052,7 @@ const SUGGESTIONS_DIRECTIVE =
 const SUMMARY_DETAIL_DIRECTIVE =
   'Estructura tu respuesta EXACTAMENTE asi, sin saludos ni despedidas:\n' +
   'Primero una linea que diga <<SUMMARY>> y debajo un resumen MUY BREVE de 3 a 4 lineas ' +
-  '(aprox. 40 palabras, 2-3 frases) — directo y claro; este texto se hablara en voz alta.\n' +
+  '(aprox. 40 palabras, 2-3 frases) -- directo y claro; este texto se hablara en voz alta.\n' +
   'Despues una linea que diga <<DETAIL>> y debajo el analisis completo y extenso (varios parrafos), tambien fundado en el CONTEXTO.\n' +
   'Ambas secciones en el mismo idioma de la pregunta. No incluyas los marcadores dentro del texto hablado.';
 

@@ -53,10 +53,35 @@ export const DEFAULT_CAPABILITY_KEYWORDS: string[] = [
 /** Global default query-verb / question triggers (es + en). */
 export const DEFAULT_QUERY_VERBS: string[] = [
   'dame', 'dime', 'quiero', 'necesito', 'busco', 'muestrame', 'muestra', 'explicame',
-  'explica', 'cuales', 'cual', 'que', 'quien', 'donde', 'cuando', 'como', 'cuanto', 'cuanta',
+  'explica', 'cuales', 'cual', 'que', 'quien', 'donde', 'cuando', 'como', 'cuanto', 'cuanta', 'cuantos', 'cuantas',
   'por que', 'porque', 'recomiendame', 'recomienda', 'tienes', 'hay', 'precio', 'medidas',
+  // Info-request "tell me" verbs: these are clear information requests (NOT greetings).
+  // Bare ambiguous openers ("hablemos"/"hablar"/"habla") are handled by the topic-aware
+  // INFO_REQUEST_PATTERNS below, NOT here, so a lone opener can still be a greeting.
+  'cuentame', 'cuentanos', 'platicame', 'platicanos', 'hablame', 'hablanos',
   'give', 'tell', 'show', 'want', 'need', 'which', 'what', 'who', 'where', 'when', 'how',
   'why', 'recommend', 'do you have', 'how much', 'list',
+];
+
+/**
+ * Topic-aware INFORMATION-REQUEST patterns: a talk/tell verb FOLLOWED BY a subject
+ * ("de X" / "sobre X" / "about X" / a following noun-marker) -> QUERY, even though the
+ * bare verb ("hablemos", "talk") could open small talk. These run as part of the query
+ * test (before the greeting check), so "hablemos sobre el perdon" routes to RAG while a
+ * lone "hablemos" can still be a greeting. Matched on the NORMALIZED (accent-stripped) text.
+ */
+export const DEFAULT_INFO_REQUEST_PATTERNS: RegExp[] = [
+  // ES: opener verbs that REQUIRE a topic to count as a query.
+  /(^|\s)(hablemos|hablar|habla|platiquemos|platicar|conversemos|conversar)\s+(de|del|sobre|acerca)\b/,
+  // ES: tell-me verbs followed by a topic or question word.
+  /(^|\s)(cuentame|cuentanos|hablame|hablanos|platicame|platicanos|dime|explicame|describeme|describe)\s+(de|del|sobre|acerca|que|como|cuando|donde|quien|la|el|los|las|un|una|mas)\b/,
+  /(^|\s)que sabes (de|del|sobre|acerca)\b/,
+  /(^|\s)que me puedes (decir|contar|platicar|ensenar) (de|del|sobre|acerca)\b/,
+  /(^|\s)informacion (de|del|sobre|acerca)\b/,
+  // EN (secondary)
+  /(^|\s)(tell me|talk|speak) (about|of|on)\b/,
+  /(^|\s)what do you know about\b/,
+  /(^|\s)(info|information) (about|on|regarding)\b/,
 ];
 
 /** Normalize: lowercase, strip accents + punctuation, collapse spaces. */
@@ -79,6 +104,26 @@ function hasAny(haystack: string, needles: string[]): string | null {
     else if (new RegExp('(^|\\s)' + k + '(\\s|$|\\?|!)').test(haystack)) return k;
   }
   return null;
+}
+
+/**
+ * Remove every matched phrase/word in `phrases` from `haystack` (normalized input).
+ * Used to decide whether anything QUERY-like remains after the greeting/farewell
+ * wording is taken out -- so "hola como estas" reduces to empty (pure greeting) while
+ * "buenos dias que precio tiene x" still has "que precio..." left (a real query).
+ */
+function stripPhrases(haystack: string, phrases: string[]): string {
+  let out = haystack;
+  for (const p of phrases) {
+    const k = normalize(p);
+    if (!k) continue;
+    if (k.includes(' ')) {
+      out = out.split(k).join(' ');
+    } else {
+      out = out.replace(new RegExp('(^|\\s)' + k + '(?=\\s|$|\\?|!)', 'g'), ' ');
+    }
+  }
+  return out.replace(/\s+/g, ' ').trim();
 }
 
 export interface IntentLists {
@@ -174,11 +219,31 @@ export function classifyIntentLocal(text: string, lists: IntentLists = {}): Inte
   // Capabilities/purpose wins over the generic query rule (see doc note above).
   if (hasAny(t, capabilities) !== null) return 'capabilities';
 
-  const isQuery = t.includes('?') || hasAny(t, verbs) !== null;
   const wordCount = t.split(' ').length;
 
-  if (isQuery) return 'query';
-  if (hasAny(t, farewells) !== null && wordCount <= 6) return 'farewell';
-  if (hasAny(t, greetings) !== null && wordCount <= 6) return 'greeting';
+  // STRONG query signals always win (prefer query -- missing a real question is costly):
+  //  - an explicit '?', or
+  //  - a topic-bearing info request ("hablemos de X", "cuentame sobre X", "tell me about X").
+  const isInfoRequest = DEFAULT_INFO_REQUEST_PATTERNS.some((re) => re.test(t));
+  if (t.includes('?') || isInfoRequest) return 'query';
+
+  // Small-talk guard: a greeting/farewell phrase wins ONLY when nothing query-like remains
+  // after the greeting/farewell wording is removed. This keeps "hola, como estas" a greeting
+  // (interrogatives that are PART of the greeting phrase do not force a query) while
+  // "buenos dias, que precio tiene X" stays a query (real content survives the strip).
+  const farewellHit = hasAny(t, farewells) !== null;
+  const greetingHit = hasAny(t, greetings) !== null;
+  if ((greetingHit || farewellHit) && wordCount <= 6) {
+    const rest = stripPhrases(t, [...greetings, ...farewells]);
+    const restIsQuery = rest.includes('?') || hasAny(rest, verbs) !== null;
+    if (!restIsQuery) return farewellHit ? 'farewell' : 'greeting';
+  }
+
+  // A generic query verb -> query (a real verb/topic is present; prefer query).
+  if (hasAny(t, verbs) !== null) return 'query';
+
+  // Short greeting/farewell that still carried a stray verb but no real query content.
+  if (farewellHit && wordCount <= 6) return 'farewell';
+  if (greetingHit && wordCount <= 6) return 'greeting';
   return 'ambiguous';
 }
