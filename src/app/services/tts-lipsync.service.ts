@@ -4,7 +4,7 @@ import {
 } from '../lib/lipsync/text-to-visemes';
 import { parseGestureMarkup } from '../lib/gestures/gesture-markup';
 import { GESTURES_BODY_ENABLED } from '../lib/config/feature-flags';
-import { speakNumericSequences, hasLongDigitRun } from '../lib/lipsync/number-speech';
+import { speakNumericSequences, hasLongDigitRun, hasUnderscoreSequence, tokenizeSpeechWithSilences } from '../lib/lipsync/number-speech';
 import { GESTURE_MAP, CYCLE_BASE_SECONDS, SPEED_MULTIPLIER_MIN, SPEED_MULTIPLIER_MAX } from '../lib/gestures/gesture-library';
 import { GesturePlayerService, now as wallNow } from './gesture-player.service';
 import { Viseme, VISEME_TO_ARKIT, BlendWeights } from '../lib/lipsync/viseme-map';
@@ -392,7 +392,16 @@ export class TtsLipsyncService {
         // (no mid-sentence/mid-word cut -> no slurred/garbled join), while the first (short)
         // sentence still synthesizes fast -> low time-to-first-word, and the sliding-window
         // prefetch keeps later sentences ready. Short/singlePass replies are unchanged.
-        const unitSource = fullPrecompile ? expanded : expandSegmentsBySentence(segments);
+        //
+        // DIAGNOSTIC (regression isolation): commit ce56e92 "adding pauses on points"
+        // introduced expandSegmentsBySentence on this progressive path. While true, we
+        // REVERT to the pre-ce56e92 behavior (expanded.map) to check whether the UI/avatar
+        // freeze during audio+viseme generation disappears. Flip back to false to restore
+        // the per-sentence prosody once the freeze cause is confirmed/fixed.
+        const DIAG_DISABLE_SENTENCE_SPLIT = true;
+        const unitSource = (fullPrecompile || DIAG_DISABLE_SENTENCE_SPLIT)
+            ? expanded
+            : expandSegmentsBySentence(segments);
         const units: ExpandedSegment[][] = fullPrecompile
             ? [expanded]
             : unitSource.map(s => [s]);
@@ -453,31 +462,69 @@ export class TtsLipsyncService {
         await this.playUnitsAfter(playA, ctx, unitsB, unitGesturesB, opts, gen, deps, captured, split.partBOffset);
     }
 
+    /** Real silence (ms) inserted where a numeric sequence had a "_" separator. */
+    private readonly SEQUENCE_SILENCE_MS = 380;
+
+    /** A zero-filled (silent) mono AudioBuffer of `ms` at the context sample rate. */
+    private makeSilenceBuffer(ctx: AudioContext, ms: number): AudioBuffer {
+        const frames = Math.max(1, Math.round((ms / 1000) * ctx.sampleRate));
+        return ctx.createBuffer(1, frames, ctx.sampleRate); // createBuffer is zero-filled
+    }
+
+    /** Concatenate mono AudioBuffers (same sample rate) into one, in order. */
+    private concatAudioBuffers(ctx: AudioContext, buffers: AudioBuffer[]): AudioBuffer {
+        const total = buffers.reduce((n, b) => n + b.length, 0);
+        const out = ctx.createBuffer(1, Math.max(1, total), ctx.sampleRate);
+        const ch = out.getChannelData(0);
+        let offset = 0;
+        for (const b of buffers) {
+            if (b.numberOfChannels > 0) ch.set(b.getChannelData(0), offset);
+            offset += b.length;
+        }
+        return out;
+    }
+
     private makeDeps(ctx: AudioContext, voiceId: string): CompilerDeps {
         // Digit language follows the Piper voice id prefix (es_*, en_*).
         const lang: 'es' | 'en' = voiceId.toLowerCase().startsWith('en') ? 'en' : 'es';
         return {
             synthesize: async (text: string) => {
-                // FIX: rewrite long digit runs to digit-by-digit BEFORE phonemization,
-                // so Piper doesn't expand "71974131981" into a giant cardinal. Only the
-                // SPOKEN text is changed here; the visible chat bubble is untouched.
-                const spoken = speakNumericSequences(text, lang);
+                // Rewrite long digit runs to digit-by-digit BEFORE phonemization so Piper
+                // doesn't expand "71974131981" into a giant cardinal. Only the SPOKEN text
+                // is changed here; the visible chat bubble is untouched.
                 const digitRun = hasLongDigitRun(text);
+                const underscoreSeq = hasUnderscoreSequence(text);
                 const first = !this.firstSynthMarked;
                 if (first) { this.firstSynthMarked = true; this.timing?.mark('synthA_started'); }
                 const tSynth = performance.now();
-                const wav = await this.piper.synthesizeWav(spoken, voiceId, p => this.downloadProgress.set(p));
+
+                let buffer: AudioBuffer;
+                if (underscoreSeq) {
+                    // Numeric sequence with "_" separators -> speak each group digit-by-digit
+                    // and insert a REAL silence buffer where each "_" was (Piper ignores
+                    // punctuation pauses). Concatenated into ONE buffer so the rest of the
+                    // pipeline (visemes/scheduling) is unchanged.
+                    const speechParts = tokenizeSpeechWithSilences(text, lang, this.SEQUENCE_SILENCE_MS);
+                    const pieces: AudioBuffer[] = [];
+                    for (const p of speechParts) {
+                        if (p.silenceMs) { pieces.push(this.makeSilenceBuffer(ctx, p.silenceMs)); continue; }
+                        if (!p.text || !p.text.trim()) continue;
+                        const w = await this.piper.synthesizeWav(p.text, voiceId, pr => this.downloadProgress.set(pr));
+                        pieces.push(await ctx.decodeAudioData(w));
+                    }
+                    buffer = pieces.length === 1 ? pieces[0] : this.concatAudioBuffers(ctx, pieces);
+                } else {
+                    const spoken = speakNumericSequences(text, lang);
+                    const wav = await this.piper.synthesizeWav(spoken, voiceId, p => this.downloadProgress.set(p));
+                    buffer = await ctx.decodeAudioData(wav);
+                }
+
                 const synthMs = Math.round(performance.now() - tSynth);
-                if (first) this.timing?.mark('synthA_done');
+                if (first) { this.timing?.mark('synthA_done'); this.timing?.mark('decodeA_done'); }
                 this.downloadProgress.set(null);
-                const buffer = await ctx.decodeAudioData(wav);
-                if (first) this.timing?.mark('decodeA_done');
-                // [tts.timing] per-segment: chars, long-digit-run flag, Piper synth ms
-                // (text->phonemes->audio; vits-web does not expose the phonemize step
-                // separately), audio duration, and the POST-normalization text Piper saw.
                 console.log(
                     `[tts.timing] piper synth: chars=${text.length} longDigitRun=${digitRun}` +
-                    ` synthMs=${synthMs} audioSec=${buffer.duration.toFixed(2)} post=${JSON.stringify(spoken)}`,
+                    ` underscoreSeq=${underscoreSeq} synthMs=${synthMs} audioSec=${buffer.duration.toFixed(2)}`,
                 );
                 return buffer;
             },

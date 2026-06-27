@@ -37,6 +37,9 @@ export interface RagRequest {
   chunkIds?: string[];
   /** Per-query knowledge-mode override (beats the assistant default). API capability. */
   knowledgeMode?: 'rag_only' | 'hybrid' | 'training_only';
+  /** Category-explore follow-up: chunk ids of the category just shown, so a condition
+   *  named next resolves within that category (scoped EXACT-CODE). */
+  categoryChunkIds?: string[];
 }
 
 /**
@@ -58,6 +61,8 @@ export interface RagAskOptions {
   chunkIds?: string[];
   /** Per-query knowledge-mode override (beats the assistant default). */
   knowledgeMode?: 'rag_only' | 'hybrid' | 'training_only';
+  /** Category-explore follow-up: chunk ids of the just-shown category (scoped EXACT-CODE). */
+  categoryChunkIds?: string[];
 }
 
 export type MediaType = 'image' | 'video' | 'document';
@@ -96,6 +101,10 @@ export interface RagResponse {
   sources?: RagSource[];
   /** 'suggestions' mode: up to 3 follow-up prompt strings. Absent in other modes. */
   suggestions?: string[];
+  /** OPTIONAL contract-handler output: per-segment spoken vs display units. When
+   *  present, the client speaks `spoken` and shows `display`; when ABSENT (plain /
+   *  today's handlers), the client keeps spoken == display == summary (no change). */
+  segments?: ResponseSegment[];
 }
 
 /**
@@ -116,6 +125,62 @@ export interface LegacyRagResponse {
   answer: string;
   sources?: RagSource[];
 }
+
+// ===========================================================================
+// Response Contract (per-assistant behavior, config-driven)
+// ===========================================================================
+// A responseContract lets ONE codebase serve many ASSISTANT TYPES (plain,
+// Grabovoi sequence catalog, cited scripture, sales) purely from config.
+// `kind` selects a behavior FAMILY; per-turn intent (intent-router / mode) still
+// chooses the sub-path within that family. chatRag reads the contract server-side
+// (the client cannot tamper). Absent contract -> DEFAULT_PLAIN_CONTRACT ->
+// byte-identical to today's behavior (full backward compatibility).
+
+export type ResponseContractKind = 'plain' | 'sequence_catalog' | 'cited_scripture' | 'sales';
+
+/** A single declarative validation step a handler runs against the LLM output
+ *  (e.g. "every code must appear verbatim in its source chunk"). `type` names the
+ *  rule; `params` carries rule-specific knobs. Handlers interpret these. */
+export interface ValidationRule {
+  id: string;
+  type: string;
+  params?: Record<string, unknown>;
+}
+
+/** Per-assistant response contract. Shapes HOW the answer is requested from the
+ *  LLM, validated, and rendered -- without any per-assistant code branches. */
+export interface ResponseContract {
+  kind: ResponseContractKind;
+  /** JSON-schema-like description requested from the LLM for structured output. */
+  outputSchema: Record<string, unknown>;
+  /** Prompt text injected by the handler: how to STRUCTURE output + grounding rules. */
+  promptFragments: { structureInstructions: string; groundingRules: string };
+  /** Declarative validations the handler enforces (anti-hallucination, citations, ...). */
+  validation: ValidationRule[];
+  /** Templates the handler uses to build spoken vs displayed text per segment. */
+  rendering: { spokenTemplate: string; displayTemplate: string };
+}
+
+/** One unit of answer the client renders: `spoken` is fed to TTS/visemes, `display`
+ *  is shown in the chat bubble. Digit-by-digit spelling of numeric codes stays
+ *  CLIENT-side (lib/lipsync/number-speech.ts) over `spoken`; the server keeps codes
+ *  verbatim. `gestureHints` are optional gesture ids for this segment. */
+export interface ResponseSegment {
+  spoken: string;
+  display: string;
+  gestureHints?: string[];
+}
+
+/** Backward-compatible fallback contract. Represents TODAY's behavior: plain text,
+ *  no extra validation, spoken == display. Any assistant without an explicit
+ *  responseContract is treated as this (see assistant-schema.ts migration v5). */
+export const DEFAULT_PLAIN_CONTRACT: ResponseContract = {
+  kind: 'plain',
+  outputSchema: {},
+  promptFragments: { structureInstructions: '', groundingRules: '' },
+  validation: [],
+  rendering: { spokenTemplate: '{text}', displayTemplate: '{text}' },
+};
 
 /**
  * Public assistant configuration (Firestore: `assistants/{id}`).
@@ -163,6 +228,12 @@ export interface AssistantConfig {
   /** Hybrid relevance threshold (COSINE distance; lower = more similar). Per-assistant
    *  override of the global config default. */
   relevanceThreshold?: number;
+  /**
+   * Category-explore (e.g. Grabovoi catalogs). When true, a general/category request
+   * ("algo para los ojos") lists the category's condition NAMES and asks which one (no
+   * code); a specific condition returns its verbatim code. Off for normal assistants.
+   */
+  categoryExplore?: boolean;
   /**
    * Per-category resolution flags. true => read that assistant subcollection;
    * false/absent => serve the global default responses (no subcollection read).
@@ -215,6 +286,12 @@ export interface AssistantConfig {
   allowAvatarSwitch?: boolean;
   /** whether this assistant shows in the public /assistants selector */
   enabled?: boolean;
+  /**
+   * Per-assistant response contract (config-driven assistant TYPE). Absent =>
+   * treated as DEFAULT_PLAIN_CONTRACT (today's behavior). Read server-side by
+   * chatRag. Populated on old docs by the v5 migration / backfillAssistants.
+   */
+  responseContract?: ResponseContract;
   /** Document schema version (see lib/rag/assistant-schema.ts). */
   schemaVersion?: number;
   /** epoch ms */

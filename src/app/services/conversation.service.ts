@@ -75,12 +75,34 @@ export interface ConvMessage {
     sourceIds?: string[];
     /** RAG stage-1: the user question, reused by the on-demand detail call. */
     srcQuery?: string;
+    /** Inline follow-up suggestions returned WITH the answer (e.g. category-explore lists
+     *  the condition options as chips). When present the client uses these directly and
+     *  skips the background 'suggestions' LLM call. */
+    suggestions?: string[];
+    /** Category-explore: the category this EXPLORE answer listed. Its `sourceIds` are the
+     *  category chunk ids, carried into the next turn so a named condition resolves there. */
+    exploreCategory?: string;
 }
 
 export interface ConvTtsOpts {
     provider: TtsProvider;
     lang: TtsLang;
     voiceId?: string;
+}
+
+/** Strip Markdown so the avatar never reads "asterisco" and bubbles/detail show clean text
+ *  (e.g. **1421543** -> 1421543, leading "- " list dashes removed). Shared by summary + detail. */
+export function stripMarkdown(s: string): string {
+    return (s ?? '')
+        .replace(/\*\*/g, '')
+        // Strip underscores used as Markdown emphasis, but PRESERVE underscores that join
+        // digits -- those are numeric-sequence separators (e.g. "219888_412_1289018") and
+        // must survive for display. Only remove _ runs NOT flanked by digits on both sides.
+        .replace(/(?<![0-9])_+|_+(?![0-9])/g, '')
+        .replace(/[*`#>]/g, '')
+        .replace(/^[ \t]*[-]\s+/gm, '')
+        .replace(/[ \t]{2,}/g, ' ')
+        .trim();
 }
 
 @Injectable({ providedIn: 'root' })
@@ -440,24 +462,36 @@ export class ConversationService {
             const spoken = (payload.gestureCommands || payload.body || '').trim();
             const sane = sanitizeLlmReply(spoken, new Set(GESTURE_MAP.keys()));
             for (const w of sane.warnings) console.warn('[rag-sanitizer]', w);
-            const finalText = sane.text;
+            // Strip Markdown so the avatar never reads "asterisco" aloud and the bubble is
+            // clean (e.g. **5189142** -> 5189142, list "- " dashes removed).
+            const finalText = stripMarkdown(sane.text);
 
             // Two-stage detail: stage-1 returns NO detail. If one is already inline
             // (e.g. capabilities mode), keep it; otherwise mark detail as fetchable
             // and stash the chunk ids + question for the on-demand stage-2 call.
-            const inlineDetail = ((payload as any).detail || '').trim();
+            const inlineDetail = stripMarkdown(((payload as any).detail || '').trim());
+            const suppressDetail = (payload as any).suppressDetail === true;
             const srcIds = (payload.sources || []).map((s: any) => s?.id).filter((x: any): x is string => !!x);
             // Detail is fetchable when the backend says so (RAG OR training/general-knowledge
             // expansion -> training turns have no sources) or, for older backends, when we
             // have chunk ids to reuse. Empty sourceIds => stage-2 expands from general knowledge.
             const backendDetailAvailable = (payload as any).detailAvailable === true;
+            // Inline follow-up options (category-explore lists the condition NAMES as chips).
+            const inlineSuggestions = Array.isArray((payload as any).suggestions)
+                ? ((payload as any).suggestions as any[]).map((s) => (s ?? '').toString().trim()).filter(Boolean)
+                : [];
+            const exploreCategory = ((payload as any).exploreCategory || '').toString().trim();
             const assistantMsg = this.push({
                 role: 'assistant', content: finalText, at: Date.now(),
                 meta: 'RAG', replayable: true, media: payload.media,
                 detail: inlineDetail || undefined,
-                detailAvailable: !inlineDetail && (backendDetailAvailable || srcIds.length > 0),
+                // suppressDetail (EXACT-CODE / EXPLORE) -> no "Ver mas" (it must not
+                // regenerate an LLM list). Protocol-assembly carries detail INLINE instead.
+                detailAvailable: !inlineDetail && !suppressDetail && (backendDetailAvailable || srcIds.length > 0),
                 sourceIds: srcIds.length ? srcIds : undefined,
                 srcQuery: query,
+                suggestions: inlineSuggestions.length ? inlineSuggestions : undefined,
+                exploreCategory: exploreCategory || undefined,
                 leadGesture: leadId || undefined, tailGesture: this.liveTailGesture() || undefined,
             });
             this.setState('speaking');
@@ -549,6 +583,27 @@ export class ConversationService {
                 this.revealingMsgId.set(null);
                 if (this.state() === 'speaking') this.setState('idle');
             }
+        }
+    }
+
+    /** Speak text through the TTS + lipsync pipeline WITHOUT logging it to the conversation.
+     *  Used by the "Ver mas" detail playback, which renders its OWN karaoke in the detail
+     *  overlay (driven by tts.revealedChars) and must NOT push a bubble to the side chat.
+     *  Mirrors sayManual's state/interrupt handling, minus the push + message-id reveal. */
+    async sayEphemeral(text: string, opts: ConvTtsOpts): Promise<void> {
+        const trimmed = text.trim();
+        if (!trimmed) return;
+        this.lastOpts = opts;
+        this.interruptInternals();
+        const gen = ++this.gen;
+        this.setState('speaking');
+        try {
+            // No lead-in here -> progressive per-segment path (fast time-to-first-word).
+            await this.tts.speak(trimmed, { ...opts, singlePass: false });
+        } catch (e: any) {
+            this.fail('TTS: ' + (e?.message ?? e));
+        } finally {
+            if (gen === this.gen && this.state() === 'speaking') this.setState('idle');
         }
     }
 

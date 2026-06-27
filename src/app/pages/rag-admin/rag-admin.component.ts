@@ -619,6 +619,7 @@ export class RagAdminComponent implements OnInit {
       case 'pericopal': return 'Pericopal (versiculos)';
       case 'section': return 'Section (encabezados)';
       case 'semantic': return 'Semantic (oraciones)';
+      case 'category': return 'Category (catalogo: encabezado + codigos)';
       default: return s;
     }
   }

@@ -34,8 +34,11 @@ const DIGIT_WORDS: Record<'es' | 'en', string[]> = {
   en: ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine'],
 };
 
-// A digit, then zero+ of (optional single '-' or '.' separator, then a digit).
-const SEQ_RE = /\d(?:[-.]?\d)*/g;
+// A digit, then zero+ of (optional single '-', '.' or '_' separator, then a digit).
+// '_' is included so numeric-sequence separators (e.g. "219888_412_1289018") are spoken
+// as one digit-by-digit run and the '_' itself is dropped from the spoken text (the avatar
+// must NOT vocalize the underscore). The DISPLAY keeps the '_' (see stripMarkdown).
+const SEQ_RE = /\d(?:[-._]?\d)*/g;
 
 /** True if the text has a run of >= DIGIT_SEQUENCE_MIN_LEN consecutive digits. */
 export function hasLongDigitRun(text: string): boolean {
@@ -55,4 +58,47 @@ export function speakNumericSequences(text: string, lang: 'es' | 'en'): string {
     if (digits.length < DIGIT_SEQUENCE_MIN_LEN) return m; // keep natural reading
     return digits.split('').map((d) => words[+d]).join(' ');
   });
+}
+
+/** A unit for the TTS pipeline: either text to synthesize, or a real silence gap (ms). */
+export interface SpeechPart { text?: string; silenceMs?: number; }
+
+/** Numeric sequences that carry "_" separators (e.g. "888_412_1289018"). */
+const UNDERSCORE_SEQ_SRC = '\\d+(?:_\\d+)+';
+
+/** True if the text has a numeric sequence with "_" separators (-> needs real pauses).
+ *  Uses a NON-global regex: a /g regex + .test() is stateful (lastIndex persists across
+ *  calls) and would flip true/false between segments, skipping the silence path. */
+export function hasUnderscoreSequence(text: string): boolean {
+  return new RegExp(UNDERSCORE_SEQ_SRC).test(text ?? '');
+}
+
+/**
+ * Split text into SpeechParts so the TTS pipeline can insert REAL silence where a numeric
+ * sequence had "_" separators. Each "_"-delimited group is spoken digit-by-digit; a silence
+ * of `silenceMs` is inserted between groups. Surrounding prose (and other long digit runs)
+ * is spelled via speakNumericSequences. If there is no "_"-separated sequence, returns a
+ * SINGLE text part (identical to today's single-synth path).
+ */
+export function tokenizeSpeechWithSilences(text: string, lang: 'es' | 'en', silenceMs: number): SpeechPart[] {
+  const src = text ?? '';
+  if (!hasUnderscoreSequence(src)) return [{ text: speakNumericSequences(src, lang) }];
+  const words = DIGIT_WORDS[lang] ?? DIGIT_WORDS.es;
+  const parts: SpeechPart[] = [];
+  const re = new RegExp(UNDERSCORE_SEQ_SRC, 'g');
+  let last = 0;
+  let m: RegExpExecArray | null;
+  const pushText = (t: string) => { const s = speakNumericSequences(t, lang); if (s.trim()) parts.push({ text: s }); };
+  while ((m = re.exec(src)) !== null) {
+    if (m.index > last) pushText(src.slice(last, m.index));
+    const groups = m[0].split('_');
+    groups.forEach((g, i) => {
+      if (i > 0) parts.push({ silenceMs });
+      const spelled = g.split('').map((d) => words[+d]).join(' ');
+      if (spelled) parts.push({ text: spelled });
+    });
+    last = m.index + m[0].length;
+  }
+  if (last < src.length) pushText(src.slice(last));
+  return parts.length ? parts : [{ text: speakNumericSequences(src, lang) }];
 }

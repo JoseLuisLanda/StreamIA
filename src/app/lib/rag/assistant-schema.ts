@@ -16,8 +16,10 @@
  *      one-time backfillAssistants callable.
  */
 
+import { DEFAULT_PLAIN_CONTRACT } from './rag.models';
+
 /** Current assistant schema version. Bump when adding a migrated field. */
-export const ASSISTANT_SCHEMA_VERSION = 4;
+export const ASSISTANT_SCHEMA_VERSION = 5;
 
 export interface MigrationStep {
   /** The version this step upgrades a doc TO. */
@@ -61,6 +63,19 @@ export const ASSISTANT_MIGRATIONS: MigrationStep[] = [
     apply: (d) => {
       if (d.summaryProfileId === undefined) d.summaryProfileId = null;
       if (d.detailProfileId === undefined) d.detailProfileId = null;
+    },
+  },
+  {
+    // v5 adds the per-assistant responseContract (config-driven assistant TYPE).
+    // Old docs with no contract get DEFAULT_PLAIN_CONTRACT so they behave EXACTLY
+    // as before (plain text, spoken == display, no extra validation). Deep-cloned
+    // so each doc owns its contract object (never shares the exported constant).
+    // Idempotent: if a contract already exists it is left untouched.
+    to: 5,
+    apply: (d) => {
+      if (d.responseContract == null) {
+        d.responseContract = JSON.parse(JSON.stringify(DEFAULT_PLAIN_CONTRACT));
+      }
     },
   },
 ];

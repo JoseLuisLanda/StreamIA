@@ -67,8 +67,11 @@ export function sanitizeLlmReply(raw: string, knownIds: ReadonlySet<string>): Sa
         .replace(/^\s*[-*•]\s+/gm, '')
         .replace(/\*\*([^*]+)\*\*/g, '$1')
         .replace(/\*([^*]+)\*/g, '$1')
-        .replace(/__([^_]+)__/g, '$1')
-        .replace(/_([^_]+)_/g, '$1')
+        // Markdown italic/bold via underscores, but PRESERVE underscores that join digits --
+        // numeric-sequence separators (e.g. "888_412_1289018") must survive. The digit
+        // lookbehind/lookahead stops "_412_" from being treated as italic.
+        .replace(/(?<![0-9])__([^_]+)__(?![0-9])/g, '$1')
+        .replace(/(?<![0-9])_([^_]+)_(?![0-9])/g, '$1')
         .replace(/[\u{1F000}-\u{1FAFF}\u{2600}-\u{27BF}\u{FE0F}\u{200D}]/gu, '')
         .replace(/[*`#]+/g, ' ');
 

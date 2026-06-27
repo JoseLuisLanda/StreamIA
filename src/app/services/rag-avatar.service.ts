@@ -171,6 +171,7 @@ export class RagAvatarService {
       mode: opts.mode,
       chunkIds: opts.chunkIds,
       knowledgeMode: opts.knowledgeMode,
+      categoryChunkIds: opts.categoryChunkIds,
     };
 
     // OPTIMISTIC quota decrement: only the rag (summary) interaction consumes a
@@ -317,6 +318,18 @@ export class RagAvatarService {
       const body = summary;
       const gestureCommands = (obj['gestureCommands'] ?? summary).toString();
       const detail = (obj['detail'] ?? '').toString();
+      // OPTIONAL contract segments. Validated minimally; absent -> undefined so the
+      // rest of the app keeps today's spoken == display == summary behavior.
+      const rawSegments = obj['segments'];
+      const segments = Array.isArray(rawSegments)
+        ? (rawSegments as any[])
+            .filter((s) => s && (typeof s.spoken === 'string' || typeof s.display === 'string'))
+            .map((s) => ({
+              spoken: (s.spoken ?? s.display ?? '').toString(),
+              display: (s.display ?? s.spoken ?? '').toString(),
+              gestureHints: Array.isArray(s.gestureHints) ? s.gestureHints.map((g: any) => String(g)) : undefined,
+            }))
+        : undefined;
       return {
         body,
         summary,
@@ -325,6 +338,7 @@ export class RagAvatarService {
         media: Array.isArray(obj['media']) ? (obj['media'] as MediaItem[]) : [],
         sources: Array.isArray(obj['sources']) ? (obj['sources'] as RagSource[]) : [],
         suggestions,
+        ...(segments && segments.length ? { segments } : {}),
       };
     }
 

@@ -167,6 +167,11 @@ export class AssistantConfigService {
         // Knowledge mode + optional hybrid relevance-threshold override.
         knowledgeMode: cfg.knowledgeMode ?? 'rag_only',
         relevanceThreshold: typeof cfg.relevanceThreshold === 'number' ? cfg.relevanceThreshold : null,
+        // Category-explore branch (catalog assistants like Grabovoi).
+        categoryExplore: cfg.categoryExplore === true,
+        // Response contract (config-driven assistant TYPE). null -> the v5 migration
+        // assigns DEFAULT_PLAIN_CONTRACT on read; an explicit contract is stored as-is.
+        responseContract: cfg.responseContract ?? null,
         // New docs are stamped at the current schema with all fields present.
         schemaVersion: ASSISTANT_SCHEMA_VERSION,
         useCustomResponses: cfg.useCustomResponses ?? {
@@ -239,6 +244,8 @@ export class AssistantConfigService {
       detailProfileId: data.detailProfileId ?? undefined,
       knowledgeMode: data.knowledgeMode ?? 'rag_only',
       relevanceThreshold: typeof data.relevanceThreshold === 'number' ? data.relevanceThreshold : undefined,
+      categoryExplore: data.categoryExplore === true,
+      responseContract: data.responseContract ?? undefined,
       useCustomResponses: data.useCustomResponses ?? undefined,
       systemPrompt: data.systemPrompt,
       greetingResponse: data.greetingResponse,

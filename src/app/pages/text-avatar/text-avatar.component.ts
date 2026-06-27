@@ -24,7 +24,7 @@ import { getRagEndpoint, setRagEndpoint, getAssistantId, setAssistantId } from '
 import { TtsLipsyncService, TtsProvider, TtsLang, PIPER_VOICES } from '../../services/tts-lipsync.service';
 import { SpeechRecognitionService } from '../../services/speech-recognition.service';
 import { LlmService, LlmProviderId, LLM_PROVIDER_LABELS } from '../../services/llm.service';
-import { ConversationService, ConvMessage } from '../../services/conversation.service';
+import { ConversationService, ConvMessage, stripMarkdown } from '../../services/conversation.service';
 import { parseGestureMarkup } from '../../lib/gestures/gesture-markup';
 import { GESTURE_MAP, GestureDef, SPEED_MULTIPLIERS } from '../../lib/gestures/gesture-library';
 import { GESTURES_LEADIN_ENABLED, GESTURES_TAIL_ENABLED } from '../../lib/config/feature-flags';
@@ -135,7 +135,7 @@ const CHIP_LABELS: Record<string, string> = {
              button click still fires. Content = dynamic 3 suggestions (or static fallback).
              Dimmed (faded out) while subtitles show; fades back + resumes drift when idle. -->
         <div class="prompt-carousel" *ngIf="ragMode && activePrompts().length"
-             [class.dim]="subStage() !== 'hidden'" [class.paused]="hintPaused()"
+             [class.paused]="hintPaused()"
              (pointerenter)="pauseHints()" (pointerleave)="resumeHints()"
              (pointerdown)="pauseHints()" (pointerup)="resumeHints()" (pointercancel)="resumeHints()">
           <div class="hint-track">
@@ -154,7 +154,13 @@ const CHIP_LABELS: Record<string, string> = {
         <div class="subtitle" *ngIf="subStage() !== 'hidden'" #subtitleBar
              [class.flying]="subStage() === 'flying'"
              [style.transform]="subStage() === 'flying' ? flyTransform() : null">
-          <div class="subtitle-roll" #subtitleRoll [style.height.em]="subtitleHeightEm()">{{ subtitleText() }}</div>
+          <!-- User question/prompt as a YELLOW reference, shown above the response. -->
+          <div class="sub-q" *ngIf="subtitleQuestion()">{{ subtitleQuestion() }}</div>
+          <!-- RESPONSE caption GROWS with the text up to maxHeight (2 lines); past that a
+               themed scrollbar appears and the newest line stays pinned at the bottom. Same
+               window for live and held -> no sudden box jump when speech finishes. -->
+          <div class="subtitle-roll" #subtitleRoll
+               [style.maxHeight.em]="subtitleHeightEm()">{{ subtitleText() }}</div>
         </div>
       </div>
 
@@ -316,7 +322,8 @@ const CHIP_LABELS: Record<string, string> = {
                   <span class="chip" *ngIf="seg.kind === 'chip' && showMarkup">{{ seg.value }}</span>
                 </ng-container>
                 <span class="cursor" *ngIf="isRevealing(m)">▍</span>
-                <!-- Appears only when detail exists AND the typing/paint reveal of this message has finished. -->
+                <!-- "Ver mas" stays (functionality intact); it speaks the detail. The long detail
+                     TEXT is intentionally NOT rendered (see the detail overlay below). -->
                 <button class="vermas" *ngIf="canShowDetail(m)" (click)="openDetail(m)">Ver más</button>
                 <!-- Media is NOT shown inline (chat is text-only); it lives in the left "Contenido relacionado" panel. -->
                 <div class="botfoot">
@@ -903,7 +910,8 @@ const CHIP_LABELS: Record<string, string> = {
     @keyframes chipfade { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: none; } }
     @keyframes hint-scroll { from { transform: translateX(0); } to { transform: translateX(-50%); } }
     .subtitle {
-      position: absolute; left: 8%; right: 8%; bottom: 10px; z-index: 13;
+      /* Sits ABOVE the always-visible hint carousel (bottom: 8px) so both show at once. */
+      position: absolute; left: 8%; right: 8%; bottom: 46px; z-index: 13;
       margin: 0 auto; max-width: 92%; text-align: center;
       font-size: 15px; font-weight: 600; color: #fff;
       text-shadow: 0 1px 4px rgba(0,0,0,.85), 0 0 10px rgba(0,0,0,.6);
@@ -914,12 +922,26 @@ const CHIP_LABELS: Record<string, string> = {
       animation: subin .22s ease both;
       transition: transform .65s cubic-bezier(.4,0,.2,1), opacity .65s ease;
     }
-    /* Fixed-height rolling window: height (em) set inline from subtitleHeightEm(); clipped,
-       smooth-scrolled to the bottom so newest words show and older text rolls off the top. */
-    .subtitle-roll {
-      line-height: 1.35; overflow: hidden; scroll-behavior: smooth;
-      box-sizing: content-box;
+    /* User question/prompt reference (yellow), shown above the response caption. Clamped to
+       2 lines with ellipsis so a long question never dominates the box. */
+    .sub-q {
+      color: #f5d442; font-weight: 700; font-size: 12.5px; line-height: 1.3;
+      margin-bottom: 5px; padding-bottom: 5px; border-bottom: 1px solid rgba(245,212,66,.22);
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
     }
+    /* Height grows with content up to maxHeight (set inline from subtitleHeightEm = 2 lines);
+       past that a themed scrollbar appears and the newest line stays pinned to the bottom. */
+    .subtitle-roll {
+      line-height: 1.35; height: auto; overflow-y: auto; scroll-behavior: smooth;
+      box-sizing: content-box; padding-right: 4px;
+    }
+    .subtitle-roll::-webkit-scrollbar { width: 8px; }
+    .subtitle-roll::-webkit-scrollbar-track { background: transparent; }
+    .subtitle-roll::-webkit-scrollbar-thumb {
+      background: transparent; border: 1px solid rgba(96,165,250,.7); border-radius: 999px;
+    }
+    .subtitle-roll::-webkit-scrollbar-thumb:hover { border-color: rgba(96,165,250,1); }
+    .subtitle-roll { scrollbar-width: thin; scrollbar-color: rgba(96,165,250,.7) transparent; }
     @keyframes subin { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
     .subtitle.flying { opacity: 0; }
     .warn-ico { vertical-align: -2px; margin-right: 2px; color: #f0c674; }
@@ -1185,7 +1207,13 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         this.chatSeenCount.set(this.chatMsgCount()); // mark all current messages read -> badge to 0
         this.chatOpen.set(true);
         this.chatActive.set(true);
-        this.armChatIdle();
+        // Chat stays open until the user closes it (no idle auto-fade). Always scroll to
+        // the newest message on open; the feed mounts via *ngIf, so defer one tick.
+        this.stickToBottom = true;
+        setTimeout(() => {
+            const el = this.feedEl?.nativeElement;
+            if (el) el.scrollTop = el.scrollHeight;
+        }, 0);
     }
 
     /** Close immediately (top-bar toggle off). */
@@ -1195,11 +1223,11 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         this.chatOpen.set(false);
     }
 
-    /** Any interaction in the popup (focus/keystroke/pointer/wheel) keeps it visible. */
+    /** Any interaction in the popup keeps it fully visible. The chat no longer auto-hides;
+     *  it stays open until the user closes it explicitly (no idle->fade timer). */
     chatActivity(): void {
         if (!this.chatOpen()) return;
         this.chatActive.set(true);
-        this.armChatIdle();
     }
 
     private armChatIdle(): void {
@@ -1289,6 +1317,14 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
             }
             if (!target || target.id === this.lastSuggestionMsgId) return;
             this.lastSuggestionMsgId = target.id;
+            // Inline options (category-explore) -> use directly as chips, no LLM fetch.
+            const inline = target.suggestions ?? [];
+            if (inline.length) {
+                const opts: SuggestedPrompt[] = inline.slice(0, 15)
+                    .map((s, i) => ({ id: 'ex-' + i, label: s, prompt: s, order: i, enabled: true }));
+                this.dynamicSuggestions.set(opts.length ? opts : null);
+                return;
+            }
             this.dynamicSuggestions.set(null);   // fall back to static chips until fresh ones land
             void this.fetchSuggestions(target);
         });
@@ -1388,7 +1424,7 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
                 mode: 'detail',
                 chunkIds: m.sourceIds,
             });
-            const text = (resp.detail || resp.body || '').trim();
+            const text = stripMarkdown((resp.detail || resp.body || '').trim());
             if (this.detailOpen()?.id !== m.id) return; // overlay changed while loading
             m.detail = text;                 // cache on the message (no re-call next time)
             this.detailText.set(text || m.content);
@@ -1417,8 +1453,10 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         const txt = this.detailText().trim();
         if (!txt) return;
         this.detailSpeaking.set(true);
-        // sayManual resolves on natural end OR when stopped/interrupted.
-        this.conv.sayManual(txt, this.opts()).finally(() => {
+        // sayEphemeral speaks via TTS + lipsync WITHOUT logging a chat bubble (the detail
+        // renders its own karaoke in this overlay; it must NOT add a 'preview' message to the
+        // side chat). Resolves on natural end OR when stopped/interrupted.
+        this.conv.sayEphemeral(txt, this.opts()).finally(() => {
             // Only clear if this is still the active detail speech (a newer turn /
             // close already flips it). Leaves the highlight at its final position.
             if (this.tts.state() === 'idle') this.detailSpeaking.set(false);
@@ -1495,7 +1533,10 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     private readonly SUBTITLE_FLY_MS = 650;
     /** Rolling-caption window: visible lines by orientation (responsive). */
     private readonly SUBTITLE_MAX_LINES_PORTRAIT = 2;
-    private readonly SUBTITLE_MAX_LINES_DESKTOP = 1;
+    /** The RESPONSE caption accumulates up to this many lines, THEN a (themed) scrollbar
+     *  appears and the newest text stays pinned at the bottom. The yellow user-question
+     *  reference (.sub-q) sits ABOVE this and is not counted here. */
+    private readonly SUBTITLE_MAX_LINES_DESKTOP = 2;
     /** Line-height (em) of the subtitle text; must match the .subtitle-roll CSS line-height. */
     private readonly SUBTITLE_LINE_EM = 1.35;
     /** Desktop breakpoint (same 1024px used across the page). matchMedia keeps it reactive. */
@@ -1503,7 +1544,8 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
     private subMqlHandler = (e: MediaQueryListEvent) => this.isDesktopWide.set(e.matches);
     /** True on wide/desktop (>=1024px); flips on orientation/size change. */
     isDesktopWide = signal(this.subMql ? this.subMql.matches : false);
-    /** Active rolling-caption line limit (1 desktop / 2 portrait). */
+    /** Active rolling-caption line limit (1 desktop / 2 portrait). HELD uses content
+     *  height via CSS (max-height), so it is not driven by this. */
     subtitleMaxLines = computed(() =>
         this.isDesktopWide() ? this.SUBTITLE_MAX_LINES_DESKTOP : this.SUBTITLE_MAX_LINES_PORTRAIT);
     /** Fixed window height in em for that line limit. */
@@ -1525,7 +1567,7 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         });
     });
     /** Stage of the subtitle overlay: hidden -> live (revealing) -> flying (to chat icon). */
-    subStage = signal<'hidden' | 'live' | 'flying'>('hidden');
+    subStage = signal<'hidden' | 'live' | 'flying' | 'held'>('hidden');
     /** Message id whose text the subtitle shows (captured when it goes live). */
     private subCurrentId = signal<number | null>(null);
     /** Fly translation toward the chat icon (px), set in startFly(). */
@@ -1551,6 +1593,31 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         return model.clean;
     });
 
+    /** The originating user question/prompt for the subtitle, shown in yellow ABOVE the
+     *  response as a reference. While a response is active it uses that assistant message's
+     *  srcQuery; while a request is PENDING (no assistant message yet -- sending/waiting),
+     *  it falls back to the latest user message so the question shows as soon as the prompt
+     *  is received (chat / hint / voice), not when the answer arrives. */
+    subtitleQuestion = computed<string>(() => {
+        const msgs = this.conv.messages();
+        const id = this.conv.revealingMsgId() ?? this.conv.speakingMsgId() ?? this.subCurrentId();
+        if (id != null) {
+            const idx = msgs.findIndex((x) => x.id === id);
+            if (idx >= 0) {
+                const q = (msgs[idx].srcQuery ?? '').trim();
+                if (q) return q;
+                for (let i = idx - 1; i >= 0; i--) {
+                    if (msgs[i].role === 'user') return (msgs[i].content ?? '').trim();
+                }
+            }
+        }
+        // Pending (no active assistant message yet): the latest user message is the question.
+        for (let i = msgs.length - 1; i >= 0; i--) {
+            if (msgs[i].role === 'user') return (msgs[i].content ?? '').trim();
+        }
+        return '';
+    });
+
     /**
      * Drives the hint<->subtitle swap from the speaking state + the natural-finish pulse:
      *   (a) speechCompleted pulse while live  -> fly to history (then hide).
@@ -1559,13 +1626,29 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
      * untracked() wraps the writes so the effect only re-runs on state/completed changes.
      */
     private _subtitleFx = effect(() => {
-        const speaking = this.conv.state() === 'speaking';
+        const state = this.conv.state();
+        const msgs = this.conv.messages();
+        const speaking = state === 'speaking';
         const speakId = this.conv.speakingMsgId();
         const completed = this.conv.speechCompleted();
+        // "Asking": a user prompt is registered but no assistant reply is being spoken yet.
+        // Driven by the pushed USER MESSAGE (instant on chat-enter / hint / STT final), NOT by
+        // conv.state() -- the turn's setState(sending->waiting_llm->speaking) calls run
+        // synchronously, so an effect would only ever observe the final 'speaking' (the lead-in
+        // filler animation, speakingMsgId=null) and miss the early phases. This also covers that
+        // filler phase (state 'speaking' but speakId null) so the question shows immediately.
+        let lastNonSys: { role: string } | null = null;
+        for (let i = msgs.length - 1; i >= 0; i--) { if (msgs[i].role !== 'system') { lastNonSys = msgs[i]; break; } }
+        const asking = lastNonSys?.role === 'user' && state !== 'idle' && state !== 'listening';
         untracked(() => {
             if (completed !== this.lastCompleted) {
                 this.lastCompleted = completed;
-                if (this.subStage() === 'live') this.startFly(); // natural finish -> fly
+                if (this.subStage() === 'live') {
+                    // Desktop: keep the response on screen (HELD) until the next request.
+                    // Mobile/portrait: fly it toward the chat history, then hide.
+                    if (this.isDesktopWide()) this.subStage.set('held');
+                    else this.startFly();
+                }
                 return;
             }
             if (speaking && speakId != null) {
@@ -1573,8 +1656,16 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
                 this.subCurrentId.set(speakId);
                 return;
             }
+            if (asking) {
+                // Show the YELLOW question reference INSTANTLY (no assistant message yet); the
+                // response area stays empty until the answer arrives + body speech starts.
+                this.clearFlyTimer();
+                this.subCurrentId.set(null);
+                this.subStage.set('live');
+                return;
+            }
             if (!speaking && this.subStage() === 'live') {
-                // Stop/interrupt mid-speech: quick fade back to hints, no fly.
+                // Stop/interrupt or failed turn with no pending request -> hide.
                 this.clearFlyTimer();
                 this.subStage.set('hidden');
             }
@@ -1821,8 +1912,18 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         this.ragError.set('');
         if (on) {
             await this.reloadAssistant();
-            this.conv.ragFetcher = (q: string, mode?: 'rag' | 'capabilities' | 'textual_quote') =>
-                this.rag.ask(q, {
+            this.conv.ragFetcher = (q: string, mode?: 'rag' | 'capabilities' | 'textual_quote') => {
+                // Carry EXPLORE category context: if the immediately-preceding assistant turn
+                // was a category EXPLORE, resolve this follow-up WITHIN that category's
+                // chunk(s) so e.g. "cataratas" maps to the OJO list just shown (5189142).
+                let categoryChunkIds: string[] | undefined;
+                const msgs = this.conv.messages();
+                for (let i = msgs.length - 1; i >= 0; i--) {
+                    if (msgs[i].role !== 'assistant') continue;
+                    if (msgs[i].exploreCategory && msgs[i].sourceIds?.length) categoryChunkIds = msgs[i].sourceIds;
+                    break; // only the previous assistant turn carries the context
+                }
+                return this.rag.ask(q, {
                     assistantId: this.assistantId,
                     // namespace hint from the loaded assistant config; the Function
                     // prefers the assistant doc's ragCollection when it exists.
@@ -1834,7 +1935,9 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
                     // Per-session knowledge-mode override from the Ajustes selector
                     // (server falls back to the assistant default if this matches it).
                     knowledgeMode: this.kmOverride(),
+                    categoryChunkIds,
                 });
+            };
             // Intent router: greetings answered instantly (no RAG); info queries
             // go to the namespace. Per-assistant lists/reply override the defaults;
             // ambiguous utterances fall back to a one-shot LLM classification.

@@ -59,8 +59,8 @@ export interface RagDocument {
 }
 
 /** The five chunk strategies + 'auto' (auto-detect at ingest). */
-export type ChunkStrategy = 'auto' | 'fixed' | 'recursive' | 'pericopal' | 'section' | 'semantic';
-export const CHUNK_STRATEGIES: ChunkStrategy[] = ['auto', 'fixed', 'recursive', 'pericopal', 'section', 'semantic'];
+export type ChunkStrategy = 'auto' | 'fixed' | 'recursive' | 'pericopal' | 'section' | 'semantic' | 'category';
+export const CHUNK_STRATEGIES: ChunkStrategy[] = ['auto', 'fixed', 'recursive', 'pericopal', 'section', 'semantic', 'category'];
 
 /** Read-only chunk view (rag/{ns}/chunks/{chunkId}). Shape is tolerant: the
  *  Function owns the canonical schema; we only read common fields for display. */

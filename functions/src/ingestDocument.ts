@@ -22,7 +22,7 @@ import { assertSignedIn, assertAdmin } from './lib/auth';
 import { ENFORCE_ADMIN_ROLE } from './lib/flags';
 import { extractPdfText } from './lib/pdf';
 import { DEFAULT_CHUNK_SIZE, DEFAULT_OVERLAP } from './lib/chunk';
-import { ChunkStrategy, chunkByStrategy, detectStrategy, resolveStrategy } from './lib/chunking';
+import { ChunkStrategy, chunkByStrategy, detectStrategy, resolveStrategy, leadingCategory } from './lib/chunking';
 import { embedTextWithCounts, EMBED_MODEL, EMBED_DIMENSIONS } from './lib/embeddings';
 
 interface IngestRequest {
@@ -156,6 +156,10 @@ export const ingestDocument = onCall<IngestRequest, Promise<IngestResponse>>(
               docId,
               sourcePath: storagePath,
               chunkIndex: j,
+              // Category-aware ingestion (e.g. Grabovoi 'category' strategy): the leading
+              // ALL-CAPS header of the chunk, if any. '' for non-catalog chunks. Lets the
+              // EXPLORE branch enumerate "all conditions under OJO" via this tag.
+              category: leadingCategory(pieces[j]),
             },
             docId, // top-level too, for cheap equality filters / cleanup
             chunkIndex: j,

@@ -15,7 +15,7 @@ import {
   PhraseEntry,
   SuggestedPrompt as ConvPrompt,
 } from '../../lib/conversation-content/conv-content.models';
-import { AssistantConfig } from '../../lib/rag/rag.models';
+import { AssistantConfig, ResponseContract, ResponseContractKind } from '../../lib/rag/rag.models';
 import { Avatar } from '../../lib/avatars/avatar.models';
 import { RagNamespace } from '../../lib/rag/rag-admin.models';
 import { LlmConfigProfile, TestProfileResult, activeKeyOf, newProfileDraft } from '../../lib/llm-admin/llm-profile.models';
@@ -25,6 +25,65 @@ import { PIPER_VOICES, TtsLang } from '../../services/tts-lipsync.service';
 import { environment } from '../../../environments/environment';
 
 interface VoiceOpt { id: string; label: string; }
+
+/**
+ * Default responseContract template per kind. Pre-loaded when the admin picks a
+ * kind in the Assistant Manager so they get sensible prompt fragments / validation
+ * without writing them from scratch. 'plain' == today's behavior (empty fragments).
+ * ASCII-only (repo convention). Free-text is editable in the UI afterwards.
+ */
+export function defaultContractFor(kind: ResponseContractKind): ResponseContract {
+  const base: ResponseContract = {
+    kind,
+    outputSchema: {},
+    promptFragments: { structureInstructions: '', groundingRules: '' },
+    validation: [],
+    rendering: { spokenTemplate: '{text}', displayTemplate: '{text}' },
+  };
+  switch (kind) {
+    case 'sequence_catalog':
+      return {
+        ...base,
+        promptFragments: {
+          structureInstructions:
+            'Devuelve las SECUENCIAS NUMERICAS exactamente como aparecen en el CONTEXTO, ' +
+            'digito por digito, sin redondear ni completar. Para protocolos, ensambla las ' +
+            'secuencias del tema en orden.',
+          groundingRules:
+            'REGLA ABSOLUTA: los numeros son sagrados. Usa SOLO codigos presentes TEXTUALMENTE ' +
+            'en el CONTEXTO. Si falta el codigo del tema, dilo y NO inventes uno.',
+        },
+        validation: [{ id: 'codes-verbatim', type: 'verbatim_codes' }],
+      };
+    case 'cited_scripture':
+      return {
+        ...base,
+        promptFragments: {
+          structureInstructions:
+            'Responde fundado UNICAMENTE en el CONTEXTO biblico, citando libro, capitulo y ' +
+            'versiculo cuando corresponda. No parafrasees citas que no esten en el CONTEXTO.',
+          groundingRules:
+            'No encontre un pasaje en la base de conocimiento que sustente una respuesta a eso.',
+        },
+        validation: [{ id: 'require-citation', type: 'require_citation' }],
+      };
+    case 'sales':
+      return {
+        ...base,
+        promptFragments: {
+          structureInstructions:
+            'Responde como asesor de ventas: identifica la necesidad, recomienda opciones del ' +
+            'CONTEXTO con sus beneficios y cierra con una pregunta util.',
+          groundingRules:
+            'Recomienda SOLO productos/datos presentes en el CONTEXTO; no inventes precios ni stock.',
+        },
+        validation: [],
+      };
+    case 'plain':
+    default:
+      return base;
+  }
+}
 
 /**
  * Assistant Manager (admin) -- CRUD for `assistants/{id}`. An assistant binds an
@@ -153,9 +212,48 @@ interface VoiceOpt { id: string; label: string; }
               </label>
               <p class="hint" *ngIf="form.knowledgeMode === 'hybrid'">Distancia COSENO del mejor fragmento: MENOR = mas similar. Pasa a RAG si la distancia &lt;= umbral; si no, usa entrenamiento. Vacio = usa el valor global.</p>
 
+              <label class="toggle"><input type="checkbox" [(ngModel)]="form.categoryExplore" /> <span>Explorar por categoria (catalogos tipo Grabovoi)</span></label>
+              <p class="hint">Para catalogos con encabezados de categoria (OJO, PIEL...). Una peticion general ("algo para los ojos") lista las condiciones de esa categoria y pregunta cual; una condicion especifica devuelve su codigo exacto y verbatim. Dejar apagado para asistentes normales.</p>
+
               <label class="fld"><span>Persona (system prompt)</span>
                 <textarea rows="5" [(ngModel)]="form.systemPrompt" placeholder="Eres Sofia, una asesora experta de una tienda de muebles..."></textarea>
               </label>
+
+              <!-- ===== Response contract (assistant TYPE) ===== -->
+              <div class="llmbox">
+                <div class="llmhead">Contrato de respuesta</div>
+                <label class="fld"><span>Tipo de asistente (kind)</span>
+                  <select [ngModel]="contractKind" (ngModelChange)="onContractKindChange($event)">
+                    <option value="plain">Plain (texto normal, comportamiento por defecto)</option>
+                    <option value="sequence_catalog">Sequence catalog (Grabovoi: secuencias verbatim + protocolos)</option>
+                    <option value="cited_scripture">Cited scripture (Pastor: solo responde con respaldo del RAG)</option>
+                    <option value="sales">Sales (asistente de ventas)</option>
+                  </select>
+                </label>
+                <p class="hint">El kind define la FAMILIA de comportamiento; la intencion por turno sigue eligiendo el sub-camino. Plain = comportamiento actual. Cambiar el kind precarga una plantilla por defecto.</p>
+
+                <ng-container *ngIf="form.responseContract">
+                  <label class="fld"><span>Instrucciones de estructura (prompt)</span>
+                    <textarea rows="3" [(ngModel)]="form.responseContract.promptFragments.structureInstructions" placeholder="Como debe estructurar la respuesta el modelo..."></textarea>
+                  </label>
+                  <label class="fld"><span>Reglas de fundamento / grounding</span>
+                    <textarea rows="3" [(ngModel)]="form.responseContract.promptFragments.groundingRules" placeholder="Reglas de fundamento; para Pastor, mensaje de declinacion cuando no hay respaldo..."></textarea>
+                  </label>
+                  <label class="fld"><span>Plantilla hablada (spoken)</span>
+                    <input type="text" [(ngModel)]="form.responseContract.rendering.spokenTemplate" placeholder="{text}" />
+                  </label>
+                  <label class="fld"><span>Plantilla mostrada (display)</span>
+                    <input type="text" [(ngModel)]="form.responseContract.rendering.displayTemplate" placeholder="{text}" />
+                  </label>
+                  <label class="fld"><span>Output schema (JSON)</span>
+                    <textarea rows="4" [ngModel]="contractSchemaJson()" (ngModelChange)="contractSchemaJson.set($event)" placeholder="{}"></textarea>
+                  </label>
+                  <label class="fld"><span>Validation (JSON array)</span>
+                    <textarea rows="3" [ngModel]="contractValidationJson()" (ngModelChange)="contractValidationJson.set($event)" placeholder="[]"></textarea>
+                  </label>
+                  <p class="hint" *ngIf="contractJsonErr()" style="color:#ff9a9a">{{ contractJsonErr() }}</p>
+                </ng-container>
+              </div>
 
               <!-- ===== LLM config ===== -->
               <div class="llmbox">
@@ -410,6 +508,52 @@ export class AssistantManagerComponent implements OnInit {
   readonly namespaces = signal<RagNamespace[]>([]);
   readonly loading = signal(true);
   readonly saving = signal(false);
+
+  // --- Response-contract editor state. outputSchema/validation are edited as JSON
+  //     text (signals) and parsed back into form.responseContract on save. ---
+  readonly contractSchemaJson = signal('{}');
+  readonly contractValidationJson = signal('[]');
+  readonly contractJsonErr = signal('');
+
+  /** Current contract kind (defaults to plain when no contract is set). */
+  get contractKind(): ResponseContractKind {
+    return (this.form.responseContract?.kind ?? 'plain') as ResponseContractKind;
+  }
+
+  /** Pick a kind -> preload its default template (replaces the current contract). */
+  onContractKindChange(kind: ResponseContractKind): void {
+    this.form.responseContract = defaultContractFor(kind);
+    this.syncContractJsonFromForm();
+  }
+
+  /** Make sure form.responseContract exists so the template can bind to it. */
+  private ensureContract(): void {
+    if (!this.form.responseContract) this.form.responseContract = defaultContractFor('plain');
+  }
+
+  /** Refresh the JSON textareas from the current contract object. */
+  private syncContractJsonFromForm(): void {
+    const c = this.form.responseContract;
+    this.contractSchemaJson.set(JSON.stringify(c?.outputSchema ?? {}, null, 2));
+    this.contractValidationJson.set(JSON.stringify(c?.validation ?? [], null, 2));
+    this.contractJsonErr.set('');
+  }
+
+  /** Parse the JSON textareas back into the contract. Returns false on bad JSON. */
+  private applyContractJson(): boolean {
+    this.ensureContract();
+    try {
+      const schema = JSON.parse(this.contractSchemaJson() || '{}');
+      const validation = JSON.parse(this.contractValidationJson() || '[]');
+      this.form.responseContract!.outputSchema = (schema && typeof schema === 'object') ? schema : {};
+      this.form.responseContract!.validation = Array.isArray(validation) ? validation : [];
+      this.contractJsonErr.set('');
+      return true;
+    } catch (e: any) {
+      this.contractJsonErr.set('JSON invalido en el contrato: ' + (e?.message ?? String(e)));
+      return false;
+    }
+  }
   readonly error = signal('');
   readonly view = signal<'list' | 'edit'>('list');
   private thumbs = signal<Record<string, string | null>>({});
@@ -541,12 +685,16 @@ export class AssistantManagerComponent implements OnInit {
 
   newAssistant(): void {
     this.form = this.blank();
+    this.ensureContract();
+    this.syncContractJsonFromForm();
     this.error.set('');
     this.view.set('edit');
   }
 
   editAssistant(a: AssistantConfig): void {
     this.form = { ...a };
+    this.ensureContract();
+    this.syncContractJsonFromForm();
     this.error.set('');
     this.view.set('edit');
     this.greetingKwText = (a.greetingKeywords ?? []).join(', ');
@@ -565,6 +713,8 @@ export class AssistantManagerComponent implements OnInit {
     const id = this.form.id || this.avatarSvc.slugId(this.form.name || '');
     if (!id) { this.error.set('Enter a valid name.'); return; }
     this.form.id = id;
+    // Serialize the contract JSON editors back into the contract before saving.
+    if (!this.applyContractJson()) { this.error.set(this.contractJsonErr()); return; }
     this.saving.set(true);
     this.error.set('');
     try {

@@ -5,6 +5,7 @@
  *
  *   - useCustomResponses -> all false (inherit global default responses)
  *   - contentModifiedAt  -> serverTimestamp() if missing
+ *   - responseContract   -> DEFAULT_PLAIN_CONTRACT if missing (v5)
  *   - schemaVersion      -> current
  *
  * Keep this in sync with the client lib/rag/assistant-schema.ts version.
@@ -15,11 +16,12 @@ import { FieldValue } from 'firebase-admin/firestore';
 import { db } from './admin';
 import { assertSignedIn, assertAdmin } from './lib/auth';
 import { ENFORCE_ADMIN_ROLE } from './lib/flags';
+import { DEFAULT_PLAIN_CONTRACT } from './lib/response-contracts/types';
 
 const CALL_OPTS = { region: 'us-central1', cors: true } as const;
 
 /** Mirror of ASSISTANT_SCHEMA_VERSION (client). Bump together when adding fields. */
-const ASSISTANT_SCHEMA_VERSION = 4;
+const ASSISTANT_SCHEMA_VERSION = 5;
 
 interface BackfillResult {
   scanned: number;
@@ -57,6 +59,8 @@ export const backfillAssistants = onCall<unknown, Promise<BackfillResult>>(
       // v4: per-stage LLM profile overrides (null => unset => use global/legacy).
       if (d.summaryProfileId === undefined) patch.summaryProfileId = null;
       if (d.detailProfileId === undefined) patch.detailProfileId = null;
+      // v5: response contract -> plain default so old docs behave exactly as today.
+      if (d.responseContract == null) patch.responseContract = DEFAULT_PLAIN_CONTRACT;
       if (d.contentModifiedAt == null) patch.contentModifiedAt = FieldValue.serverTimestamp();
       if (Number(d.schemaVersion ?? 0) < ASSISTANT_SCHEMA_VERSION) patch.schemaVersion = ASSISTANT_SCHEMA_VERSION;
 

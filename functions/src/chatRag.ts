@@ -23,6 +23,10 @@ import { annotateGestures, stripGestureTags } from './lib/gestures';
 import { GESTURES_BODY_ENABLED } from './lib/flags';
 import { recordUsage } from './lib/usage';
 import { consumeOneQuota, ConsumeResult, QUOTA_COUNTS_DETAIL_SEPARATELY } from './lib/quota';
+import { getHandler } from './lib/response-contracts/registry';
+import { plainHandler } from './lib/response-contracts/plain.handler';
+import { DEFAULT_PLAIN_CONTRACT } from './lib/response-contracts/types';
+import type { HandlerContext, ResponseContract, ResponseSegment, ChunkLite, MediaLite, SourceLite, NormalizedAnswer } from './lib/response-contracts/types';
 
 const MAX_K = 8;
 const DEFAULT_K = 6;
@@ -48,6 +52,20 @@ const SUMMARY_MAX_TOKENS = 170;
 const DETAIL_MAX_TOKENS = 1250;
 /** Output-token cap for the SUGGESTIONS stage (3 short follow-up prompts as JSON). */
 const SUGGESTIONS_MAX_TOKENS = 128;
+/** Category-explore (Grabovoi): max COSINE distance for a query to count as "in the
+ *  catalog". Above this -> fall through to the normal rag path (honest decline). */
+const CATEGORY_RELEVANCE_MAX = 0.65;
+/** EXPLORE: how many example condition names the avatar SPEAKS (short -> fast TTS). */
+const EXPLORE_SPOKEN_EXAMPLES = 4;
+/** EXPLORE: how many condition names are returned as tappable follow-up CHIPS. */
+const EXPLORE_CHIPS_MAX = 15;
+/** PROTOCOL-ASSEMBLY intent (Grabovoi): "how to apply / protocolo / metodo for X" -> assemble
+ *  a full protocol. Matched on the accent-stripped query (see normMatch). NOTE: when the
+ *  behavior-profile refactor lands, gate this via behaviorProfile.protocolAssembly instead
+ *  of reusing the categoryExplore flag. */
+const PROTOCOL_RE = /(^|\s)(protocolo|protocolos|metodo|metodos|pasos|aplicacion|como se aplica|como aplico|como aplicar|como uso|como usar|como utilizo|como hago|como puedo|como corrijo|como corregir|como corrige|como trato|como tratar|como mejoro|como mejorar|como sano|como sanar|como curo|como curar|como alivio|como aliviar|como trabajo|como practico|que puedo hacer|que puedo usar|que puedo utilizar|que puedo tomar|que puedo aplicar|para mejorar|para corregir|para tratar|para sanar|para curar|para aliviar)(\s|$)/;
+/** Fixed retrieval seed for the METHOD chunks (cleansing + daily macrocommand + how-to). */
+const PROTOCOL_METHOD_SEED = 'limpieza del pasado macrocomando diario como aplicar el protocolo pasos generales del metodo';
 
 interface ChatRagBody {
   query?: string;
@@ -71,6 +89,10 @@ interface ChatRagBody {
   knowledgeMode?: 'rag_only' | 'hybrid' | 'training_only';
   /** STAGE 2: the chunk doc ids from stage 1's `sources` (keeps detail consistent). */
   chunkIds?: string[];
+  /** Category-explore follow-up: the chunk ids of the category just shown in EXPLORE.
+   *  EXACT-CODE resolves WITHIN these first, so a condition named right after the list
+   *  maps to that category (no fresh, possibly-wrong-category semantic search). */
+  categoryChunkIds?: string[];
 }
 
 interface MediaOut {
@@ -129,6 +151,13 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   let asstDetailMaxTokens: number | null = null;
   // Optional per-assistant DETAIL retrieval breadth override (config value).
   let asstDetailK: number | null = null;
+  // Category-explore behavior (Grabovoi): on a general/category request, list the
+  // category's condition NAMES and ask which one (no code); a specific condition gets
+  // its verbatim code. Off by default; enabled per assistant (assistants/{id}.categoryExplore).
+  let asstCategoryExplore = false;
+  // Per-assistant response contract (config-driven assistant TYPE). Absent -> plain
+  // (today's behavior). Read server-side so the client cannot tamper with it.
+  let contract: ResponseContract = DEFAULT_PLAIN_CONTRACT;
   const mode = body.mode === 'capabilities' ? 'capabilities'
     : body.mode === 'detail' ? 'detail'
     : body.mode === 'suggestions' ? 'suggestions'
@@ -162,6 +191,11 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
         if (Number.isFinite(dmt) && dmt > 0) asstDetailMaxTokens = Math.floor(dmt);
         const dk = Number(dep.get('detailK'));
         if (Number.isFinite(dk) && dk > 0) asstDetailK = Math.floor(dk);
+        asstCategoryExplore = dep.get('categoryExplore') === true;
+        const rc = dep.get('responseContract');
+        if (rc && typeof rc === 'object' && typeof (rc as Record<string, unknown>)['kind'] === 'string') {
+          contract = rc as ResponseContract;
+        }
       }
     }
   } catch (e) {
@@ -280,6 +314,40 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
     // not a resolvable scripture reference -> fall through to normal rag below.
   }
 
+  // === CATEGORY-EXPLORE (e.g. Grabovoi): two-step EXPLORE -> EXACT-CODE on the normal
+  // rag path. A SPECIFIC condition request returns its VERBATIM code; a GENERAL/category
+  // request lists the category's condition NAMES and asks which one (NO code emitted).
+  // Numbers are ALWAYS served verbatim from the retrieved chunk, never invented. Falls
+  // through to the normal rag path when nothing relevant matches. ===
+  // DIAGNOSTIC (unconditional): shows whether the Grabovoi branch is active for this turn.
+  logger.info('chatRag grabovoi_gate', {
+    assistantId, categoryExplore: asstCategoryExplore, contractKind: contract.kind, mode, knowledgeMode,
+    protocolIntent: PROTOCOL_RE.test(normMatch(query)),
+  });
+  // sequence_catalog contract OR the legacy categoryExplore flag activates the
+  // Grabovoi family. The per-turn intent (PROTOCOL_RE / explore vs exact) still
+  // routes within it (decision: kind selects family, intent routes sub-path).
+  const sequenceCatalogActive = asstCategoryExplore || contract.kind === 'sequence_catalog';
+  if (sequenceCatalogActive && mode === 'rag' && knowledgeMode !== 'training_only') {
+    // PROTOCOL-ASSEMBLY first: "protocolo / metodo / como se aplica / que puedo hacer para X"
+    // -> assemble a full protocol (cleansing + macrocommand + VERBATIM topic codes + how-to).
+    // (Future: gate via behaviorProfile.protocolAssembly instead of reusing categoryExplore.)
+    if (PROTOCOL_RE.test(normMatch(query))) {
+      const detMax = asstDetailMaxTokens
+        ?? (typeof stageModels.detailMaxTokens === 'number' ? stageModels.detailMaxTokens : DETAIL_MAX_TOKENS);
+      const built = await answerProtocolAssembly(res, {
+        assistantId, llmProfileId, persona, language, query, namespace, k, quota,
+        overrideProfileId: asstDetailProfileId, globalProfileId: stageModels.detailProfileId,
+        detailMaxTokens: detMax, stage,
+      });
+      if (built) return;
+    }
+    const served = await answerCategoryExplore(res, {
+      namespace, query, k, quota, stage, categoryChunkIds: body.categoryChunkIds ?? [],
+    });
+    if (served) return;
+  }
+
   // --- KNOWLEDGE MODE: rag_only | hybrid | training_only ---
   // training_only SKIPS retrieval entirely (no embed, no findNearest -> saves cost
   // + latency). rag_only/hybrid retrieve; hybrid then compares the best chunk's
@@ -374,6 +442,7 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   let summary = '';
   let detailText = '';
   let chosenMediaIds: string[] = [];
+  let segments: ResponseSegment[] | undefined;
   // Captured for lightweight usage tracking (estimated tokens; recorded AFTER res.json).
   let usageSummary: { model: string; provider: string; prompt: string; output: string } | null = null;
   try {
@@ -388,40 +457,57 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
       assistantId, source, profile: profile.name, scope: profile.scope,
       provider: profile.provider, model: profile.model, mediaCandidates: candidates.length,
     });
-    // STAGE 1: summary ONLY (+ media-selection directive when candidates exist).
-    // The detail is deferred to the on-demand 'detail' stage, so this prompt is
-    // short and the output is token-capped -> the avatar starts speaking fast.
-    // Knowledge-mode instruction: chunk-grounded (summary-only) vs training fallback
-    // (answer from general knowledge, clearly flagged; never fabricate citations).
-    const instruction = useTraining ? TRAINING_DIRECTIVE : SUMMARY_ONLY_DIRECTIVE;
-    let genContext = context;
-    let genPersona = `${persona ? persona + '\n\n' : ''}${instruction}`;
-    if (candidates.length) {
-      const catalog = candidates.map((m) => `- ${m.id}: ${m.title}${m.description ? ' - ' + m.description : ''}`).join('\n');
-      genContext = `${context}\n\n[MEDIA DISPONIBLE]\n${catalog}`;
-      genPersona = `${genPersona}\n\n${MEDIA_DIRECTIVE}`;
-    }
+    // STAGE 1 via the response-contract HANDLER. 'plain' = today's behavior, byte-
+    // identical (SUMMARY_ONLY/TRAINING + MEDIA directive + [MEDIA DISPONIBLE] catalog,
+    // <<MEDIA>> + <<SUMMARY>>/<<DETAIL>> parse). Non-plain kinds run the same
+    // buildPrompt -> LLM -> parse -> validate -> normalize, and on any validate/parse
+    // failure FALL BACK to the plain handler so the user never sees a raw error.
+    const handler = getHandler(contract.kind);
+    const handlerChunks: ChunkLite[] = matched.map((d) => ({
+      id: d.id, text: (d.get('text') ?? '').toString(), metadata: d.get('metadata') ?? {},
+    }));
+    const handlerCtx: HandlerContext = {
+      query, language, persona, contract, context,
+      chunks: handlerChunks,
+      candidates: candidates as unknown as MediaLite[],
+      sources: sources as SourceLite[],
+      useTraining,
+    };
+    const built = handler.buildPrompt(handlerCtx);
     // Cap output tokens for the spoken summary (clone keeps key/secret lookup intact).
     // Spoken-summary cap: per-assistant override -> global default -> code default.
     const summaryMaxTokens = asstSummaryMaxTokens
       ?? (typeof stageModels.summaryMaxTokens === 'number' ? stageModels.summaryMaxTokens : SUMMARY_MAX_TOKENS);
     const summaryProfile = { ...profile, maxOutputTokens: Math.min(profile.maxOutputTokens ?? summaryMaxTokens, summaryMaxTokens) };
     // ONE LLM call. Media relevance selection is IN-BAND (the model appends a
-    // <<MEDIA: ids>> line parsed below) -- there is NO separate 2nd LLM call.
+    // <<MEDIA: ids>> line parsed by the handler) -- there is NO separate 2nd LLM call.
     const tGen = Date.now();
-    const result = await generateFromProfile(summaryProfile, query, genContext, language, genPersona);
-    stage(`6 STAGE-1 LLM generation (${profile.provider}/${profile.model}, summary-only + media-tag, capped, ONE call)`, tGen);
+    const result = await generateFromProfile(summaryProfile, query, built.genContext, language, built.genPersona);
+    stage(`6 STAGE-1 LLM generation (${profile.provider}/${profile.model}, ${handler.kind}, capped, ONE call)`, tGen);
     const tParse = Date.now();
-    const afterMedia = extractMediaSelection(result.text);
-    chosenMediaIds = afterMedia.ids;
-    const split = extractSummaryDetail(afterMedia.text);
-    summary = split.summary;
-    detailText = split.detail;
+    let normalized: NormalizedAnswer;
+    try {
+      const parsed = handler.parse(result.text);
+      const v = handler.validate(parsed, handlerChunks);
+      if (!v.ok && handler.kind !== 'plain') {
+        logger.warn('chatRag contract validation failed -> plain fallback', { kind: handler.kind, reason: v.reason });
+        normalized = plainHandler.normalize(plainHandler.parse(result.text), handlerCtx);
+      } else {
+        normalized = handler.normalize(parsed, handlerCtx);
+      }
+    } catch (he) {
+      logger.warn('chatRag handler error -> plain fallback', { kind: handler.kind, error: String(he) });
+      normalized = plainHandler.normalize(plainHandler.parse(result.text), handlerCtx);
+    }
+    summary = normalized.summary;
+    detailText = normalized.detail;
+    chosenMediaIds = normalized.media.map((m) => m.id);
+    segments = normalized.segments;
     usageSummary = {
       model: profile.model, provider: profile.provider,
-      prompt: `${genPersona}\n${genContext}\n${query}`, output: result.text,
+      prompt: `${built.genPersona}\n${built.genContext}\n${query}`, output: result.text,
     };
-    stage('7 response parse (media-tag + summary/detail split; regex only, NO 2nd LLM call)', tParse);
+    stage('7 response parse (contract handler parse/validate/normalize; regex only, NO 2nd LLM call)', tParse);
   } catch (e: any) {
     const meta = e?.meta ?? {};
     const detail = e?.message ?? String(e);
@@ -480,6 +566,9 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
     // Stage-2 detail is ALWAYS fetchable here: RAG turns reuse the chunk ids; training
     // turns (no sources) expand from general knowledge. The client shows "Ver mas".
     detailAvailable: true,
+    // OPTIONAL: contract handlers may emit per-segment spoken/display units. Absent
+    // for plain (the client then keeps spoken == display == summary, today's render).
+    ...(segments && segments.length ? { segments } : {}),
     quota: { remaining: quota.remaining, allocated: quota.allocated, used: quota.used, warnThresholds: quota.warnThresholds, warnCrossed: quota.warnCrossed },
   });
   // Usage tracking (estimated, AFTER the response so it never adds latency).
@@ -919,6 +1008,288 @@ async function answerTextualQuote(
   return true;
 }
 
+// ---------------------------------------------------------------- category explore
+/** Normalize for MATCHING: lowercase, strip accents + punctuation, collapse spaces. */
+function normMatch(s: string): string {
+  return (s ?? '').toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9 ]/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** Trailing numeric code on an entry line (>= 4 digits; space/_/.- separators, stray ')'). */
+function splitNameCode(line: string): { name: string; code: string } | null {
+  const m = (line ?? '').trim().match(/^(.*\S)\s+([0-9][0-9 ._\-]*\)?)$/);
+  if (!m) return null;
+  if ((m[2].match(/[0-9]/g) ?? []).length < 4) return null;
+  return { name: m[1].trim(), code: m[2].trim() };
+}
+
+/** Parse a category chunk into its header (category) + condition entries (name + code). */
+function parseCategoryChunk(text: string): { category: string; entries: { name: string; code: string }[] } {
+  const lines = (text ?? '').split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+  let category = '';
+  const entries: { name: string; code: string }[] = [];
+  for (const l of lines) {
+    const nc = splitNameCode(l);
+    if (nc) { entries.push(nc); continue; }
+    // First code-less, all-caps line is the category header.
+    if (!category && !/[0-9]/.test(l) && l === l.toUpperCase()) category = l;
+  }
+  return { category, entries };
+}
+
+/**
+ * CATEGORY-EXPLORE handler (Grabovoi). Returns true when it answered, false to fall
+ * through to the normal rag path. NO LLM call: a specific condition's code is served
+ * VERBATIM from the retrieved chunk (never invented); a general/category request lists
+ * the category's condition NAMES and asks which one (no code).
+ */
+async function answerCategoryExplore(
+  res: Response,
+  args: { namespace: string; query: string; k: number; quota: ConsumeResult; categoryChunkIds?: string[]; stage: (l: string, f: number) => void },
+): Promise<boolean> {
+  const { namespace, query, k, quota, categoryChunkIds, stage } = args;
+  const chunksCol = db.collection('rag').doc(namespace).collection('chunks');
+  const qn = ' ' + normMatch(query) + ' ';
+  const quotaOut = {
+    remaining: quota.remaining, allocated: quota.allocated, used: quota.used,
+    warnThresholds: quota.warnThresholds, warnCrossed: quota.warnCrossed,
+  };
+  // EXACT match: the query CONTAINS a full condition name (parentheticals dropped).
+  const findExact = (entries: { name: string; code: string }[]): { name: string; code: string } | null => {
+    let best: { name: string; code: string } | null = null;
+    let bestLen = 0;
+    for (const e of entries) {
+      const core = normMatch(e.name.replace(/\(.*?\)/g, ' '));
+      if (core.length >= 4 && qn.includes(' ' + core + ' ') && core.length > bestLen) {
+        best = { name: e.name, code: e.code };
+        bestLen = core.length;
+      }
+    }
+    return best;
+  };
+  const serveExact = (best: { name: string; code: string }, srcId: string, scoped: boolean): boolean => {
+    const body = `El codigo de ${best.name.replace(/\s+/g, ' ')} es ${best.code}.`;
+    // suppressDetail: a bare code has no "Ver mas" (it must not regenerate an LLM list).
+    res.json({ summary: body, detail: '', body, gestureCommands: body, media: [], sources: [{ id: srcId, metadata: {} }], suppressDetail: true, quota: quotaOut });
+    logger.info('chatRag category-explore EXACT-CODE', { namespace, name: best.name, code: best.code, scoped });
+    return true;
+  };
+
+  // 0) SCOPED EXACT-CODE: a follow-up right after an EXPLORE resolves WITHIN the already
+  // shown category's chunk(s) by id (NO fresh search), so "cataratas" right after the OJO
+  // list maps to OJO's cataratas (5189142), never a fresh search that lands elsewhere.
+  if (categoryChunkIds && categoryChunkIds.length) {
+    try {
+      const scopedEntries: { name: string; code: string }[] = [];
+      let firstId = '';
+      for (const id of categoryChunkIds.slice(0, MAX_K)) {
+        const snap = await chunksCol.doc(id).get();
+        if (!snap.exists) continue;
+        if (!firstId) firstId = snap.id;
+        for (const e of parseCategoryChunk((snap.get('text') ?? '').toString()).entries) scopedEntries.push(e);
+      }
+      const sBest = findExact(scopedEntries);
+      if (sBest && firstId) return serveExact(sBest, firstId, true);
+    } catch (e) {
+      logger.warn('chatRag category-explore scoped lookup failed', { namespace, error: String(e) });
+    }
+    // Not found in the just-shown category -> fall through to a fresh search below.
+  }
+
+  let matched: FirebaseFirestore.QueryDocumentSnapshot[];
+  try {
+    const tEmbed = Date.now();
+    const qv = await embedText([query], 'RETRIEVAL_QUERY');
+    const vq = chunksCol.findNearest({
+      vectorField: 'embedding', queryVector: FieldValue.vector(qv[0]),
+      limit: Math.max(k, 12), distanceMeasure: 'COSINE', distanceResultField: 'vectorDistance',
+    });
+    matched = (await vq.get()).docs;
+    stage('CE1 category-explore retrieve (findNearest)', tEmbed);
+  } catch (e) {
+    logger.error('chatRag category-explore retrieval failed', { namespace, error: String(e) });
+    return false;
+  }
+  if (!matched.length) return false;
+  const bestDist = Number(matched[0].get('vectorDistance'));
+
+  const top = matched.slice(0, 6);
+  const all: { name: string; code: string; category: string }[] = [];
+  for (const d of top) {
+    const parsed = parseCategoryChunk((d.get('text') ?? '').toString());
+    const metaCat = ((d.get('metadata') as Record<string, unknown>)?.['category'] ?? '').toString().trim();
+    const cat = parsed.category || metaCat;
+    for (const e of parsed.entries) all.push({ name: e.name, code: e.code, category: cat });
+  }
+  if (!all.length) return false;
+
+  // 1) EXACT-CODE (fresh search): a named condition found in the retrieved chunks IS the
+  //    relevance signal, so this is NOT gated on distance.
+  const freshBest = findExact(all);
+  if (freshBest) return serveExact(freshBest, top[0].id, false);
+
+  // Distance gate applies ONLY to the EXPLORE fallback (don't list an irrelevant category).
+  if (Number.isFinite(bestDist) && bestDist > CATEGORY_RELEVANCE_MAX) return false;
+
+  // 2) EXPLORE: no specific condition matched -> SPEAK a short prompt with a few examples
+  // (token-friendly) and return the condition NAMES as follow-up CHIPS. No code emitted.
+  const topParsed = parseCategoryChunk((top[0].get('text') ?? '').toString());
+  const topCat = topParsed.category
+    || ((top[0].get('metadata') as Record<string, unknown>)?.['category'] ?? '').toString().trim();
+  if (!topCat) return false;
+  // Clean condition names: drop the trailing code is already done; drop parentheticals for
+  // brevity, collapse spaces, dedupe (order preserved).
+  const names: string[] = [];
+  const seen = new Set<string>();
+  for (const e of all) {
+    if (e.category !== topCat) continue;
+    const core = e.name.replace(/\(.*?\)/g, ' ').replace(/\s+/g, ' ').trim();
+    const key = normMatch(core);
+    if (core && key && !seen.has(key)) { seen.add(key); names.push(core); }
+  }
+  if (!names.length) return false;
+  // Spoken prompt: a few example names (lowercased) + "entre otras" -> short, fast TTS.
+  const examples = names.slice(0, EXPLORE_SPOKEN_EXAMPLES).map((n) => n.toLowerCase());
+  const more = names.length > examples.length ? ', entre otras' : '';
+  const spoken = `Tengo varias opciones como ${examples.join(', ')}${more}. Cual buscas?`;
+  // Chips: the condition names (tap one -> EXACT-CODE returns its verbatim code).
+  const suggestions = names.slice(0, EXPLORE_CHIPS_MAX);
+  // Carry the SHOWN category's chunk ids as sources + an exploreCategory marker, so the
+  // client passes them back as categoryChunkIds on the follow-up (scoped EXACT-CODE).
+  const catChunkIds = top
+    .filter((d) => {
+      const c = parseCategoryChunk((d.get('text') ?? '').toString()).category
+        || ((d.get('metadata') as Record<string, unknown>)?.['category'] ?? '').toString().trim();
+      return c === topCat;
+    })
+    .map((d) => d.id);
+  const srcIds = (catChunkIds.length ? catChunkIds : [top[0].id]);
+  res.json({
+    summary: spoken, detail: '', body: spoken, gestureCommands: spoken, media: [],
+    // suppressDetail: the chips ARE the follow-up; no "Ver mas" LLM list. sources still
+    // carry the category chunk ids for the scoped EXACT-CODE on the next turn.
+    sources: srcIds.map((id) => ({ id, metadata: {} })), suggestions, exploreCategory: topCat,
+    suppressDetail: true, quota: quotaOut,
+  });
+  logger.info('chatRag category-explore EXPLORE', { namespace, category: topCat, count: names.length, chips: suggestions.length });
+  return true;
+}
+
+/** Strip Markdown from a backend string (defense; the client also strips before TTS). */
+function stripMarkdown(s: string): string {
+  return (s ?? '')
+    .replace(/\*\*/g, '')
+    // Strip underscores used as Markdown emphasis, but PRESERVE underscores that join
+    // digits -- numeric-sequence separators (e.g. "219888_412_1289018") must survive.
+    // Only remove _ runs NOT flanked by digits on both sides.
+    .replace(/(?<![0-9])_+|_+(?![0-9])/g, '')
+    .replace(/[*`#>]/g, '')
+    .replace(/^[ \t]*[-]\s+/gm, '')
+    .replace(/[ \t]{2,}/g, ' ')
+    .trim();
+}
+
+/**
+ * NUMERIC-FIDELITY GUARD: replace any code-like token (>= 4 digits) in `text` that does
+ * NOT appear verbatim (digits-only) in `context` with an explicit gap note -> a fabricated
+ * or altered code can never reach the user. Reformatting (spaces/underscores) is tolerated
+ * because both sides are compared digits-only.
+ */
+function enforceVerbatimCodes(text: string, context: string): string {
+  const ctxCodes = new Set(
+    ((context ?? '').match(/[0-9][0-9 ._\-]{3,}/g) ?? []).map((c) => c.replace(/[^0-9]/g, '')).filter((d) => d.length >= 4),
+  );
+  return (text ?? '').replace(/[0-9][0-9 ._\-]{3,}/g, (m) => {
+    const d = m.replace(/[^0-9]/g, '');
+    if (d.length < 4) return m;
+    return ctxCodes.has(d) ? m : '[codigo no disponible en la fuente]';
+  });
+}
+
+/**
+ * PROTOCOL-ASSEMBLY handler (Grabovoi). Retrieves the topic's CODE chunks AND the method
+ * (cleansing/macrocommand) chunks separately, then has the LLM assemble a complete protocol
+ * -- prose reworded, codes VERBATIM. Returns a short spoken summary + full detail (Ver mas).
+ * Codes are guarded post-generation so none can be invented. Returns true when handled.
+ */
+async function answerProtocolAssembly(
+  res: Response,
+  args: {
+    assistantId: string; llmProfileId: string; persona: string; language: string;
+    query: string; namespace: string; k: number; quota: ConsumeResult;
+    overrideProfileId?: string; globalProfileId?: string; detailMaxTokens?: number;
+    stage: (label: string, from: number) => void;
+  },
+): Promise<boolean> {
+  const { assistantId, llmProfileId, persona, language, query, namespace, k, quota, stage } = args;
+  const chunksCol = db.collection('rag').doc(namespace).collection('chunks');
+  // 1) TWO retrievals: topic codes + method (cleansing/macrocommand) -- they live in
+  //    different chunks, so a single query embedding would miss one of them.
+  let topicCtx = '';
+  let methodCtx = '';
+  try {
+    const tCtx = Date.now();
+    const tv = await embedText([query], 'RETRIEVAL_QUERY');
+    const tq = chunksCol.findNearest({
+      vectorField: 'embedding', queryVector: FieldValue.vector(tv[0]), limit: Math.max(k, 14), distanceMeasure: 'COSINE',
+    });
+    topicCtx = (await tq.get()).docs.map((d) => (d.get('text') ?? '').toString()).join('\n---\n');
+    const mv = await embedText([PROTOCOL_METHOD_SEED], 'RETRIEVAL_QUERY');
+    const mq = chunksCol.findNearest({
+      vectorField: 'embedding', queryVector: FieldValue.vector(mv[0]), limit: 6, distanceMeasure: 'COSINE',
+    });
+    methodCtx = (await mq.get()).docs.map((d) => (d.get('text') ?? '').toString()).join('\n---\n');
+    stage('PA1 protocol retrieve (topic + method)', tCtx);
+  } catch (e) {
+    logger.error('chatRag protocol-assembly retrieval failed', { namespace, error: String(e) });
+    return false;
+  }
+  logger.info('chatRag protocol-assembly retrieved', { namespace, topicChars: topicCtx.length, methodChars: methodCtx.length });
+  if (!topicCtx.trim() && !methodCtx.trim()) return false;
+  const context =
+    '=== ESTRUCTURA DEL METODO (limpieza del pasado, macrocomando, como aplicar) ===\n' + methodCtx +
+    '\n\n=== CODIGOS DEL TEMA SOLICITADO (usa SOLO estos, verbatim) ===\n' + topicCtx;
+
+  // 2) LLM assembles (prose reworded; codes verbatim). One call via the DETAIL profile.
+  let summary = '';
+  let detail = '';
+  let usage: { model: string; provider: string; prompt: string; output: string } | null = null;
+  try {
+    const { profile } = await resolveStageProfile({
+      assistantId, overrideProfileId: args.overrideProfileId, globalProfileId: args.globalProfileId, legacyProfileId: llmProfileId,
+    });
+    const cap = args.detailMaxTokens && args.detailMaxTokens > 0 ? args.detailMaxTokens : DETAIL_MAX_TOKENS;
+    const genProfile = { ...profile, maxOutputTokens: Math.min(profile.maxOutputTokens ?? cap, cap) };
+    const genPersona = `${persona ? persona + '\n\n' : ''}${PROTOCOL_ASSEMBLY_DIRECTIVE}`;
+    const tGen = Date.now();
+    const result = await generateFromProfile(genProfile, query, context, language, genPersona);
+    stage(`PA2 protocol LLM assembly (${profile.provider}/${profile.model})`, tGen);
+    const split = extractSummaryDetail(result.text ?? '');
+    // 3) NUMERIC FIDELITY + no Markdown on BOTH parts.
+    summary = stripMarkdown(enforceVerbatimCodes(split.summary, context));
+    detail = stripMarkdown(enforceVerbatimCodes(split.detail, context));
+    if (!summary && detail) summary = detail.split(/(?<=[.!?])\s+/).slice(0, 2).join(' ');
+    usage = { model: profile.model, provider: profile.provider, prompt: `${genPersona}\n${context}\n${query}`, output: result.text ?? '' };
+  } catch (e: any) {
+    logger.error('chatRag protocol-assembly generation failed', { namespace, error: e?.message ?? String(e) });
+    return false;
+  }
+  if (!summary) return false;
+
+  const quotaOut = {
+    remaining: quota.remaining, allocated: quota.allocated, used: quota.used,
+    warnThresholds: quota.warnThresholds, warnCrossed: quota.warnCrossed,
+  };
+  res.json({
+    summary, detail, body: summary, gestureCommands: summary, media: [], sources: [], quota: quotaOut,
+  });
+  logger.info('chatRag protocol-assembly served', { namespace, summaryChars: summary.length, detailChars: detail.length });
+  if (usage) {
+    void recordUsage(assistantId, { stage: 'detail', model: usage.model, provider: usage.provider, promptText: usage.prompt, outputText: usage.output });
+  }
+  return true;
+}
+
 /** Parse the LLM output into up to 3 trimmed suggestion strings (strict-JSON tolerant). */
 function parseSuggestions(raw: string): string[] {
   const text = (raw ?? '').toString();
@@ -972,37 +1343,16 @@ const CAPABILITIES_DIRECTIVE =
   'No inventes datos, cifras ni documentos especificos, y no consultes ninguna base de conocimiento. ' +
   'Si un metadato falta, simplemente omitelo. Tono natural, breve y cordial, en el mismo idioma de la pregunta.';
 
-/**
- * STAGE 1 directive: summary ONLY. Short, spoken text -> minimal tokens -> fast.
- * No <<DETAIL>> section is requested here (detail is deferred to the detail stage).
- */
-const SUMMARY_ONLY_DIRECTIVE =
-  'Primero da la RESPUESTA DIRECTA a la pregunta en una frase. Luego aprovecha el espacio disponible ' +
-  'para agregar los detalles de apoyo MAS relevantes tomados del CONTEXTO: nombra algunos elementos de ' +
-  'una lista, da ejemplos concretos o un poco de contexto util, en vez de quedarte solo en el dato o la ' +
-  'cifra principal. Apunta a 3 a 5 frases (aproximadamente 60 a 90 palabras): llena el espacio de forma ' +
-  'util, sin relleno ni repeticiones. Fundado UNICAMENTE en el CONTEXTO: NO inventes ni completes datos, ' +
-  'listas, nombres, cifras, citas ni versiculos que no esten en el CONTEXTO; si el CONTEXTO no lo trae, ' +
-  'no lo agregues. Cita las referencias cuando correspondan. Sin saludos ni despedidas y sin marcadores. ' +
-  'Este texto se hablara en voz alta, en el mismo idioma de la pregunta; termina siempre la idea (sin ' +
-  'cortes a media frase). El analisis COMPLETO y extenso se mostrara aparte (boton "Ver mas"), asi que ' +
-  'aqui da un resumen util y enriquecido, NO la version larga.';
+// SUMMARY_ONLY_DIRECTIVE moved to lib/response-contracts/plain-core.ts (used by the
+// plain handler that now owns the STAGE-1 generic path).
 
 /** Default hybrid relevance threshold: COSINE DISTANCE (lower = more similar).
  *  The best chunk "passes" when its distance <= this. Tune via config/ragModels
  *  (relevanceThreshold) or per-assistant (assistants/{id}.relevanceThreshold). */
 const DEFAULT_RELEVANCE_THRESHOLD = 0.45;
 
-/** Training-fallback instruction (hybrid retrieval failed OR training_only). Answer
- *  from general knowledge (NO "general info" prefix), and NEVER fabricate
- *  citations/verses. The assistant persona (e.g. Pastor-IA's no-fabricated-scripture
- *  rule) is still prepended, so its safety rules also apply here. Short (spoken summary). */
-const TRAINING_DIRECTIVE =
-  'No hay informacion relevante en la base de conocimiento para esta consulta, ' +
-  'asi que responde desde tu CONOCIMIENTO GENERAL en 1 a 2 frases cortas (MAXIMO 30 palabras), ' +
-  'en el mismo idioma de la pregunta. ' +
-  'NUNCA inventes ni completes citas textuales, versiculos, cifras o referencias que no puedas verificar; ' +
-  'si no lo sabes con certeza, dilo abiertamente. Sin saludos ni despedidas ni marcadores.';
+// TRAINING_DIRECTIVE moved to lib/response-contracts/plain-core.ts (used by the
+// plain handler). DETAIL_TRAINING_DIRECTIVE (below) stays: it is used by answerDetail.
 
 /** Detail-stage training directive: long-form GENERAL-KNOWLEDGE analysis when stage 1
  *  had no chunks (training_only or hybrid fallback). No context needed; persona safety
@@ -1030,6 +1380,28 @@ const DETAIL_ONLY_DIRECTIVE =
   'correspondan. Escribelo en el mismo idioma de la pregunta, sin saludos ni despedidas y sin marcadores. ' +
   'CIERRA la idea dentro del espacio disponible (no te cortes a media lista). Este texto se mostrara como ' +
   'lectura (no se habla).';
+
+/**
+ * PROTOCOL-ASSEMBLY directive (Grabovoi). Joins REAL retrieved pieces into a usable
+ * protocol. The PROSE (cleansing steps, application guidance) MAY be reworded; the
+ * NUMERIC CODES are sacred -> copied VERBATIM from the CONTEXT, never invented/rounded/
+ * completed. Output is split into a short spoken <<SUMMARY>> + a full <<DETAIL>>. Plain
+ * text, NO Markdown.
+ */
+const PROTOCOL_ASSEMBLY_DIRECTIVE =
+  'Arma un PROTOCOLO COMPLETO y claro para lo que pide el usuario, integrando las piezas del CONTEXTO. ' +
+  'Estructura el protocolo asi: 1) Limpieza del Pasado (explica los pasos con tus propias palabras, sin ' +
+  'cambiar el sentido); 2) Macrocomando diario, si aparece en el CONTEXTO; 3) las SECUENCIAS NUMERICAS ' +
+  'especificas para el tema solicitado, copiadas TAL CUAL del CONTEXTO, digito por digito, sin cambiar, ' +
+  'redondear, completar ni inventar; 4) como aplicarlas (por ejemplo, una debajo de la otra, nunca en la ' +
+  'misma linea, concentrandose y visualizando la mejora), segun lo describe el CONTEXTO. ' +
+  'REGLA ABSOLUTA: los numeros son sagrados. Usa SOLO codigos que esten TEXTUALMENTE en el CONTEXTO. Si no ' +
+  'encuentras el codigo del tema en el CONTEXTO, dilo claramente y NO inventes uno: entrega el resto del ' +
+  'protocolo e indica que falta ese codigo especifico. ' +
+  'Devuelve DOS partes: primero una linea "<<SUMMARY>>" y debajo un resumen HABLADO breve (1 a 2 frases) que ' +
+  'mencione el tema y la secuencia principal; despues una linea "<<DETAIL>>" y debajo el PROTOCOLO COMPLETO ' +
+  'con los pasos. Escribe en TEXTO PLANO, SIN Markdown (sin asteriscos, almohadillas ni guiones de lista), ' +
+  'en el mismo idioma de la pregunta, sin saludos ni despedidas.';
 
 /**
  * SUGGESTIONS directive: exactly 3 short, natural follow-up prompts the user might ask
@@ -1072,12 +1444,7 @@ function extractSummaryDetail(raw: string): { summary: string; detail: string } 
   return { summary: summary || detail, detail: summary ? detail : '' };
 }
 
-/** Directive appended to the persona so the model can select relevant media. */
-const MEDIA_DIRECTIVE =
-  'Si alguna de las MEDIA DISPONIBLE es util para la pregunta, agrega al FINAL de tu respuesta ' +
-  'EXACTAMENTE una linea con el formato <<MEDIA: id1,id2>> listando solo los ids relevantes. ' +
-  'Si ninguna aplica, NO agregues la linea. No menciones los ids dentro del texto hablado; puedes ' +
-  'referirte a la media de forma natural (por ejemplo "tengo una imagen de esto").';
+// MEDIA_DIRECTIVE moved to lib/response-contracts/plain-core.ts (used by the plain handler).
 
 /** Unique docIds across the retrieved chunks (top-level docId or metadata.docId). */
 function collectDocIds(matched: FirebaseFirestore.QueryDocumentSnapshot[]): string[] {
@@ -1123,12 +1490,5 @@ async function gatherDocMedia(namespace: string, docIds: string[]): Promise<Medi
   return out.slice(0, 24);
 }
 
-/** Strip the trailing <<MEDIA: ...>> tag and return the chosen ids + clean text. */
-function extractMediaSelection(raw: string): { text: string; ids: string[] } {
-  const text0 = raw ?? '';
-  const m = text0.match(/<<\s*MEDIA\s*:\s*([^>]*)>>/i);
-  if (!m) return { text: text0.trim(), ids: [] };
-  const ids = m[1].split(/[,\s]+/).map((s) => s.trim()).filter(Boolean);
-  const text = text0.replace(m[0], '').trim();
-  return { text, ids };
-}
+// extractMediaSelection moved to lib/response-contracts/plain-core.ts (used by the
+// plain handler that now owns the STAGE-1 generic parse).
