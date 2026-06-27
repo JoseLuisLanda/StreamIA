@@ -273,3 +273,45 @@ export function splitIntoChunksWithOffsets(text: string, maxLen = 220): TextChun
     if (out.length === 0 && text.trim()) out.push({ text: text.trim(), start: 0 });
     return out;
 }
+
+/**
+ * Split text into ONE chunk PER SENTENCE (offsets preserved), WITHOUT grouping
+ * sentences together. Each chunk is a complete prosodic unit that Piper can
+ * synthesize starting and ending in natural silence -- so progressive playback
+ * joins clips at sentence boundaries (no mid-sentence/mid-word cut, which makes the
+ * independent Piper clips sound slurred/garbled at the seam).
+ *
+ * Only a pathologically long single sentence (> hardMax) is sub-split, and then
+ * ONLY at word boundaries (never mid-word) as a last resort to bound clip size.
+ */
+export function splitIntoSentencesWithOffsets(text: string, hardMax = 320): TextChunk[] {
+    const out: TextChunk[] = [];
+    const re = /[^.!?¡¿…]+[.!?…]*/g;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(text)) !== null) {
+        const piece = m[0];
+        const start = m.index + (piece.length - piece.trimStart().length);
+        const trimmed = piece.trim();
+        if (!trimmed) continue;
+        if (trimmed.length <= hardMax) {
+            out.push({ text: trimmed, start });
+            continue;
+        }
+        // Last resort: a single sentence longer than hardMax -> split at word boundaries.
+        let rest = trimmed;
+        let restStart = start;
+        while (rest.length > hardMax) {
+            let cut = rest.lastIndexOf(' ', hardMax);
+            if (cut < hardMax * 0.5) cut = hardMax; // no space found early -> hard cut
+            out.push({ text: rest.slice(0, cut).trim(), start: restStart });
+            restStart += cut;
+            rest = rest.slice(cut);
+            const lead = rest.length - rest.trimStart().length;
+            restStart += lead;
+            rest = rest.trimStart();
+        }
+        if (rest.trim()) out.push({ text: rest.trim(), start: restStart });
+    }
+    if (out.length === 0 && text.trim()) out.push({ text: text.trim(), start: 0 });
+    return out;
+}

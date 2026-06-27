@@ -535,9 +535,12 @@ export class ConversationService {
         if (opts.provider === 'piper') this.revealingMsgId.set(msg.id);
         this.setState('speaking');
         try {
-            // singlePass: the lead-in gesture covers synthesis latency, so we
-            // compile the full body as one plan rather than splitting early.
-            await this.tts.speak(trimmed, { ...opts, singlePass: true });
+            // singlePass ONLY when a lead-in gesture covers the synth latency: then
+            // pre-compiling the whole block as one plan is fine. With NO lead-in (e.g.
+            // detail / "Ver mas" playback), force the PROGRESSIVE per-segment path so the
+            // avatar starts speaking on the first sentence instead of waiting for the whole
+            // (possibly very long) block to synthesize -- minimizes time-to-first-word.
+            await this.tts.speak(trimmed, { ...opts, singlePass: !!lead });
         } catch (e: any) {
             this.fail('TTS: ' + (e?.message ?? e));
         } finally {

@@ -10,7 +10,8 @@ import { GesturePlayerService, now as wallNow } from './gesture-player.service';
 import { Viseme, VISEME_TO_ARKIT, BlendWeights } from '../lib/lipsync/viseme-map';
 import { buildSpeechTimeline, SpeechTimelineSegment, TimelineGesture, EXPRESSION_REGISTRY } from '../lib/lipsync/speech-timeline';
 import {
-    compilePerformance, expandSegments, planToJson, revealAtTime, ExpandedSegment, PerformancePlan, CompilerDeps
+    compilePerformance, expandSegments, expandSegmentsBySentence, planToJson, revealAtTime,
+    ExpandedSegment, PerformancePlan, CompilerDeps
 } from '../lib/performance/performance-compiler';
 import { PiperClient } from '../lib/performance/piper-client';
 import { TimingRecorder, speechStartLine, SpeechStartSummary } from '../lib/performance/timing';
@@ -385,9 +386,16 @@ export class TtsLipsyncService {
         // lastPerformance) was always smooth; now the first play matches it.
         const totalSpeechChars = expanded.reduce((a, s) => a + (s.kind === 'speech' ? s.text.length : 0), 0);
         const fullPrecompile = opts.singlePass === true || totalSpeechChars <= FULL_PRECOMPILE_MAX_CHARS;
+        // Progressive path (long, non-singlePass -- e.g. detail/"Ver mas"): split into ONE
+        // unit PER SENTENCE so each independent Piper clip is a complete prosodic unit that
+        // starts/ends in natural silence. This makes the seams fall on sentence boundaries
+        // (no mid-sentence/mid-word cut -> no slurred/garbled join), while the first (short)
+        // sentence still synthesizes fast -> low time-to-first-word, and the sliding-window
+        // prefetch keeps later sentences ready. Short/singlePass replies are unchanged.
+        const unitSource = fullPrecompile ? expanded : expandSegmentsBySentence(segments);
         const units: ExpandedSegment[][] = fullPrecompile
             ? [expanded]
-            : expanded.map(s => [s]);
+            : unitSource.map(s => [s]);
         const unitGestures = this.assignGesturesToUnits(units, gestures);
 
         this.state.set('synthesizing');

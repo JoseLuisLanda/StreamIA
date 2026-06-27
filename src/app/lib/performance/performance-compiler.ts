@@ -11,7 +11,8 @@
  */
 
 import {
-    VisemeFrame, textToVisemes, scaleTimeline, splitIntoChunksWithOffsets, TextChunk
+    VisemeFrame, textToVisemes, scaleTimeline, splitIntoChunksWithOffsets,
+    splitIntoSentencesWithOffsets, TextChunk
 } from '../lipsync/text-to-visemes';
 import { SpeechTimelineSegment, TimelineGesture } from '../lipsync/speech-timeline';
 import { CYCLE_BASE_SECONDS, SPEED_MULTIPLIER_MIN, SPEED_MULTIPLIER_MAX, SpeedParam } from '../gestures/gesture-library';
@@ -59,6 +60,29 @@ export function expandSegments(segments: SpeechTimelineSegment[], maxLen = 180):
     for (const segment of segments) {
         if (segment.kind !== 'speech') { out.push(segment); continue; }
         const chunks: TextChunk[] = splitIntoChunksWithOffsets(segment.text, maxLen);
+        for (const chunk of chunks) {
+            out.push({
+                kind: 'speech',
+                text: chunk.text,
+                sourceStart: segment.sourceStart + chunk.start,
+                sourceEnd: segment.sourceStart + chunk.start + chunk.text.length,
+            });
+        }
+    }
+    return out;
+}
+
+/**
+ * Like expandSegments, but each speech segment is split into ONE unit PER SENTENCE
+ * (no length grouping). Used for PROGRESSIVE playback so each prefetched Piper clip
+ * is a whole sentence -- it starts/ends in natural silence and the seams between
+ * clips fall on sentence boundaries (no mid-sentence cut -> no slurred/garbled join).
+ */
+export function expandSegmentsBySentence(segments: SpeechTimelineSegment[]): ExpandedSegment[] {
+    const out: ExpandedSegment[] = [];
+    for (const segment of segments) {
+        if (segment.kind !== 'speech') { out.push(segment); continue; }
+        const chunks: TextChunk[] = splitIntoSentencesWithOffsets(segment.text);
         for (const chunk of chunks) {
             out.push({
                 kind: 'speech',
