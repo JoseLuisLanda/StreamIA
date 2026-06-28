@@ -1261,35 +1261,47 @@ async function answerTopicList(
     return false; // fall through to normal RAG
   }
 
-  // Significant topic tokens (light plural stemming: drop a trailing 's' on words >=4 chars),
-  // minus stopwords. Lets "ojos" match "ojo", "muelas" match "muela", phrasing match names.
+  // Significant topic tokens (ES plural stemming: "-es" -> "" then "-s" -> ""), minus stopwords.
+  // Bidirectional substring match per token handles morphology ("dolores"~"dolor", "ojos"~"ojo").
   const STOP = new Set(['para', 'que', 'los', 'las', 'del', 'una', 'uno', 'con', 'por', 'ser', 'uso',
     'usar', 'codigo', 'codigos', 'numero', 'numeros', 'secuencia', 'secuencias', 'sirve', 'hay',
-    'tienes', 'dame', 'lista', 'listas', 'todas', 'todos', 'cuales', 'mejor', 'sobre']);
-  const destem = (w: string): string => (w.length >= 4 && w.endsWith('s') ? w.slice(0, -1) : w);
-  const topicTokens = normTopic.split(' ').map(destem).filter((t) => t.length >= 3 && !STOP.has(t));
+    'tienes', 'dame', 'lista', 'listas', 'todas', 'todos', 'cuales', 'mejor', 'sobre', 'general',
+    'algo', 'tengo', 'tener']);
+  const destem = (w: string): string =>
+    w.length >= 5 && w.endsWith('es') ? w.slice(0, -2)
+      : w.length >= 4 && w.endsWith('s') ? w.slice(0, -1)
+        : w;
+  const tokensOf = (s: string): string[] =>
+    normMatch(s).split(' ').map(destem).filter((t) => t.length >= 3 && !STOP.has(t));
+  const topicTokens = tokensOf(topic);
+  const wordMatch = (words: string[], t: string): boolean =>
+    words.some((w) => (w.length >= 4 && t.length >= 4) ? (w.includes(t) || t.includes(w)) : w === t);
 
-  // Match entries by topic: whole-phrase containment OR all significant topic tokens present
-  // (both stemmed) in the (parenthetical-stripped) entry name.
-  const hits: { name: string; code: string }[] = [];
+  // Score each entry by how many topic tokens it matches; keep the BEST-scoring entries. This
+  // PREFERS a precise full match ("dolor de rodillas" -> DOLOR DE RODILLAS) but FALLS BACK to a
+  // partial match ("dolor de pies" -> all "dolor" sequences) instead of returning nothing.
+  const scored: { name: string; code: string; score: number }[] = [];
   const seen = new Set<string>();
   for (const d of docs) {
     for (const e of parseCategoryChunk((d.get('text') ?? '').toString()).entries) {
       const core = e.name.replace(/\(.*?\)/g, ' ').replace(/\s+/g, ' ').trim();
       const nn = normMatch(core);
       if (!nn) continue;
-      const nnStem = nn.split(' ').map(destem).join(' ');
-      const phraseHit = nn.includes(normTopic) || normTopic.includes(nn);
-      const tokenHit = topicTokens.length > 0 && topicTokens.every((t) => nnStem.includes(t));
-      if (!phraseHit && !tokenHit) continue;
+      const words = nn.split(' ').map(destem).filter((w) => w.length >= 3);
+      let score = topicTokens.reduce((acc, t) => acc + (wordMatch(words, t) ? 1 : 0), 0);
+      if (normTopic.length >= 4 && nn.includes(normTopic)) score = Math.max(score, Math.max(1, topicTokens.length));
+      if (score <= 0) continue;
       const key = nn + '|' + e.code.replace(/[^0-9]/g, '');
       if (seen.has(key)) continue;
       seen.add(key);
-      hits.push({ name: core, code: e.code.trim() });
-      if (hits.length >= 20) break;
+      scored.push({ name: core, code: e.code.trim(), score });
     }
-    if (hits.length >= 20) break;
   }
+  const maxScore = scored.reduce((m, s) => Math.max(m, s.score), 0);
+  const hits: { name: string; code: string }[] = scored
+    .filter((s) => s.score === maxScore)
+    .slice(0, 20)
+    .map((s) => ({ name: s.name, code: s.code }));
 
   logger.info('chatRag topic-list', { namespace, topic, scanned: docs.length, hits: hits.length });
 
