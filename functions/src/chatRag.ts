@@ -59,22 +59,34 @@ const CATEGORY_RELEVANCE_MAX = 0.65;
 const EXPLORE_SPOKEN_EXAMPLES = 4;
 /** EXPLORE: how many condition names are returned as tappable follow-up CHIPS. */
 const EXPLORE_CHIPS_MAX = 15;
-/** PROTOCOL-ASSEMBLY intent (Grabovoi): "how to apply / protocolo / metodo for X" -> assemble
- *  a full protocol. Matched on the accent-stripped query (see normMatch). NOTE: when the
- *  behavior-profile refactor lands, gate this via behaviorProfile.protocolAssembly instead
- *  of reusing the categoryExplore flag. */
-const PROTOCOL_RE = /(^|\s)(protocolo|protocolos|metodo|metodos|pasos|aplicacion|como se aplica|como aplico|como aplicar|como uso|como usar|como utilizo|como hago|como puedo|como corrijo|como corregir|como corrige|como trato|como tratar|como mejoro|como mejorar|como sano|como sanar|como curo|como curar|como alivio|como aliviar|como trabajo|como practico|que puedo hacer|que puedo usar|que puedo utilizar|que puedo tomar|que puedo aplicar|para mejorar|para corregir|para tratar|para sanar|para curar|para aliviar)(\s|$)/;
 /** Fixed retrieval seed for the METHOD chunks (cleansing + daily macrocommand + how-to). */
 const PROTOCOL_METHOD_SEED = 'limpieza del pasado macrocomando diario como aplicar el protocolo pasos generales del metodo';
 
-/** CONCEPT/definitional intent (Grabovoi): "what is / what does X mean / explain X" -> these
- *  must NOT be hijacked by the category-explore/EXACT-CODE machinery (which dumps chunk names
- *  as a garbled options list). They fall through to the normal RAG path, which redacts prose
- *  grounded in the chunks. Matched on the accent-stripped query (normMatch). */
-const CONCEPT_RE = /(^|\s)(que es|que es un|que es una|que es el|que es la|que son|que significa|que significan|que quiere decir|para que sirve|para que sirven|explica|explicame|como funciona|en que consiste|definicion de|que representa)(\s|$)/;
-/** Words that signal the user explicitly wants a CODE/number (so a "que es el codigo de X"
- *  stays on the verbatim EXACT-CODE path instead of being treated as a concept question). */
-const CODE_WORDS_RE = /(codigo|codigos|numero|numeros|secuencia|secuencias|cifra|cifras)/;
+/** Grabovoi intent decided by the LLM classifier (replaces the old regex gate):
+ *  - protocol : full protocol/method to APPLY something (steps, how-to).
+ *  - catalog  : the code/sequence of ONE named condition, OR a vague "what do you have for X".
+ *  - list     : an explicit list/enumeration of several sequences for a topic.
+ *  - concept  : a definition / "what is / what does X mean" question. */
+type GrabovoiIntent = 'protocol' | 'catalog' | 'list' | 'concept';
+/** Classifier result: the route + the extracted TOPIC (subject of the query, no question words).
+ *  The topic feeds the DETERMINISTIC list handler so codes are matched/scanned by code, never
+ *  invented or mis-associated by the LLM. */
+interface GrabovoiIntentResult { mode: GrabovoiIntent; topic: string; }
+/** Cheap JSON classification prompt. Routing + topic extraction ONLY; execution stays
+ *  deterministic (verbatim codes, chunk scan, anti-hallucination unchanged). */
+const GRABOVOI_CLASSIFY_DIRECTIVE =
+  'Eres un clasificador para un catalogo de secuencias numericas (Grabovoi). Devuelve SOLO un objeto ' +
+  'JSON valido, sin texto extra ni bloques de codigo, con esta forma: ' +
+  '{"mode":"protocol|catalog|list|concept","topic":"<tema principal en pocas palabras, SIN las ' +
+  'palabras de pregunta>"}. ' +
+  'mode=protocol = pide un protocolo o metodo COMPLETO para aplicar/usar algo (pasos, como se aplica). ' +
+  'mode=catalog = pide el codigo/secuencia de UNA condicion nombrada (ej. el codigo del amor) O ' +
+  'pregunta de forma vaga que tienes para un tema (ej. algo para los ojos). ' +
+  'mode=list = pide explicitamente una lista o enumeracion de varias/todas las secuencias de un tema ' +
+  '(ej. dame una lista, que codigos hay para X, todas las que sirvan para X). ' +
+  'mode=concept = pregunta que es, que significa o pide una explicacion de un termino. ' +
+  'topic = el tema/condicion al que se refiere (ej. para "que codigos hay para dolor de muelas" -> ' +
+  '"dolor de muelas"). Si no hay un tema claro, topic = "".';
 
 interface ChatRagBody {
   query?: string;
@@ -323,45 +335,59 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
     // not a resolvable scripture reference -> fall through to normal rag below.
   }
 
-  // === CATEGORY-EXPLORE (e.g. Grabovoi): two-step EXPLORE -> EXACT-CODE on the normal
-  // rag path. A SPECIFIC condition request returns its VERBATIM code; a GENERAL/category
-  // request lists the category's condition NAMES and asks which one (NO code emitted).
-  // Numbers are ALWAYS served verbatim from the retrieved chunk, never invented. Falls
-  // through to the normal rag path when nothing relevant matches. ===
-  // DIAGNOSTIC (unconditional): shows whether the Grabovoi branch is active for this turn.
-  // CONCEPT/definitional intent ("que es un pilotaje?") must NOT hit the category-explore /
-  // EXACT-CODE machinery (which dumps a garbled options list). Unless the user explicitly asks
-  // for a code/number, route these to the normal RAG path (prose grounded in chunks).
-  const nq = normMatch(query);
-  const conceptIntent = CONCEPT_RE.test(nq) && !CODE_WORDS_RE.test(nq);
-  // DIAGNOSTIC (unconditional): shows whether the Grabovoi branch is active for this turn.
-  logger.info('chatRag grabovoi_gate', {
-    assistantId, categoryExplore: asstCategoryExplore, contractKind: contract.kind, mode, knowledgeMode,
-    protocolIntent: PROTOCOL_RE.test(nq), conceptIntent,
-  });
-  // sequence_catalog contract OR the legacy categoryExplore flag activates the
-  // Grabovoi family. The per-turn intent (PROTOCOL_RE / explore vs exact) still
-  // routes within it (decision: kind selects family, intent routes sub-path).
-  // conceptIntent SKIPS the Grabovoi branches -> normal RAG prose answer.
+  // === GRABOVOI ROUTING (sequence_catalog). A literal code in the query -> DETERMINISTIC
+  // reverse lookup (no LLM). Otherwise an LLM classifier picks the route ONCE (this replaces
+  // the old brittle regex gate): protocol -> protocol assembly; catalog -> EXACT-CODE/EXPLORE;
+  // list/concept -> normal RAG. The classifier ONLY routes; execution stays deterministic
+  // (verbatim codes, chunk scan, anti-hallucination unchanged). ===
   const sequenceCatalogActive = asstCategoryExplore || contract.kind === 'sequence_catalog';
-  if (sequenceCatalogActive && !conceptIntent && mode === 'rag' && knowledgeMode !== 'training_only') {
-    // PROTOCOL-ASSEMBLY first: "protocolo / metodo / como se aplica / que puedo hacer para X"
-    // -> assemble a full protocol (cleansing + macrocommand + VERBATIM topic codes + how-to).
-    // (Future: gate via behaviorProfile.protocolAssembly instead of reusing categoryExplore.)
-    if (PROTOCOL_RE.test(normMatch(query))) {
-      const detMax = asstDetailMaxTokens
-        ?? (typeof stageModels.detailMaxTokens === 'number' ? stageModels.detailMaxTokens : DETAIL_MAX_TOKENS);
-      const built = await answerProtocolAssembly(res, {
-        assistantId, llmProfileId, persona, language, query, namespace, k, quota,
-        overrideProfileId: asstDetailProfileId, globalProfileId: stageModels.detailProfileId,
-        detailMaxTokens: detMax, stage,
+  if (sequenceCatalogActive && mode === 'rag' && knowledgeMode !== 'training_only') {
+    const queriedCode = extractQueriedCode(query);
+    if (queriedCode) {
+      // Reverse lookup: scan chunks VERBATIM for the literal code (no LLM, no category dump).
+      const served = await answerReverseLookup(res, { namespace, queriedCode, language, quota, stage });
+      if (served) return;
+    } else {
+      // No literal code -> classify intent + extract TOPIC ONCE with the LLM (cheap).
+      const intent = await classifyGrabovoiIntent({
+        assistantId, overrideProfileId: asstSummaryProfileId,
+        globalProfileId: stageModels.summaryProfileId, legacyProfileId: llmProfileId,
+        query, language, stage,
       });
-      if (built) return;
+      const gMode = intent?.mode ?? null;
+      logger.info('chatRag grabovoi_intent', { assistantId, mode: gMode, topic: intent?.topic ?? '' });
+      if (gMode === 'protocol') {
+        const detMax = asstDetailMaxTokens
+          ?? (typeof stageModels.detailMaxTokens === 'number' ? stageModels.detailMaxTokens : DETAIL_MAX_TOKENS);
+        const built = await answerProtocolAssembly(res, {
+          assistantId, llmProfileId, persona, language, query, namespace, k, quota,
+          overrideProfileId: asstDetailProfileId, globalProfileId: stageModels.detailProfileId,
+          detailMaxTokens: detMax, stage,
+        });
+        if (built) return;
+      } else if (gMode === 'list' || gMode === 'catalog') {
+        // Topic codes are SELECTED deterministically (by name match -> correct topic, no
+        // mis-association), then the LLM REFORMULATES them into a natural summary + protocol
+        // using only that focused context (codes guarded verbatim). Returns false only when
+        // there is no usable topic to match on.
+        const tlDetMax = asstDetailMaxTokens
+          ?? (typeof stageModels.detailMaxTokens === 'number' ? stageModels.detailMaxTokens : DETAIL_MAX_TOKENS);
+        const served = await answerTopicList(res, {
+          assistantId, llmProfileId, persona, namespace, topic: intent?.topic || '', language, quota,
+          overrideProfileId: asstDetailProfileId, globalProfileId: stageModels.detailProfileId,
+          detailMaxTokens: tlDetMax, stage,
+        });
+        if (served) return;
+        // No usable topic (vague "que tienes?") -> category-explore (EXACT name match / chips).
+        if (gMode === 'catalog') {
+          const ex = await answerCategoryExplore(res, {
+            namespace, query, k, quota, stage, categoryChunkIds: body.categoryChunkIds ?? [],
+          });
+          if (ex) return;
+        }
+      }
+      // 'concept' | null (classify failed) | list-with-no-topic -> normal RAG path (honest prose).
     }
-    const served = await answerCategoryExplore(res, {
-      namespace, query, k, quota, stage, categoryChunkIds: body.categoryChunkIds ?? [],
-    });
-    if (served) return;
   }
 
   // --- KNOWLEDGE MODE: rag_only | hybrid | training_only ---
@@ -1051,6 +1077,293 @@ function parseCategoryChunk(text: string): { category: string; entries: { name: 
     if (!category && !/[0-9]/.test(l) && l === l.toUpperCase()) category = l;
   }
   return { category, entries };
+}
+
+// ----------------------------------------------------------- intent classifier
+/**
+ * Classify a Grabovoi query into ONE route with a cheap LLM call (replaces the old regex gate).
+ * Routing ONLY -- the chosen handler stays fully deterministic. Returns null on any failure, so
+ * the caller falls through to the normal RAG path (safe: honest prose, never a category dump).
+ */
+async function classifyGrabovoiIntent(args: {
+  assistantId: string; overrideProfileId?: string; globalProfileId?: string; legacyProfileId?: string;
+  query: string; language: string; stage: (l: string, f: number) => void;
+}): Promise<GrabovoiIntentResult | null> {
+  try {
+    const t = Date.now();
+    const { profile } = await resolveStageProfile({
+      assistantId: args.assistantId, overrideProfileId: args.overrideProfileId,
+      globalProfileId: args.globalProfileId, legacyProfileId: args.legacyProfileId,
+    });
+    // Small JSON output. Clone keeps the key/secret lookup intact while capping tokens.
+    const p = { ...profile, maxOutputTokens: Math.min(profile.maxOutputTokens ?? 64, 64) };
+    const result = await generateFromProfile(p, args.query, '', args.language, GRABOVOI_CLASSIFY_DIRECTIVE);
+    args.stage('G0 grabovoi intent classify (one LLM call)', t);
+    const raw = (result.text ?? '');
+    // Tolerant JSON parse: grab the first {...} block.
+    const s = raw.indexOf('{');
+    const e = raw.lastIndexOf('}');
+    let mode: GrabovoiIntent | null = null;
+    let topic = '';
+    if (s >= 0 && e > s) {
+      try {
+        const obj = JSON.parse(raw.slice(s, e + 1)) as { mode?: string; topic?: string };
+        const m = (obj.mode ?? '').toLowerCase();
+        if (m === 'protocol' || m === 'catalog' || m === 'list' || m === 'concept') mode = m;
+        topic = (obj.topic ?? '').toString().trim();
+      } catch { /* fall through to keyword scan */ }
+    }
+    if (!mode) {
+      const out = raw.toLowerCase();
+      if (out.includes('protocol')) mode = 'protocol';
+      else if (out.includes('concept')) mode = 'concept';
+      else if (out.includes('list')) mode = 'list';
+      else if (out.includes('catalog')) mode = 'catalog';
+    }
+    return mode ? { mode, topic } : null;
+  } catch (e) {
+    logger.warn('chatRag grabovoi classify failed', { error: String(e) });
+    return null;
+  }
+}
+
+// ----------------------------------------------------------- reverse code lookup
+/** Min digits for a query token to count as a "code the user wants explained". */
+const REVERSE_MIN_DIGITS = 4;
+/** Reverse lookup scans the WHOLE namespace's chunk TEXT (embeddings cannot target exact
+ *  digit strings, so findNearest misses many codes). This caps the scan defensively; a
+ *  Grabovoi catalog is well under this. Only the `text` field is fetched (no embeddings). */
+const REVERSE_SCAN_MAX = 2000;
+/** Honest absence messages (no category dump, no invented meaning). */
+const REVERSE_NOT_FOUND_ES = 'No encuentro ese codigo en la informacion disponible.';
+const REVERSE_NOT_FOUND_EN = 'I could not find that code in the available information.';
+
+/** First >=4-digit numeric code in the user's text (digits-only; separators ignored). null
+ *  when the query carries no code (-> not a reverse lookup). */
+function extractQueriedCode(query: string): string | null {
+  for (const m of ((query ?? '').match(/[0-9][0-9 ._\-]*/g) ?? [])) {
+    const d = m.replace(/[^0-9]/g, '');
+    if (d.length >= REVERSE_MIN_DIGITS) return d;
+  }
+  return null;
+}
+
+/**
+ * REVERSE-LOOKUP handler (Grabovoi): the user brought a LITERAL code and wants its meaning.
+ * Retrieves a broad set of chunks and string-scans (digits-only) their condition entries for
+ * the code; returns its label VERBATIM if present, an "ask which" when several labels share
+ * the code, or an honest "not found" otherwise. NEVER lists categories, NEVER invents a
+ * meaning. Returns true when handled (it always handles a query that carried a code).
+ */
+async function answerReverseLookup(
+  res: Response,
+  args: { namespace: string; queriedCode: string; language: string; quota: ConsumeResult; stage: (l: string, f: number) => void },
+): Promise<boolean> {
+  const { namespace, queriedCode, language, quota, stage } = args;
+  const chunksCol = db.collection('rag').doc(namespace).collection('chunks');
+  const quotaOut = {
+    remaining: quota.remaining, allocated: quota.allocated, used: quota.used,
+    warnThresholds: quota.warnThresholds, warnCrossed: quota.warnCrossed,
+  };
+  const notFound = language === 'en' ? REVERSE_NOT_FOUND_EN : REVERSE_NOT_FOUND_ES;
+  // The reverse-lookup answer is COMPLETE (the verbatim label). It must NOT offer "Ver mas":
+  // an on-demand detail would call the LLM (answerDetail) and hallucinate a different label.
+  // suppressDetail + EMPTY sources guarantee no detail affordance in any client build.
+  const serve = (body: string, _ids: string[]): boolean => {
+    res.json({
+      summary: body, detail: '', body, gestureCommands: body, media: [],
+      sources: [], suppressDetail: true, quota: quotaOut,
+    });
+    return true;
+  };
+
+  let docs: FirebaseFirestore.QueryDocumentSnapshot[];
+  try {
+    const tScan = Date.now();
+    // RELIABLE: scan the WHOLE namespace's chunk TEXT for the literal code. Embedding-based
+    // findNearest cannot target exact digit strings, so it found some codes and missed others.
+    // .select('text') avoids downloading the (heavy) embedding vectors -> cheap full scan.
+    docs = (await chunksCol.select('text').limit(REVERSE_SCAN_MAX).get()).docs;
+    stage('RL1 reverse-lookup full text scan', tScan);
+  } catch (e) {
+    logger.error('chatRag reverse-lookup scan failed', { namespace, error: String(e) });
+    return serve(notFound, []); // honest absence rather than a category dump
+  }
+
+  // Scan condition entries across ALL chunks for the exact code (digits-only).
+  const hits: { name: string; code: string; id: string }[] = [];
+  const seenName = new Set<string>();
+  for (const d of docs) {
+    for (const e of parseCategoryChunk((d.get('text') ?? '').toString()).entries) {
+      if (e.code.replace(/[^0-9]/g, '') !== queriedCode) continue;
+      const key = e.name.replace(/\s+/g, ' ').trim().toLowerCase();
+      if (seenName.has(key)) continue;
+      seenName.add(key);
+      hits.push({ name: e.name.replace(/\s+/g, ' ').trim(), code: e.code.trim(), id: d.id });
+    }
+  }
+
+  logger.info('chatRag reverse-lookup', { namespace, queriedCode, scanned: docs.length, hits: hits.length });
+
+  if (!hits.length) return serve(notFound, []);
+  if (hits.length === 1) {
+    return serve(`El codigo ${hits[0].code} corresponde a ${hits[0].name}.`, [hits[0].id]);
+  }
+  // Several distinct labels share the code -> list them verbatim and ask (no random pick).
+  const names = hits.map((h) => h.name).join(', ');
+  return serve(`El codigo ${hits[0].code} aparece como: ${names}. Cual buscas?`, hits.map((h) => h.id));
+}
+
+/** TOPIC-LIST directive: the LLM REFORMULATES the pre-selected sequences naturally (it does
+ *  NOT choose codes -- those are fixed in the CONTEXT). Codes verbatim; meaning from the source. */
+const TOPIC_LIST_DIRECTIVE =
+  'En el CONTEXTO tienes secuencias numericas de Grabovoi YA SELECCIONADAS y correctas para el ' +
+  'tema, con su nombre. Redacta una respuesta natural y en SEGUNDA PERSONA (hablale al usuario). ' +
+  'Devuelve DOS partes: una linea "<<SUMMARY>>" y debajo un resumen HABLADO breve (1 a 2 frases) que ' +
+  'mencione las secuencias del tema con su numero; despues una linea "<<DETAIL>>" y debajo un ' +
+  'PROTOCOLO util que integre, si aparecen en el CONTEXTO: 1) la limpieza inicial, 2) las secuencias ' +
+  'del tema, 3) como aplicarlas. REGLA ABSOLUTA: usa SOLO las secuencias del CONTEXTO; copia cada ' +
+  'numero TAL CUAL aparece (digito por digito, conservando los guiones bajos), sin inventar, cambiar, ' +
+  'redondear ni completar; NO agregues secuencias que no esten en el CONTEXTO. Texto plano, sin ' +
+  'Markdown, en el mismo idioma de la pregunta, sin saludos ni despedidas.';
+
+/**
+ * TOPIC-LIST handler (Grabovoi): "que codigos hay para X / dame una lista para X". The set of
+ * matching sequences is selected DETERMINISTICALLY (by name match -> correct codes, never
+ * mis-associated); the LLM then REFORMULATES them into a natural summary + protocol using ONLY
+ * that focused context (codes guarded verbatim by enforceVerbatimCodes). Returns false (let the
+ * normal RAG path answer) only when there is no usable topic to match on.
+ */
+async function answerTopicList(
+  res: Response,
+  args: {
+    assistantId: string; llmProfileId: string; persona: string;
+    namespace: string; topic: string; language: string; quota: ConsumeResult;
+    overrideProfileId?: string; globalProfileId?: string; detailMaxTokens?: number;
+    stage: (l: string, f: number) => void;
+  },
+): Promise<boolean> {
+  const { assistantId, llmProfileId, persona, namespace, topic, language, quota, stage } = args;
+  const normTopic = normMatch(topic);
+  if (!normTopic || normTopic.length < 3) return false; // no usable topic -> normal RAG
+  const chunksCol = db.collection('rag').doc(namespace).collection('chunks');
+  const quotaOut = {
+    remaining: quota.remaining, allocated: quota.allocated, used: quota.used,
+    warnThresholds: quota.warnThresholds, warnCrossed: quota.warnCrossed,
+  };
+  let docs: FirebaseFirestore.QueryDocumentSnapshot[];
+  try {
+    const tScan = Date.now();
+    docs = (await chunksCol.select('text').limit(REVERSE_SCAN_MAX).get()).docs;
+    stage('TL1 topic-list full text scan', tScan);
+  } catch (e) {
+    logger.error('chatRag topic-list scan failed', { namespace, error: String(e) });
+    return false; // fall through to normal RAG
+  }
+
+  // Significant topic tokens (light plural stemming: drop a trailing 's' on words >=4 chars),
+  // minus stopwords. Lets "ojos" match "ojo", "muelas" match "muela", phrasing match names.
+  const STOP = new Set(['para', 'que', 'los', 'las', 'del', 'una', 'uno', 'con', 'por', 'ser', 'uso',
+    'usar', 'codigo', 'codigos', 'numero', 'numeros', 'secuencia', 'secuencias', 'sirve', 'hay',
+    'tienes', 'dame', 'lista', 'listas', 'todas', 'todos', 'cuales', 'mejor', 'sobre']);
+  const destem = (w: string): string => (w.length >= 4 && w.endsWith('s') ? w.slice(0, -1) : w);
+  const topicTokens = normTopic.split(' ').map(destem).filter((t) => t.length >= 3 && !STOP.has(t));
+
+  // Match entries by topic: whole-phrase containment OR all significant topic tokens present
+  // (both stemmed) in the (parenthetical-stripped) entry name.
+  const hits: { name: string; code: string }[] = [];
+  const seen = new Set<string>();
+  for (const d of docs) {
+    for (const e of parseCategoryChunk((d.get('text') ?? '').toString()).entries) {
+      const core = e.name.replace(/\(.*?\)/g, ' ').replace(/\s+/g, ' ').trim();
+      const nn = normMatch(core);
+      if (!nn) continue;
+      const nnStem = nn.split(' ').map(destem).join(' ');
+      const phraseHit = nn.includes(normTopic) || normTopic.includes(nn);
+      const tokenHit = topicTokens.length > 0 && topicTokens.every((t) => nnStem.includes(t));
+      if (!phraseHit && !tokenHit) continue;
+      const key = nn + '|' + e.code.replace(/[^0-9]/g, '');
+      if (seen.has(key)) continue;
+      seen.add(key);
+      hits.push({ name: core, code: e.code.trim() });
+      if (hits.length >= 20) break;
+    }
+    if (hits.length >= 20) break;
+  }
+
+  logger.info('chatRag topic-list', { namespace, topic, scanned: docs.length, hits: hits.length });
+
+  if (!hits.length) {
+    const msg = language === 'en'
+      ? `I could not find sequences for "${topic}" in the available information.`
+      : `No encuentro secuencias para "${topic}" en la informacion disponible.`;
+    res.json({ summary: msg, detail: '', body: msg, gestureCommands: msg, media: [], sources: [], suppressDetail: true, quota: quotaOut });
+    return true;
+  }
+
+  // Cleansing / macrocommand entries (the protocol's first step), scanned deterministically
+  // from the SAME chunks so the protocol has the REAL codes (no LLM, no invention).
+  const methodHits: { name: string; code: string }[] = [];
+  const methodSeen = new Set<string>();
+  for (const d of docs) {
+    for (const e of parseCategoryChunk((d.get('text') ?? '').toString()).entries) {
+      if (!/(limpieza|macrocomando|macro comando)/.test(normMatch(e.name))) continue;
+      const dk = e.code.replace(/[^0-9]/g, '');
+      if (methodSeen.has(dk)) continue;
+      methodSeen.add(dk);
+      methodHits.push({ name: e.name.replace(/\(.*?\)/g, ' ').replace(/\s+/g, ' ').trim(), code: e.code.trim() });
+      if (methodHits.length >= 3) break;
+    }
+    if (methodHits.length >= 3) break;
+  }
+
+  // FOCUSED context = ONLY the deterministically-matched sequences (correct codes for the topic)
+  // + the cleansing/macrocommand entries. The LLM can use NOTHING else, so it cannot grab a code
+  // from an unrelated topic; it only rephrases. Codes stay verbatim (guarded after generation).
+  const ctxLines: string[] = [];
+  if (methodHits.length) {
+    ctxLines.push('=== LIMPIEZA / MACROCOMANDO ===');
+    for (const h of methodHits) ctxLines.push(`${h.name}: ${h.code}`);
+  }
+  ctxLines.push(`=== SECUENCIAS PARA ${topic.toUpperCase()} ===`);
+  for (const h of hits) ctxLines.push(`${h.name}: ${h.code}`);
+  const context = ctxLines.join('\n');
+
+  // Deterministic fallback text (used if the LLM call fails) -- never leaves the user empty.
+  const fallbackSummary = `Para ${topic}: ${hits.slice(0, 4).map((h) => `${h.name} ${h.code}`).join('; ')}.`;
+  const fallbackDetail = `Secuencias para ${topic}:\n` + hits.map((h) => `- ${h.name}: ${h.code}`).join('\n');
+
+  // LLM REFORMULATION over the focused context (natural summary + protocol). One call.
+  let summary = '';
+  let detail = '';
+  let usage: { model: string; provider: string; prompt: string; output: string } | null = null;
+  try {
+    const tGen = Date.now();
+    const { profile } = await resolveStageProfile({
+      assistantId, overrideProfileId: args.overrideProfileId, globalProfileId: args.globalProfileId, legacyProfileId: llmProfileId,
+    });
+    const cap = args.detailMaxTokens && args.detailMaxTokens > 0 ? args.detailMaxTokens : DETAIL_MAX_TOKENS;
+    const genProfile = { ...profile, maxOutputTokens: Math.min(profile.maxOutputTokens ?? cap, cap) };
+    const genPersona = `${persona ? persona + '\n\n' : ''}${TOPIC_LIST_DIRECTIVE}`;
+    const result = await generateFromProfile(genProfile, topic, context, language, genPersona);
+    stage('TL2 topic-list LLM reformulation (summary+detail)', tGen);
+    const split = extractSummaryDetail(result.text ?? '');
+    // NUMERIC FIDELITY: any code not present verbatim in the focused context is replaced.
+    summary = stripMarkdown(enforceVerbatimCodes(split.summary, context));
+    detail = stripMarkdown(enforceVerbatimCodes(split.detail, context));
+    if (!summary && detail) summary = detail.split(/(?<=[.!?])\s+/).slice(0, 2).join(' ');
+    usage = { model: profile.model, provider: profile.provider, prompt: `${genPersona}\n${context}\n${topic}`, output: result.text ?? '' };
+  } catch (e) {
+    logger.error('chatRag topic-list generation failed', { namespace, error: e instanceof Error ? e.message : String(e) });
+  }
+  if (!summary) summary = fallbackSummary;
+  if (!detail) detail = fallbackDetail;
+
+  res.json({ summary, detail, body: summary, gestureCommands: summary, media: [], sources: [], suppressDetail: false, quota: quotaOut });
+  if (usage) {
+    void recordUsage(assistantId, { stage: 'summary', model: usage.model, provider: usage.provider, promptText: usage.prompt, outputText: usage.output });
+  }
+  return true;
 }
 
 /**

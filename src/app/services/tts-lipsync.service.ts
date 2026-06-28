@@ -491,7 +491,7 @@ export class TtsLipsyncService {
             synthesize: async (text: string) => {
                 // Rewrite long digit runs to digit-by-digit BEFORE phonemization so Piper
                 // doesn't expand "71974131981" into a giant cardinal. Only the SPOKEN text
-                // is changed here; the visible chat bubble is untouched.
+                // is changed; the visible chat bubble (with "_") is untouched.
                 const digitRun = hasLongDigitRun(text);
                 const underscoreSeq = hasUnderscoreSequence(text);
                 const first = !this.firstSynthMarked;
@@ -500,15 +500,16 @@ export class TtsLipsyncService {
 
                 let buffer: AudioBuffer;
                 if (underscoreSeq) {
-                    // Numeric sequence with "_" separators -> speak each group digit-by-digit
-                    // and insert a REAL silence buffer where each "_" was (Piper ignores
-                    // punctuation pauses). Concatenated into ONE buffer so the rest of the
-                    // pipeline (visemes/scheduling) is unchanged.
+                    // Numeric sequence with "_" separators -> speak each digit group and insert a
+                    // REAL silence buffer where each "_" was (Piper ignores punctuation pauses).
+                    // Concatenated into ONE buffer so the rest of the pipeline is unchanged.
                     const speechParts = tokenizeSpeechWithSilences(text, lang, this.SEQUENCE_SILENCE_MS);
                     const pieces: AudioBuffer[] = [];
                     for (const p of speechParts) {
                         if (p.silenceMs) { pieces.push(this.makeSilenceBuffer(ctx, p.silenceMs)); continue; }
-                        if (!p.text || !p.text.trim()) continue;
+                        // Skip parts with no letters/digits (e.g. a lone "." or ")") -> Piper can
+                        // turn those into a short burst of noise.
+                        if (!p.text || !/[a-z0-9]/i.test(p.text)) continue;
                         const w = await this.piper.synthesizeWav(p.text, voiceId, pr => this.downloadProgress.set(pr));
                         pieces.push(await ctx.decodeAudioData(w));
                     }
