@@ -161,6 +161,9 @@ const CHIP_LABELS: Record<string, string> = {
                window for live and held -> no sudden box jump when speech finishes. -->
           <div class="subtitle-roll" #subtitleRoll
                [style.maxHeight.em]="subtitleHeightEm()">{{ subtitleText() }}</div>
+          <!-- On-screen "Ver mas" (hint-chip style, yellow text): opens the detail for the
+               response currently shown in the subtitle. Appears only when a detail exists. -->
+          <button class="sub-vermas" *ngIf="subtitleDetailMsg() as sm" (click)="openDetail(sm)">Ver más</button>
         </div>
       </div>
 
@@ -414,13 +417,7 @@ const CHIP_LABELS: Record<string, string> = {
             <h1>{{ detailTitle() }}</h1>
           </div>
           <div class="do-actions">
-            <!-- Play / Pause: speaks the detail with avatar lipsync + karaoke. -->
-            <button class="do-play" *ngIf="!detailLoading() && detailText()"
-                    (click)="toggleDetailSpeech()" [title]="detailPlayLabel()">
-              <svg *ngIf="detailPlaying()" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
-              <svg *ngIf="!detailPlaying()" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
-              <span>{{ detailPlayLabel() }}</span>
-            </button>
+            <!-- Play/Pause moved to the floating control (.do-play-float) at the bottom-right. -->
             <button class="do-x" (click)="closeDetail()" title="Cerrar">✕</button>
           </div>
         </header>
@@ -434,6 +431,14 @@ const CHIP_LABELS: Record<string, string> = {
                already fully visible (pre-wrap preserves the paragraph breaks). -->
           <article class="do-text" *ngIf="!detailLoading()"><span class="do-hi">{{ detailHi() }}</span>{{ detailRest() }}</article>
         </div>
+        <!-- Floating pause/play (duplicate of the header control) at the bottom-right of the
+             text, left of the PiP avatar, for easier access while reading/scrolling. -->
+        <button class="do-play-float" *ngIf="!detailLoading() && detailText()"
+                (click)="toggleDetailSpeech()" [title]="detailPlayLabel()">
+          <svg *ngIf="detailPlaying()" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><rect x="6" y="5" width="4" height="14" rx="1"/><rect x="14" y="5" width="4" height="14" rx="1"/></svg>
+          <svg *ngIf="!detailPlaying()" viewBox="0 0 24 24" width="18" height="18" fill="currentColor"><path d="M8 5v14l11-7z"/></svg>
+          <span>{{ detailPlayLabel() }}</span>
+        </button>
       </div>
 
       <!-- ============ FULL-SCREEN IMAGE VIEWER (root-level, image-only) ============ -->
@@ -635,7 +640,17 @@ const CHIP_LABELS: Record<string, string> = {
     .do-x { width: 40px; height: 40px; border-radius: 999px; border: 1px solid rgba(255,255,255,.15);
       background: rgba(255,255,255,.06); color: #cfd3dc; cursor: pointer; font-size: 16px; flex: none; }
     .do-x:hover { background: rgba(255,255,255,.12); color: #fff; }
-    .do-scroll { flex: 1; overflow-y: auto; padding: 24px 28px 120px; max-width: 980px; width: 100%; margin: 0 auto; }
+    .do-scroll { flex: 1; overflow-y: auto; padding: 24px 28px 120px; width: 100%; }
+    /* Floating pause/play: bottom-right of the text, just LEFT of the PiP avatar (whose width
+       follows --detail-pip vars), so it stays clear of the avatar at any breakpoint. */
+    .do-play-float {
+      position: fixed; bottom: 24px;
+      right: calc(var(--detail-pip-base-w) * var(--detail-pip-scale) + 24px);
+      z-index: 71; display: inline-flex; align-items: center; gap: 8px; height: 46px; padding: 0 20px;
+      border-radius: 999px; border: 1px solid rgba(139,92,246,.6); background: rgba(139,92,246,.38);
+      color: #fff; cursor: pointer; font-size: 14px; font-weight: 600; box-shadow: 0 6px 20px rgba(0,0,0,.45);
+    }
+    .do-play-float:hover { background: rgba(139,92,246,.55); }
     /* Karaoke detail: single pre-wrap block (paragraph breaks preserved); the
        spoken prefix is highlighted as speech advances. */
     .do-text { font-size: 15px; line-height: 1.7; color: #c7ccd6; white-space: pre-wrap; }
@@ -942,6 +957,14 @@ const CHIP_LABELS: Record<string, string> = {
     }
     .subtitle-roll::-webkit-scrollbar-thumb:hover { border-color: rgba(96,165,250,1); }
     .subtitle-roll { scrollbar-width: thin; scrollbar-color: rgba(96,165,250,.7) transparent; }
+    /* On-screen "Ver mas": hint-chip look (glass, rounded) but YELLOW text/border. */
+    .sub-vermas {
+      display: inline-block; margin-top: 8px; padding: 4px 14px; border-radius: 999px; cursor: pointer;
+      background: rgba(20,18,30,.55); backdrop-filter: blur(8px);
+      border: 1px solid rgba(245,212,66,.55); color: #f5d442; font-weight: 600; font-size: 12.5px;
+      transition: background .15s ease, border-color .15s ease;
+    }
+    .sub-vermas:hover { background: rgba(245,212,66,.18); border-color: rgba(245,212,66,.95); }
     @keyframes subin { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: none; } }
     .subtitle.flying { opacity: 0; }
     .warn-ico { vertical-align: -2px; margin-right: 2px; color: #f0c674; }
@@ -1618,6 +1641,23 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         return '';
     });
 
+    /** The assistant message currently shown in the subtitle (for the on-screen "Ver mas"). */
+    subtitleMsg = computed<ConvMessage | null>(() => {
+        const id = this.conv.revealingMsgId() ?? this.conv.speakingMsgId() ?? this.subCurrentId();
+        if (id == null) return null;
+        return this.conv.messages().find((x) => x.id === id) ?? null;
+    });
+
+    /** The subtitle's message ONLY when its detail is openable (has detail + not revealing).
+     *  Drives the on-screen "Ver mas" chip on the avatar view. */
+    subtitleDetailMsg = computed<ConvMessage | null>(() => {
+        const m = this.subtitleMsg();
+        if (!m) return null;
+        const hasDetail = !!m.detail || !!m.detailAvailable;
+        const revealing = this.conv.revealingMsgId() === m.id;
+        return (hasDetail && !revealing) ? m : null;
+    });
+
     /**
      * Drives the hint<->subtitle swap from the speaking state + the natural-finish pulse:
      *   (a) speechCompleted pulse while live  -> fly to history (then hide).
@@ -2033,8 +2073,11 @@ export class TextAvatarComponent implements AfterViewChecked, OnInit, OnDestroy 
         this.assistant.set(d);
         if (!d) return;
         if (d.language === 'es' || d.language === 'en') { this.lang = d.language; this.onProviderOrLangChange(); }
-        if (d.voice) this.applyDefaultVoice(d.voice);
+        // Load the avatar FIRST (selectAvatar applies the avatar's default voice), THEN apply
+        // the assistant's voice override so it WINS. Priority: assistant.voice -> avatar.voice
+        // -> global default. If the assistant has no voice, the avatar default (just set) stays.
         if (d.avatarId) await this.selectAvatar(d.avatarId);
+        if (d.voice) this.applyDefaultVoice(d.voice);
     }
 
     onConvEnter(event: Event) {

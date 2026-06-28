@@ -21,10 +21,9 @@ import { RagNamespace } from '../../lib/rag/rag-admin.models';
 import { LlmConfigProfile, TestProfileResult, activeKeyOf, newProfileDraft } from '../../lib/llm-admin/llm-profile.models';
 import { PROVIDER_LABELS } from '../../lib/llm-admin/llm-admin.models';
 import { GESTURE_MAP } from '../../lib/gestures/gesture-library';
-import { PIPER_VOICES, TtsLang } from '../../services/tts-lipsync.service';
+import { VoiceCatalogService } from '../../services/voice-catalog.service';
 import { environment } from '../../../environments/environment';
 
-interface VoiceOpt { id: string; label: string; }
 
 /**
  * Default responseContract template per kind. Pre-loaded when the admin picks a
@@ -312,7 +311,9 @@ export function defaultContractFor(kind: ResponseContractKind): ResponseContract
               <label class="fld"><span>Voice</span>
                 <select [(ngModel)]="form.voice">
                   <option value="">{{ avatarDefaultVoiceLabel() }}</option>
-                  <option *ngFor="let v of voices" [value]="v.id">{{ v.label }}</option>
+                  <optgroup *ngFor="let g of catalog.groups()" [label]="g.langLabel">
+                    <option *ngFor="let v of g.voices" [value]="v.id">{{ v.label }}</option>
+                  </optgroup>
                 </select>
               </label>
               <label class="fld"><span>Language</span>
@@ -481,6 +482,9 @@ export class AssistantManagerComponent implements OnInit {
   private router = inject(Router);
   private profileSvc = inject(LlmProfileService);
   private convContent = inject(ConversationContentService);
+  /** Dynamic Piper voice catalog (same source as Avatar Manager: vits-web manifest ->
+   *  Firestore cache -> seed). Single source of truth for the voice dropdown. */
+  catalog = inject(VoiceCatalogService);
 
   // ---- Conversational content editing ----
   readonly phraseKinds: ConvKind[] = ['greetings', 'infoAcknowledgements', 'farewells'];
@@ -558,7 +562,6 @@ export class AssistantManagerComponent implements OnInit {
   readonly view = signal<'list' | 'edit'>('list');
   private thumbs = signal<Record<string, string | null>>({});
 
-  voices: VoiceOpt[] = this.buildVoices();
   gestures: string[] = Array.from(GESTURE_MAP.keys());
 
   form: AssistantConfig = this.blank();
@@ -568,19 +571,12 @@ export class AssistantManagerComponent implements OnInit {
   async ngOnInit(): Promise<void> {
     await this.admin.check();
     if (!this.allowed()) { this.loading.set(false); return; }
+    void this.catalog.ensureLoaded(); // dynamic voice list (non-blocking; seed shows instantly)
     await this.reload();
   }
 
   private blank(): AssistantConfig {
     return { id: '', name: '', role: '', description: '', avatarId: '', ragCollection: '', systemPrompt: '', voice: '', language: 'es', enabled: true, knowledgeMode: 'rag_only' };
-  }
-
-  private buildVoices(): VoiceOpt[] {
-    const out: VoiceOpt[] = [];
-    for (const lang of ['es', 'en'] as TtsLang[]) {
-      for (const v of PIPER_VOICES[lang]) out.push({ id: v.id, label: `${v.label} (${lang.toUpperCase()})` });
-    }
-    return out;
   }
 
   async reload(): Promise<void> {
@@ -616,7 +612,7 @@ export class AssistantManagerComponent implements OnInit {
   avatarDefaultVoiceLabel(): string {
     const av = this.avatars().find((a) => a.id === this.form.avatarId);
     if (av?.defaultVoice) {
-      const v = this.voices.find((x) => x.id === av.defaultVoice);
+      const v = this.catalog.all().find((x) => x.id === av.defaultVoice);
       return `Avatar default: ${v?.label ?? av.defaultVoice}`;
     }
     return '- avatar default -';

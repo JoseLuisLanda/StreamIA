@@ -67,6 +67,15 @@ const PROTOCOL_RE = /(^|\s)(protocolo|protocolos|metodo|metodos|pasos|aplicacion
 /** Fixed retrieval seed for the METHOD chunks (cleansing + daily macrocommand + how-to). */
 const PROTOCOL_METHOD_SEED = 'limpieza del pasado macrocomando diario como aplicar el protocolo pasos generales del metodo';
 
+/** CONCEPT/definitional intent (Grabovoi): "what is / what does X mean / explain X" -> these
+ *  must NOT be hijacked by the category-explore/EXACT-CODE machinery (which dumps chunk names
+ *  as a garbled options list). They fall through to the normal RAG path, which redacts prose
+ *  grounded in the chunks. Matched on the accent-stripped query (normMatch). */
+const CONCEPT_RE = /(^|\s)(que es|que es un|que es una|que es el|que es la|que son|que significa|que significan|que quiere decir|para que sirve|para que sirven|explica|explicame|como funciona|en que consiste|definicion de|que representa)(\s|$)/;
+/** Words that signal the user explicitly wants a CODE/number (so a "que es el codigo de X"
+ *  stays on the verbatim EXACT-CODE path instead of being treated as a concept question). */
+const CODE_WORDS_RE = /(codigo|codigos|numero|numeros|secuencia|secuencias|cifra|cifras)/;
+
 interface ChatRagBody {
   query?: string;
   namespace?: string;
@@ -320,15 +329,22 @@ export async function chatRagHandler(req: AuthedRequest, res: Response): Promise
   // Numbers are ALWAYS served verbatim from the retrieved chunk, never invented. Falls
   // through to the normal rag path when nothing relevant matches. ===
   // DIAGNOSTIC (unconditional): shows whether the Grabovoi branch is active for this turn.
+  // CONCEPT/definitional intent ("que es un pilotaje?") must NOT hit the category-explore /
+  // EXACT-CODE machinery (which dumps a garbled options list). Unless the user explicitly asks
+  // for a code/number, route these to the normal RAG path (prose grounded in chunks).
+  const nq = normMatch(query);
+  const conceptIntent = CONCEPT_RE.test(nq) && !CODE_WORDS_RE.test(nq);
+  // DIAGNOSTIC (unconditional): shows whether the Grabovoi branch is active for this turn.
   logger.info('chatRag grabovoi_gate', {
     assistantId, categoryExplore: asstCategoryExplore, contractKind: contract.kind, mode, knowledgeMode,
-    protocolIntent: PROTOCOL_RE.test(normMatch(query)),
+    protocolIntent: PROTOCOL_RE.test(nq), conceptIntent,
   });
   // sequence_catalog contract OR the legacy categoryExplore flag activates the
   // Grabovoi family. The per-turn intent (PROTOCOL_RE / explore vs exact) still
   // routes within it (decision: kind selects family, intent routes sub-path).
+  // conceptIntent SKIPS the Grabovoi branches -> normal RAG prose answer.
   const sequenceCatalogActive = asstCategoryExplore || contract.kind === 'sequence_catalog';
-  if (sequenceCatalogActive && mode === 'rag' && knowledgeMode !== 'training_only') {
+  if (sequenceCatalogActive && !conceptIntent && mode === 'rag' && knowledgeMode !== 'training_only') {
     // PROTOCOL-ASSEMBLY first: "protocolo / metodo / como se aplica / que puedo hacer para X"
     // -> assemble a full protocol (cleansing + macrocommand + VERBATIM topic codes + how-to).
     // (Future: gate via behaviorProfile.protocolAssembly instead of reusing categoryExplore.)
@@ -1067,11 +1083,35 @@ async function answerCategoryExplore(
     }
     return best;
   };
-  const serveExact = (best: { name: string; code: string }, srcId: string, scoped: boolean): boolean => {
+  const digitsOnly = (s: string): string => (s ?? '').replace(/[^0-9]/g, '');
+  const serveExact = (
+    best: { name: string; code: string }, srcId: string, scoped: boolean,
+    pool: { name: string; code: string }[],
+  ): boolean => {
     const body = `El codigo de ${best.name.replace(/\s+/g, ' ')} es ${best.code}.`;
-    // suppressDetail: a bare code has no "Ver mas" (it must not regenerate an LLM list).
-    res.json({ summary: body, detail: '', body, gestureCommands: body, media: [], sources: [{ id: srcId, metadata: {} }], suppressDetail: true, quota: quotaOut });
-    logger.info('chatRag category-explore EXACT-CODE', { namespace, name: best.name, code: best.code, scoped });
+    // RELATED (max 3): OTHER verbatim codes from the SAME pool. All codes stay verbatim
+    // (with "_"); dedupe by digits-only; skip the primary and any non-code. Anti-alucinacion:
+    // codes come from splitNameCode on the chunk, never from an LLM.
+    const seenCodes = new Set<string>([digitsOnly(best.code)]);
+    const related: { name: string; code: string }[] = [];
+    for (const e of pool) {
+      const d = digitsOnly(e.code);
+      if (d.length < 4 || seenCodes.has(d)) continue;
+      seenCodes.add(d);
+      related.push({ name: e.name.replace(/\s+/g, ' ').trim(), code: e.code.trim() });
+      if (related.length >= 3) break;
+    }
+    // detail (shown on "Ver mas", spoken only if the user taps it): primary + related list.
+    // Empty when there are no related -> suppressDetail keeps the bare-code behavior (no "Ver mas").
+    const detail = related.length
+      ? `El codigo de ${best.name.replace(/\s+/g, ' ')} es ${best.code}.\n\nCodigos relacionados:\n`
+        + related.map((r) => `- ${r.name}: ${r.code}`).join('\n')
+      : '';
+    res.json({
+      summary: body, detail, body, gestureCommands: body, media: [],
+      sources: [{ id: srcId, metadata: {} }], suppressDetail: !detail, quota: quotaOut,
+    });
+    logger.info('chatRag category-explore EXACT-CODE', { namespace, name: best.name, code: best.code, scoped, related: related.length });
     return true;
   };
 
@@ -1089,7 +1129,7 @@ async function answerCategoryExplore(
         for (const e of parseCategoryChunk((snap.get('text') ?? '').toString()).entries) scopedEntries.push(e);
       }
       const sBest = findExact(scopedEntries);
-      if (sBest && firstId) return serveExact(sBest, firstId, true);
+      if (sBest && firstId) return serveExact(sBest, firstId, true, scopedEntries);
     } catch (e) {
       logger.warn('chatRag category-explore scoped lookup failed', { namespace, error: String(e) });
     }
@@ -1126,7 +1166,7 @@ async function answerCategoryExplore(
   // 1) EXACT-CODE (fresh search): a named condition found in the retrieved chunks IS the
   //    relevance signal, so this is NOT gated on distance.
   const freshBest = findExact(all);
-  if (freshBest) return serveExact(freshBest, top[0].id, false);
+  if (freshBest) return serveExact(freshBest, top[0].id, false, all);
 
   // Distance gate applies ONLY to the EXPLORE fallback (don't list an irrelevant category).
   if (Number.isFinite(bestDist) && bestDist > CATEGORY_RELEVANCE_MAX) return false;
@@ -1276,6 +1316,10 @@ async function answerProtocolAssembly(
   }
   if (!summary) return false;
 
+  // This is a pilotaje/protocol answer (it always carries a full DETAIL) -> invite the user
+  // to open "Ver mas" for the complete protocol. Appended by code so the hint is reliable.
+  if (detail) summary = `${summary} Para mas informacion, dale en "Ver mas".`;
+
   const quotaOut = {
     remaining: quota.remaining, allocated: quota.allocated, used: quota.used,
     warnThresholds: quota.warnThresholds, warnCrossed: quota.warnCrossed,
@@ -1389,6 +1433,9 @@ const DETAIL_ONLY_DIRECTIVE =
  * text, NO Markdown.
  */
 const PROTOCOL_ASSEMBLY_DIRECTIVE =
+  'Dirigete SIEMPRE al usuario en SEGUNDA PERSONA, hablandole directamente (por ejemplo: "Te presento un ' +
+  'pilotaje para...", "Puedes usar..."). NUNCA narres en tercera persona ni describas la peticion: NO digas ' +
+  '"el usuario solicita", "se presenta", "se pide" ni similares; responde como si hablaras con la persona. ' +
   'Arma un PROTOCOLO COMPLETO y claro para lo que pide el usuario, integrando las piezas del CONTEXTO. ' +
   'Estructura el protocolo asi: 1) Limpieza del Pasado (explica los pasos con tus propias palabras, sin ' +
   'cambiar el sentido); 2) Macrocomando diario, si aparece en el CONTEXTO; 3) las SECUENCIAS NUMERICAS ' +
