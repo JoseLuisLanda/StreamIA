@@ -12,6 +12,7 @@ import './admin'; // initialize Admin SDK (default creds, strimearia) on cold st
 
 export { ingestDocument } from './ingestDocument';
 export { api } from './api';
+export { mintWebViewToken } from './customToken';
 export { setLlmApiKey, testLlmConnection } from './llmAdmin';
 export { bootstrapFirstAdmin, setUserRole, listUsers } from './roleAdmin';
 export {
