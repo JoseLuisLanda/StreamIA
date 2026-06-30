@@ -12,9 +12,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: npm ci && npm run build
-      - uses: FirebaseExtended/action-hosting-deploy@v0
-        with:
-          repoToken: ${{ secrets.GITHUB_TOKEN }}
-          firebaseServiceAccount: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_STRIMEARIA }}
-          channelId: live
-          projectId: strimearia
+      - name: Deploy to Firebase Hosting (live)
+        # Uses the Firebase CLI instead of action-hosting-deploy@v0 because the
+        # action fails with FAILED_PRECONDITION ("supplied version is the current
+        # active version") when the built output is identical to what is already
+        # live. The CLI handles unchanged content gracefully.
+        run: |
+          printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "${RUNNER_TEMP}/firebase-sa.json"
+          export GOOGLE_APPLICATION_CREDENTIALS="${RUNNER_TEMP}/firebase-sa.json"
+          npx firebase-tools deploy --only hosting --project strimearia --non-interactive
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_STRIMEARIA }}
