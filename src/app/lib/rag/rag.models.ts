@@ -287,6 +287,18 @@ export interface AssistantConfig {
   /** whether this assistant shows in the public /assistants selector */
   enabled?: boolean;
   /**
+   * AR-assistant fields (feature /ar-assistant; schema v6). Config-driven, no
+   * per-assistant code branches:
+   *  - arMode: this assistant may narrate in the AR viewer.
+   *  - sceneActions: allowlist of scene tokens ([scene:play-anim], ...) chatRag
+   *    responses may trigger on the AR scene (FASE 4).
+   *  - announceNearby: speak a proximity announcement when a nearby POI enters
+   *    the threshold (FASE 3).
+   */
+  arMode?: boolean;
+  sceneActions?: string[];
+  announceNearby?: boolean;
+  /**
    * Per-assistant response contract (config-driven assistant TYPE). Absent =>
    * treated as DEFAULT_PLAIN_CONTRACT (today's behavior). Read server-side by
    * chatRag. Populated on old docs by the v5 migration / backfillAssistants.

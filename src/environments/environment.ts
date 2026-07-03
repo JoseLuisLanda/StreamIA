@@ -35,4 +35,16 @@ export const environment = {
   /** Local dev only: route all Firebase SDK calls to local emulators. */
   useEmulators: false,
   emulatorHost: 'localhost',
+
+  /**
+   * Google Maps JavaScript API (feature /ar-assistant). BROWSER key -- the ONLY
+   * key permitted in the client, and it MUST be restricted by HTTP referrer in
+   * Google Cloud Console (see docs/AR_CONTENT_MANAGER_README.md). All other
+   * keys stay in Secret Manager. Loaded dynamically ONLY on routes that use it
+   * (google-maps-loader.service).
+   */
+  googleMapsApiKey: 'AIzaSyCuiVBBR4Mbpf667IdzXR5QqcUq5p0bOH4',
+  /** Map ID (dark style) required by AdvancedMarkerElement. Empty = classic
+   *  Marker fallback in the location picker. */
+  googleMapsMapId: '2434a899ce8a8790684f7b33 ',
 };

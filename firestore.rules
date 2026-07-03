@@ -143,6 +143,30 @@ service cloud.firestore {
     }
     // PROD (restore): allow read: if isSignedIn(); allow write: if isAdmin();
 
+    // --- AR elements (feature /ar-assistant): ownerUid-scoped content ---
+    // Ownership is by ownerUid (auth uid), NEVER by email. These rules are REAL
+    // (not dev-permissive) from day one, per the feature spec:
+    //  - read: any signed-in user sees PUBLISHED elements (the viewer queries
+    //    enabled == true); owner/admin also see their drafts.
+    //  - create: ownership is FORCED to the caller (can't create for others).
+    //  - update: owner or admin; ownerUid is IMMUTABLE except for admin
+    //    reassignment.
+    //  - delete: owner or admin.
+    match /ar_elements/{elementId} {
+      allow read: if isSignedIn() && (
+        resource.data.enabled == true ||
+        request.auth.uid == resource.data.ownerUid ||
+        isAdmin()
+      );
+      allow create: if isSignedIn()
+        && request.resource.data.ownerUid == request.auth.uid;
+      allow update: if isSignedIn()
+        && (request.auth.uid == resource.data.ownerUid || isAdmin())
+        && (request.resource.data.ownerUid == resource.data.ownerUid || isAdmin());
+      allow delete: if isSignedIn()
+        && (request.auth.uid == resource.data.ownerUid || isAdmin());
+    }
+
     // --- Everything else: locked down by default ---
     match /{document=**} {
       allow read, write: if false;

@@ -15,4 +15,8 @@ export const environment = {
   enforceAdminRole: true,
   useEmulators: false,
   emulatorHost: 'localhost',
+
+  // Google Maps browser key (referrer-restricted; see AR_CONTENT_MANAGER_README).
+  googleMapsApiKey: 'AIzaSyCuiVBBR4Mbpf667IdzXR5QqcUq5p0bOH4',
+  googleMapsMapId: '2434a899ce8a8790684f7b33 ',
 };

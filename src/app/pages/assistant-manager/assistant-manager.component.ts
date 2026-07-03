@@ -328,6 +328,17 @@ export function defaultContractFor(kind: ResponseContractKind): ResponseContract
               <label class="fld"><span>Activation command (optional)</span><input type="text" [(ngModel)]="form.activationCommand" placeholder="ok strimearia" /></label>
               <label class="toggle big"><input type="checkbox" [(ngModel)]="form.enabled" /> <span>Enabled (show in selector)</span></label>
 
+              <!-- ===== AR (feature /ar-assistant, schema v6) ===== -->
+              <div class="llmbox">
+                <div class="llmhead">Realidad Aumentada</div>
+                <label class="toggle"><input type="checkbox" [(ngModel)]="form.arMode" /> <span>Modo RA (puede narrar en el visor)</span></label>
+                <label class="toggle"><input type="checkbox" [(ngModel)]="form.announceNearby" /> <span>Anunciar contenido cercano por voz</span></label>
+                <label class="fld"><span>Acciones de escena permitidas (separadas por coma)</span>
+                  <input type="text" [(ngModel)]="sceneActionsText" placeholder="play-anim, play-video, pause-video" />
+                </label>
+                <p class="hint">Allowlist de tokens [scene:*] que las respuestas del asistente pueden disparar sobre la escena RA. Vacio = ninguna accion de escena.</p>
+              </div>
+
               <div class="actions">
                 <button class="btn primary" (click)="save()" [disabled]="!canSave() || saving()">{{ saving() ? 'Saving...' : 'Save' }}</button>
                 <button class="btn ghost" (click)="cancel()">Cancel</button>
@@ -500,6 +511,8 @@ export class AssistantManagerComponent implements OnInit {
   newPromptText = '';
   greetingKwText = '';
   farewellKwText = '';
+  /** Comma-separated editor for form.sceneActions (AR fieldset, schema v6). */
+  sceneActionsText = '';
 
   readonly llmLabels = PROVIDER_LABELS;
   readonly profiles = signal<LlmConfigProfile[]>([]);
@@ -576,7 +589,7 @@ export class AssistantManagerComponent implements OnInit {
   }
 
   private blank(): AssistantConfig {
-    return { id: '', name: '', role: '', description: '', avatarId: '', ragCollection: '', systemPrompt: '', voice: '', language: 'es', enabled: true, knowledgeMode: 'rag_only' };
+    return { id: '', name: '', role: '', description: '', avatarId: '', ragCollection: '', systemPrompt: '', voice: '', language: 'es', enabled: true, knowledgeMode: 'rag_only', arMode: false, sceneActions: [], announceNearby: false };
   }
 
   async reload(): Promise<void> {
@@ -683,6 +696,7 @@ export class AssistantManagerComponent implements OnInit {
     this.form = this.blank();
     this.ensureContract();
     this.syncContractJsonFromForm();
+    this.sceneActionsText = '';
     this.error.set('');
     this.view.set('edit');
   }
@@ -695,6 +709,7 @@ export class AssistantManagerComponent implements OnInit {
     this.view.set('edit');
     this.greetingKwText = (a.greetingKeywords ?? []).join(', ');
     this.farewellKwText = (a.farewellKeywords ?? []).join(', ');
+    this.sceneActionsText = (a.sceneActions ?? []).join(', ');
     void this.loadConvEdit();
   }
 
@@ -711,6 +726,8 @@ export class AssistantManagerComponent implements OnInit {
     this.form.id = id;
     // Serialize the contract JSON editors back into the contract before saving.
     if (!this.applyContractJson()) { this.error.set(this.contractJsonErr()); return; }
+    // Serialize the AR scene-actions text editor back into the array.
+    this.form.sceneActions = this.sceneActionsText.split(',').map((x) => x.trim()).filter(Boolean);
     this.saving.set(true);
     this.error.set('');
     try {

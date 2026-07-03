@@ -19,7 +19,7 @@
 import { DEFAULT_PLAIN_CONTRACT } from './rag.models';
 
 /** Current assistant schema version. Bump when adding a migrated field. */
-export const ASSISTANT_SCHEMA_VERSION = 5;
+export const ASSISTANT_SCHEMA_VERSION = 6;
 
 export interface MigrationStep {
   /** The version this step upgrades a doc TO. */
@@ -76,6 +76,19 @@ export const ASSISTANT_MIGRATIONS: MigrationStep[] = [
       if (d.responseContract == null) {
         d.responseContract = JSON.parse(JSON.stringify(DEFAULT_PLAIN_CONTRACT));
       }
+    },
+  },
+  {
+    // v6 adds the AR-assistant fields (feature /ar-assistant, FASE 0):
+    //  - arMode: this assistant may act as the AR viewer narrator.
+    //  - sceneActions: allowlist of [scene:*] tokens it may emit (FASE 4).
+    //  - announceNearby: voice announcement when a POI enters the proximity
+    //    threshold (FASE 3). Defaults keep old assistants byte-identical.
+    to: 6,
+    apply: (d) => {
+      if (d.arMode !== true) d.arMode = false;
+      if (!Array.isArray(d.sceneActions)) d.sceneActions = [];
+      if (d.announceNearby !== true) d.announceNearby = false;
     },
   },
 ];

@@ -190,6 +190,10 @@ export class AssistantConfigService {
         activationCommand: cfg.activationCommand ?? null,
         allowAvatarSwitch: cfg.allowAvatarSwitch ?? true,
         enabled: cfg.enabled ?? true,
+        // AR-assistant fields (schema v6; see lib/rag/assistant-schema.ts).
+        arMode: cfg.arMode === true,
+        sceneActions: cfg.sceneActions ?? [],
+        announceNearby: cfg.announceNearby === true,
         createdAt: cfg.createdAt ?? now,
         updatedAt: serverTimestamp(),
       },
@@ -222,6 +226,10 @@ export class AssistantConfigService {
       const patch: any = {
         useCustomResponses: data.useCustomResponses,
         schemaVersion: ASSISTANT_SCHEMA_VERSION,
+        // v6 AR fields (defaults filled by the migration; persist them).
+        arMode: data.arMode === true,
+        sceneActions: Array.isArray(data.sceneActions) ? data.sceneActions : [],
+        announceNearby: data.announceNearby === true,
       };
       if (data.__needsContentModified) patch.contentModifiedAt = serverTimestamp();
       await setDoc(doc(db, 'assistants', id), patch, { merge: true });
@@ -261,6 +269,9 @@ export class AssistantConfigService {
       tailGestureId: data.tailGestureId,
       allowAvatarSwitch: data.allowAvatarSwitch ?? true,
       enabled: data.enabled ?? true,
+      arMode: (data as any).arMode === true,
+      sceneActions: Array.isArray((data as any).sceneActions) ? (data as any).sceneActions : [],
+      announceNearby: (data as any).announceNearby === true,
       schemaVersion: (data as any).schemaVersion,
       createdAt: this.toMs((data as any).createdAt),
       updatedAt: this.toMs((data as any).updatedAt),

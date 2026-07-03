@@ -29,7 +29,10 @@ interface LedgerRow { type: string; amount: number; balanceAfter: number; by: st
           <h1>Mi cuenta</h1>
           <p class="sub">Tu saldo de consultas es por CUENTA: se comparte entre todos los asistentes.</p>
         </div>
-        <a class="tlink" routerLink="/assistants">&larr; Asistentes</a>
+        <nav class="tlinks">
+          <a class="tlink" routerLink="/ar-content-manager">Mi contenido RA</a>
+          <a class="tlink" routerLink="/assistants">&larr; Asistentes</a>
+        </nav>
       </header>
 
       <p class="note" *ngIf="!auth.user()">Inicia sesion para ver tu cuota.</p>
@@ -82,6 +85,7 @@ interface LedgerRow { type: string; amount: number; balanceAfter: number; by: st
     h2 { margin: 0; font-size: 15px; }
     .ch { display: flex; align-items: center; gap: 10px; }
     .sub { color: #8b92a3; font-size: 12.5px; margin: 4px 0 0; }
+    .tlinks { display: flex; gap: 14px; align-items: center; flex-wrap: wrap; }
     .tlink { color: #cbb8f8; text-decoration: none; font-size: 13px; white-space: nowrap; }
     .err { color: #f0a6a6; font-size: 13px; }
     .note { color: #8b92a3; font-size: 12.5px; }

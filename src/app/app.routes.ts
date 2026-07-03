@@ -36,6 +36,14 @@ export const routes: Routes = [
         loadComponent: () => import('./pages/gesture-studio/gesture-studio.component').then(m => m.GestureStudioComponent)
     },
     {
+        // AR content manager (feature /ar-assistant, FASE 0). authGuard ONLY:
+        // gestores are plain authenticated users (they see just their own
+        // elements); admin capabilities are resolved in-component.
+        path: 'ar-content-manager',
+        canActivate: [authGuard],
+        loadComponent: () => import('./pages/ar-content-manager/ar-content-manager.component').then(m => m.ArContentManagerComponent)
+    },
+    {
         path: 'admin',
         canActivate: [adminGuard],
         loadComponent: () => import('./pages/admin-hub/admin-hub.component').then(m => m.AdminHubComponent)

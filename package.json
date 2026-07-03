@@ -46,6 +46,7 @@
     "@angular/compiler-cli": "^21.1.0",
     "@angular/fire": "^0.0.0",
     "@types/delaunator": "^5.0.3",
+    "@types/google.maps": "^3.65.2",
     "@types/three": "^0.182.0",
     "jsdom": "^27.1.0",
     "typescript": "~5.9.2",

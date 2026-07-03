@@ -60,6 +60,12 @@ export const ADMIN_MODULES: AdminModule[] = [
     icon: 'M12 1v22 M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6',
   },
   {
+    title: 'Contenido RA',
+    route: '/ar-content-manager',
+    description: 'Elementos de Realidad Aumentada: posicion, assets y asistente narrador.',
+    icon: 'M12 21s-7-5.3-7-11a7 7 0 0 1 14 0c0 5.7-7 11-7 11z M12 12a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z',
+  },
+  {
     title: 'Cuotas',
     route: '/cuotas',
     description: 'Cuota de consultas por cuenta: asignar, recargar y ver consumo (ledger).',
