@@ -13,13 +13,25 @@ jobs:
       - uses: actions/checkout@v4
       - run: npm ci && npm run build
       - name: Deploy to Firebase Hosting (live)
-        # Uses the Firebase CLI instead of action-hosting-deploy@v0 because the
-        # action fails with FAILED_PRECONDITION ("supplied version is the current
-        # active version") when the built output is identical to what is already
-        # live. The CLI handles unchanged content gracefully.
+        # Deploy via the Firebase CLI. When the built output is byte-for-byte
+        # identical to what is already live, both the CLI and action-hosting-deploy
+        # fail with FAILED_PRECONDITION ("supplied version is the current active
+        # version"). That is not a real failure -- the live site already serves
+        # this exact content -- so we detect that specific message and treat it as
+        # success while still failing on any other error.
         run: |
           printf '%s' "$FIREBASE_SERVICE_ACCOUNT" > "${RUNNER_TEMP}/firebase-sa.json"
           export GOOGLE_APPLICATION_CREDENTIALS="${RUNNER_TEMP}/firebase-sa.json"
-          npx firebase-tools deploy --only hosting --project strimearia --non-interactive
+          set +e
+          output=$(npx firebase-tools deploy --only hosting --project strimearia --non-interactive 2>&1)
+          status=$?
+          echo "$output"
+          if [ $status -ne 0 ]; then
+            if echo "$output" | grep -q "is the current active version"; then
+              echo "::notice::Hosting output is unchanged and already live. Nothing to release; treating as success."
+              exit 0
+            fi
+            exit $status
+          fi
         env:
           FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT_STRIMEARIA }}
