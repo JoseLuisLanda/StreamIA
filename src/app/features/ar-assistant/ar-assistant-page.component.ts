@@ -93,8 +93,9 @@ import { AssistantConfig } from '../../lib/rag/rag.models';
   styles: [`
     :host { display: block; position: fixed; inset: 0; background: #000; z-index: 10; }
     .stage { position: absolute; inset: 0; overflow: hidden; font-family: 'Segoe UI', system-ui, sans-serif; }
-    .scene-host { position: absolute; inset: 0; }
-    /* AR.js injects a fixed <video>; keep our layers above it. */
+    /* Camera video (adopted #arjs-video, z 0) + scene canvas (z 1) live here;
+       overlays stack above. */
+    .scene-host { position: absolute; inset: 0; z-index: 0; overflow: hidden; }
     .statusbar { position: absolute; top: max(10px, env(safe-area-inset-top)); left: 10px; right: 10px; z-index: 40;
       display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 14px;
       background: rgba(10,14,20,.5); backdrop-filter: blur(12px); border: 1px solid rgba(255,255,255,.15);
@@ -176,6 +177,10 @@ export class ArAssistantPageComponent implements OnInit, OnDestroy {
     void this.requestWakeLock();
 
     try {
+      // Camera PREFLIGHT: trigger the permission prompt explicitly and fail
+      // with a clear message if denied/unavailable (AR.js fails silently).
+      // The probe stream is stopped right away; AR.js opens its own.
+      await this.preflightCamera();
       await this.scene.loadScripts();
       if (elementId) await this.initMarkerMode(elementId, assistantParam);
       else await this.initGpsMode(assistantParam);
@@ -273,6 +278,26 @@ export class ArAssistantPageComponent implements OnInit, OnDestroy {
 
   onMapFocus(elementId: string): void {
     this.focusedElementId.set(elementId);
+  }
+
+  /** Explicit getUserMedia probe: surfaces the permission prompt + readable
+   *  errors (denied / no HTTPS / no camera) before AR.js takes over. */
+  private async preflightCamera(): Promise<void> {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      throw new Error('Este navegador no soporta camara (se requiere HTTPS o localhost).');
+    }
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment' },
+        audio: false,
+      });
+      stream.getTracks().forEach((t) => t.stop());
+    } catch (e: any) {
+      const name = e?.name ?? '';
+      if (name === 'NotAllowedError') throw new Error('Permiso de camara denegado. Habilitalo para este sitio y recarga.');
+      if (name === 'NotFoundError') throw new Error('No se encontro una camara en este dispositivo.');
+      throw new Error('No se pudo acceder a la camara: ' + (e?.message ?? name));
+    }
   }
 
   private async requestWakeLock(): Promise<void> {

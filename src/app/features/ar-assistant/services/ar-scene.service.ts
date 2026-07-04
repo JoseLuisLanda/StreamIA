@@ -216,8 +216,60 @@ export class ArSceneService {
       if ((scene as any).hasLoaded) resolve();
       else scene.addEventListener('loaded', () => resolve(), { once: true });
     });
+    // Scene canvas above the camera video, below the UI overlays.
+    (scene as any).style.position = 'absolute';
+    (scene as any).style.inset = '0';
+    (scene as any).style.zIndex = '1';
+    this.adoptArVideo();
     this.sceneReady.set(true);
   }
+
+  /**
+   * CRITICAL VISIBILITY FIX: AR.js appends its <video id="arjs-video"> to
+   * <body> with a NEGATIVE z-index. Our viewer page is a fixed, opaque host
+   * stacked ABOVE the body, so the camera feed ends up buried underneath
+   * (black screen on desktop and mobile). We ADOPT the video into the scene
+   * host (inside our stacking context) and style it as the fullscreen
+   * background layer. The MediaStream keeps playing across the reparent.
+   * AR.js creates the video asynchronously (after the permission grant), so
+   * we retry for a few seconds.
+   */
+  private adoptArVideo(attempt = 0): void {
+    const host = this.hostEl;
+    if (!host) return;
+    const video = document.getElementById('arjs-video') as HTMLVideoElement | null;
+    if (!video) {
+      if (attempt < 40) setTimeout(() => this.adoptArVideo(attempt + 1), 250);
+      return;
+    }
+    if (video.parentElement !== host) host.insertBefore(video, host.firstChild);
+    this.styleArVideo(video);
+    // AR.js re-styles the video (own margins/size) on every window resize --
+    // re-apply our fullscreen-cover style right after it does.
+    if (!this.videoFixHandler) {
+      this.videoFixHandler = () => {
+        const v = document.getElementById('arjs-video') as HTMLVideoElement | null;
+        if (v) setTimeout(() => this.styleArVideo(v), 120);
+      };
+      window.addEventListener('resize', this.videoFixHandler);
+      window.addEventListener('orientationchange', this.videoFixHandler);
+    }
+    console.info('[ar-scene] arjs-video adopted into the scene host');
+  }
+
+  private styleArVideo(video: HTMLVideoElement): void {
+    video.style.position = 'absolute';
+    video.style.inset = '0';
+    video.style.width = '100%';
+    video.style.height = '100%';
+    video.style.objectFit = 'cover';
+    video.style.zIndex = '0';
+    video.style.marginLeft = '0';
+    video.style.marginTop = '0';
+    video.setAttribute('playsinline', '');
+  }
+
+  private videoFixHandler: (() => void) | null = null;
 
   /** Marker-mode element: <a-marker type=pattern url=...> + its (hidden) assets. */
   private appendMarkerElement(scene: HTMLElement, el: ArElement): void {
@@ -340,6 +392,11 @@ export class ArSceneService {
 
   /** Remove the scene and stop the webcam AR.js opened. */
   destroyScene(): void {
+    if (this.videoFixHandler) {
+      window.removeEventListener('resize', this.videoFixHandler);
+      window.removeEventListener('orientationchange', this.videoFixHandler);
+      this.videoFixHandler = null;
+    }
     if (this.sceneEl) {
       try {
         const video: HTMLVideoElement | null = document.querySelector('#arjs-video');
