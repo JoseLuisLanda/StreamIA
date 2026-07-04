@@ -278,45 +278,49 @@ function esc(s: string): string {
 }
 
 /**
- * Inner art (1024 viewBox), Publicar3D style: white background, Mondrian-like
- * color bars on the left and edges, brand letter, corner text, and the QR on
- * the center-right. Deterministic per element (accent color from id).
+ * Inner art (1024 viewBox) with QR-STYLE ORIENTATION FINDERS: three bold dark
+ * corner anchors (top-left, top-right, bottom-left) and ONE deliberately open
+ * corner (bottom-right, light accent bracket). At the 16x16 .patt resolution
+ * this breaks EVERY rotational symmetry with high contrast, so ARToolKit
+ * locks the same orientation on every re-detection (no more random 180 flips
+ * when tracking drops and recovers). QR centered; brand/corner text and
+ * accent bars fill the space between finders.
  */
 function buildInnerSvg(t: Required<MarkerTemplate>, qrPng: Buffer): string {
   const S = 1024;
-  const qrSize = 590;
-  const qrX = 350;
-  const qrY = 250;
+  const qrSize = 500;
+  const qrX = (S - qrSize) / 2;
+  const qrY = (S - qrSize) / 2;
   const qrB64 = qrPng.toString('base64');
   const acc = t.accentColor;
   const RED = '#d92b2b', BLUE = '#1f6fd6', YEL = '#f2b01e';
+  const F = 190; // finder outer size
+  const M = 36;  // finder margin from the inner-art edge
+  const DARK = '#111111';
+  /** QR-like finder: dark square, white ring, dark core. */
+  const finder = (x: number, y: number) =>
+    `<rect x="${x}" y="${y}" width="${F}" height="${F}" fill="${DARK}"/>` +
+    `<rect x="${x + 30}" y="${y + 30}" width="${F - 60}" height="${F - 60}" fill="${t.innerBackground}"/>` +
+    `<rect x="${x + 60}" y="${y + 60}" width="${F - 120}" height="${F - 120}" fill="${DARK}"/>`;
+  const brX = S - M - F, brY = S - M - F; // open corner (bottom-right)
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${S}" height="${S}" viewBox="0 0 ${S} ${S}">` +
     `<rect width="${S}" height="${S}" fill="${t.innerBackground}"/>` +
-    // solid dark corner block: keeps the 16x16 downsampled pattern signature
-    // HIGH-CONTRAST and asymmetric (QR alone blurs to flat gray at 16x16,
-    // which weakens ARToolKit template matching)
-    `<rect x="40" y="700" width="230" height="230" fill="#111111"/>` +
-    `<rect x="70" y="730" width="80" height="80" fill="${t.innerBackground}"/>` +
-    // left column bars
-    `<rect x="48" y="60" width="34" height="240" fill="${acc}"/>` +
-    `<rect x="104" y="60" width="34" height="150" fill="${RED}"/>` +
-    `<rect x="160" y="90" width="34" height="210" fill="${BLUE}"/>` +
-    `<rect x="300" y="860" width="120" height="60" fill="${RED}"/>` +
-    // top bars between left column and corner text
-    `<rect x="300" y="60" width="150" height="34" fill="${RED}"/>` +
-    `<rect x="300" y="118" width="90" height="34" fill="${BLUE}"/>` +
-    // right edge bars
-    `<rect x="942" y="220" width="34" height="220" fill="${YEL}"/>` +
-    `<rect x="942" y="640" width="34" height="180" fill="${RED}"/>` +
-    // corner text (AR)
-    `<text x="820" y="150" text-anchor="middle" font-family="sans-serif" font-size="130" font-weight="700" fill="${BLUE}">${esc(t.cornerText)}</text>` +
-    // brand letter (P)
-    `<text x="150" y="620" text-anchor="middle" font-family="sans-serif" font-size="230" font-weight="800" fill="${YEL}">${esc(t.brandText)}</text>` +
+    // three orientation finders + one OPEN corner (thin accent bracket only)
+    finder(M, M) + finder(S - M - F, M) + finder(M, S - M - F) +
+    `<path d="M ${brX + F} ${brY + F - 60} L ${brX + F} ${brY + F} L ${brX + F - 60} ${brY + F}" ` +
+    `stroke="${acc}" stroke-width="16" fill="none"/>` +
+    // corner text between the top finders
+    `<text x="${S / 2}" y="150" text-anchor="middle" font-family="sans-serif" font-size="96" font-weight="700" fill="${BLUE}">${esc(t.cornerText)}</text>` +
+    // brand letters at the bottom band (between BL finder and open corner)
+    `<text x="${S / 2}" y="${S - 78}" text-anchor="middle" font-family="sans-serif" font-size="110" font-weight="800" fill="${YEL}">${esc(t.brandText)}</text>` +
+    // side accent bars (left/right bands between finders)
+    `<rect x="${M + 20}" y="380" width="34" height="264" fill="${acc}"/>` +
+    `<rect x="${M + 74}" y="420" width="34" height="184" fill="${RED}"/>` +
+    `<rect x="${S - M - 54}" y="380" width="34" height="264" fill="${BLUE}"/>` +
+    `<rect x="${S - M - 108}" y="420" width="34" height="184" fill="${YEL}"/>` +
     // QR (own white quiet zone from margin:2)
     `<image x="${qrX}" y="${qrY}" width="${qrSize}" height="${qrSize}" href="data:image/png;base64,${qrB64}"/>` +
-    // bottom accent line
-    `<rect x="300" y="930" width="420" height="26" fill="${acc}"/>` +
     `</svg>`
   );
 }
