@@ -221,8 +221,11 @@ function mergeTemplate(id: string, name: string, fromDoc?: MarkerTemplate, fromR
   t.brandText = String(t.brandText).slice(0, 3);
   t.cornerText = String(t.cornerText).slice(0, 4);
   t.logoPath = String(t.logoPath ?? '');
-  const r = Number(t.patternRatio);
-  t.patternRatio = Number.isFinite(r) && r >= 0.5 && r <= 0.95 ? r : 0.9;
+  // patternRatio: the DOC value is IGNORED on purpose (old docs persisted the
+  // legacy thick-frame 0.72 and would override the new thin-frame default
+  // forever). Only an explicit REQUEST value wins; otherwise 0.9.
+  const rReq = Number(fromReq?.patternRatio);
+  t.patternRatio = Number.isFinite(rReq) && rReq >= 0.5 && rReq <= 0.95 ? rReq : 0.9;
   return t;
 }
 
@@ -335,32 +338,14 @@ async function buildLabelPng(t: Required<MarkerTemplate>, markerPng: Buffer, log
   const logoB64 = logoPng ? logoPng.toString('base64') : '';
   const haveLogo = !!logoPng;
 
-  // ---- header (customizable background + text colors) ----
-  const HEADER_H = 760;
-  const headerRect = `<rect x="0" y="0" width="${LABEL_W}" height="${HEADER_H}" fill="${t.headerBackground}"/>`;
-  const logoZone = haveLogo
-    ? `<image x="80" y="50" width="1440" height="400" preserveAspectRatio="xMidYMid meet" href="data:image/png;base64,${logoB64}"/>`
-    : '';
-  const titleY = haveLogo ? 550 : 260;
-  const titleSize = haveLogo ? 72 : 110;
-  const titleLine = `<text x="${LABEL_W / 2}" y="${titleY}" text-anchor="middle" font-family="sans-serif" font-size="${titleSize}" font-weight="800" fill="${t.headerTextColor}">${esc(t.title)}</text>`;
-  const descStartY = haveLogo ? 625 : 380;
-  const descSvg = descLines
-    .map((ln, i) => `<text x="${LABEL_W / 2}" y="${descStartY + i * 58}" text-anchor="middle" font-family="sans-serif" font-size="46" fill="${t.headerTextColor}" opacity="0.82">${esc(ln)}</text>`)
-    .join('');
-
-  // ---- marker geometry + dashed cut line with scissors ----
-  const markerSize = 1400;
-  const mkX = Math.round((LABEL_W - markerSize) / 2);
-  const mkY = LABEL_H - markerSize - 60;
-  const cut = 22; // gap between marker and cut line
-  const cx = mkX - cut, cy = mkY - cut, cs = markerSize + 2 * cut;
+  // ---- outer CUT LINE: the WHOLE label is the cut area (header included) ----
+  const CUT_M = 40; // dashed line inset from the label edges
   const CUTCOL = '#555555';
   const dashedRect =
-    `<rect x="${cx}" y="${cy}" width="${cs}" height="${cs}" fill="none" stroke="${CUTCOL}" stroke-width="5" stroke-dasharray="22 16"/>`;
-  // Scissors glyph sitting ON the top dashed edge (white patch interrupts the
-  // dashes so it reads as "cut here").
-  const scX = cx + 90, scY = cy - 34;
+    `<rect x="${CUT_M}" y="${CUT_M}" width="${LABEL_W - 2 * CUT_M}" height="${LABEL_H - 2 * CUT_M}" ` +
+    `fill="none" stroke="${CUTCOL}" stroke-width="5" stroke-dasharray="22 16"/>`;
+  // Scissors glyph ON the top dashed edge (white patch interrupts the dashes).
+  const scX = CUT_M + 70, scY = CUT_M - 34;
   const scissors =
     `<g transform="translate(${scX},${scY})">` +
     `<rect x="-8" y="10" width="86" height="50" fill="#ffffff"/>` +
@@ -370,6 +355,24 @@ async function buildLabelPng(t: Required<MarkerTemplate>, markerPng: Buffer, log
     `<circle cx="12" cy="12" r="8"/>` +
     `<circle cx="12" cy="56" r="8"/>` +
     `</g></g>`;
+
+  // ---- header (customizable background + text colors), inside the cut area --
+  const headerRect = `<rect x="${CUT_M + 20}" y="${CUT_M + 20}" width="${LABEL_W - 2 * (CUT_M + 20)}" height="700" fill="${t.headerBackground}"/>`;
+  const logoZone = haveLogo
+    ? `<image x="100" y="${CUT_M + 40}" width="${LABEL_W - 200}" height="380" preserveAspectRatio="xMidYMid meet" href="data:image/png;base64,${logoB64}"/>`
+    : '';
+  const titleY = haveLogo ? CUT_M + 540 : CUT_M + 280;
+  const titleSize = haveLogo ? 72 : 110;
+  const titleLine = `<text x="${LABEL_W / 2}" y="${titleY}" text-anchor="middle" font-family="sans-serif" font-size="${titleSize}" font-weight="800" fill="${t.headerTextColor}">${esc(t.title)}</text>`;
+  const descStartY = haveLogo ? CUT_M + 615 : CUT_M + 400;
+  const descSvg = descLines
+    .map((ln, i) => `<text x="${LABEL_W / 2}" y="${descStartY + i * 58}" text-anchor="middle" font-family="sans-serif" font-size="46" fill="${t.headerTextColor}" opacity="0.82">${esc(ln)}</text>`)
+    .join('');
+
+  // ---- marker geometry (bottom, inside the cut area) ----
+  const markerSize = 1400;
+  const mkX = Math.round((LABEL_W - markerSize) / 2);
+  const mkY = LABEL_H - markerSize - CUT_M - 40;
 
   const labelSvg =
     `<svg xmlns="http://www.w3.org/2000/svg" width="${LABEL_W}" height="${LABEL_H}">` +
