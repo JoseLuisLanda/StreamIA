@@ -182,10 +182,14 @@ export class ArSceneService {
     scene.setAttribute('embedded', '');
     scene.setAttribute('vr-mode-ui', 'enabled: false');
     scene.setAttribute('renderer', 'logarithmicDepthBuffer: true; alpha: true');
+    // patternRatio MUST match the generated markers (thin frame default 0.9;
+    // per-element markerTemplate.patternRatio is authoritative). AR.js takes
+    // ONE ratio per scene, so the first pattern element's value wins.
+    const ratio = elements.find((e) => e.markerTemplate?.patternRatio)?.markerTemplate?.patternRatio ?? 0.9;
     scene.setAttribute(
       'arjs',
       mode === 'marker'
-        ? 'sourceType: webcam; detectionMode: mono; debugUIEnabled: false;'
+        ? `sourceType: webcam; detectionMode: mono; patternRatio: ${ratio}; debugUIEnabled: false;`
         : 'sourceType: webcam; debugUIEnabled: false;',
     );
 

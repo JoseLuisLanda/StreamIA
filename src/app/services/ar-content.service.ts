@@ -259,6 +259,24 @@ export class ArContentService {
     return { storagePath, fileName, sizeBytes: payload.size, contentType };
   }
 
+  /**
+   * Upload the business LOGO for the printed label to
+   * ar-content/{elementId}/marker-assets/logo.png (fixed path, overwritten).
+   * The generateMarkerKit callable only accepts logo paths under the element's
+   * own folder. Returns the Storage path for template.logoPath.
+   */
+  async uploadMarkerLogo(
+    elementId: string,
+    file: File,
+    onProgress?: (p: ArUploadProgress) => void,
+  ): Promise<string> {
+    if (!/^image\//i.test(file.type)) throw new Error('El logo debe ser una imagen.');
+    if (file.size > 5 * 1024 * 1024) throw new Error('El logo excede 5 MB.');
+    const storagePath = `${this.storageFolderFor(elementId)}/marker-assets/logo.png`;
+    await this.upload(storagePath, file, file.type || 'image/png', onProgress);
+    return storagePath;
+  }
+
   /** Upload the .patt marker file to ar-content/{elementId}/marker.patt. */
   async uploadPattern(
     elementId: string,
@@ -411,6 +429,7 @@ export class ArContentService {
       // Server-owned marker-kit fields (written by generateMarkerKit).
       qrImageUrl: data.qrImageUrl || undefined,
       markerImageUrl: data.markerImageUrl || undefined,
+      labelImageUrl: data.labelImageUrl || undefined,
       markerPdfUrl: data.markerPdfUrl || undefined,
       markerKitGeneratedAt: this.toMs(data.markerKitGeneratedAt),
       markerTemplate: data.markerTemplate || undefined,

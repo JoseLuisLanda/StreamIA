@@ -189,16 +189,27 @@ import { ArAssetEditorComponent } from './components/asset-editor.component';
                 <div class="bhead">Kit de marcador (QR + marcador imprimible + .patt + PDF)</div>
                 <p class="hint">Deep link: {{ deepLink() }}</p>
 
-                <label class="fld"><span>Titulo en el marcador</span>
+                <label class="fld"><span>Titulo de la etiqueta</span>
                   <input type="text" [(ngModel)]="tpl.title" [placeholder]="form!.name || 'Nombre del elemento'" /></label>
-                <label class="fld"><span>Subtitulo</span>
-                  <input type="text" [(ngModel)]="tpl.subtitle" placeholder="Escaneame para ver en RA" /></label>
-                <label class="fld"><span>Texto de marca</span>
-                  <input type="text" [(ngModel)]="tpl.brandText" placeholder="AR" /></label>
+                <label class="fld"><span>Descripcion corta (arriba del marcador)</span>
+                  <textarea rows="2" [(ngModel)]="tpl.description" placeholder="Apunta tu camara y descubre este contenido en RA"></textarea></label>
                 <div class="colorrow">
-                  <label class="fld"><span>Borde</span><input type="color" [(ngModel)]="tplBorder" /></label>
+                  <label class="fld"><span>Letra marca</span><input type="text" class="tiny" [(ngModel)]="tpl.brandText" placeholder="P" maxlength="3" /></label>
+                  <label class="fld"><span>Esquina</span><input type="text" class="tiny" [(ngModel)]="tpl.cornerText" placeholder="AR" maxlength="4" /></label>
+                  <label class="fld"><span>Marco</span><input type="color" [(ngModel)]="tplBorder" /></label>
                   <label class="fld"><span>Fondo</span><input type="color" [(ngModel)]="tplBg" /></label>
                   <label class="fld"><span>Acento</span><input type="color" [(ngModel)]="tplAccent" /></label>
+                  <label class="fld"><span>Cabecera</span><input type="color" [(ngModel)]="tplHeaderBg" /></label>
+                  <label class="fld"><span>Texto cab.</span><input type="color" [(ngModel)]="tplHeaderText" /></label>
+                </div>
+
+                <div class="patrow">
+                  <label class="btn ghost sm">
+                    {{ tpl.logoPath ? 'Reemplazar logo' : 'Subir logo del negocio' }}
+                    <input type="file" hidden accept="image/*" (change)="onLogoFile($event)" />
+                  </label>
+                  <span class="hint" *ngIf="logoUploading()">Subiendo logo...</span>
+                  <span class="hint" *ngIf="tpl.logoPath && !logoUploading()">Logo listo (parte superior de la etiqueta)</span>
                 </div>
 
                 <button class="btn primary sm" (click)="generateKit()" [disabled]="kitBusy()">
@@ -206,13 +217,15 @@ import { ArAssetEditorComponent } from './components/asset-editor.component';
                 </button>
                 <p class="hint" *ngIf="form!.markerKitGeneratedAt">Generado: {{ form!.markerKitGeneratedAt | date:'short' }}. Regenerar cambia el patron: los marcadores YA IMPRESOS dejaran de reconocerse.</p>
 
-                <div class="kitprev" *ngIf="qrPreview() || markerPreview()">
-                  <figure *ngIf="qrPreview()"><img [src]="qrPreview()!" alt="QR" /><figcaption>QR</figcaption></figure>
+                <div class="kitprev" *ngIf="labelPreview() || qrPreview() || markerPreview()">
+                  <figure class="tall" *ngIf="labelPreview()"><img [src]="labelPreview()!" alt="Etiqueta" /><figcaption>Etiqueta</figcaption></figure>
                   <figure *ngIf="markerPreview()"><img [src]="markerPreview()!" alt="Marcador" /><figcaption>Marcador</figcaption></figure>
+                  <figure *ngIf="qrPreview()"><img [src]="qrPreview()!" alt="QR" /><figcaption>QR</figcaption></figure>
                 </div>
                 <div class="actions" *ngIf="form!.markerKitGeneratedAt">
-                  <button class="btn ghost sm" (click)="openArtifact(form!.markerImageUrl)">PNG</button>
+                  <button class="btn ghost sm" (click)="openArtifact(form!.labelImageUrl)">Etiqueta PNG</button>
                   <button class="btn ghost sm" (click)="openArtifact(form!.markerPdfUrl)">PDF con guias</button>
+                  <button class="btn ghost sm" (click)="openArtifact(form!.markerImageUrl)">Marcador</button>
                   <button class="btn ghost sm" (click)="openArtifact(form!.qrImageUrl)">QR</button>
                   <button class="btn ghost sm" (click)="openArtifact(form!.patternUrl)">.patt</button>
                 </div>
@@ -275,11 +288,13 @@ import { ArAssetEditorComponent } from './components/asset-editor.component';
     .bhead { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: #8b93a3; font-weight: 700; }
     .radio { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: #cbd0da; cursor: pointer; }
     .patrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-    .colorrow { display: flex; gap: 10px; }
+    .colorrow { display: flex; gap: 10px; flex-wrap: wrap; align-items: flex-end; }
+    .colorrow .tiny { width: 64px; }
     .colorrow input[type=color] { width: 52px; height: 34px; padding: 2px; border-radius: 8px; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12); cursor: pointer; }
     .kitprev { display: flex; gap: 12px; }
     .kitprev figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; }
     .kitprev img { width: 96px; height: 96px; object-fit: contain; background: #fff; border-radius: 10px; border: 1px solid rgba(255,255,255,.15); }
+    .kitprev figure.tall img { width: 110px; height: 158px; }
     .kitprev figcaption { font-size: 10.5px; color: #8b93a3; }
     .hint { font-size: 11px; color: #6b7384; line-height: 1.45; margin: 2px 0; overflow-wrap: anywhere; }
     .err { color: #ff9c9c; font-size: 12.5px; margin: 2px 0; }
@@ -314,14 +329,18 @@ export class ArContentManagerComponent implements OnInit {
   readonly patUploading = signal(false);
   readonly patProgress = signal<ArUploadProgress | null>(null);
   readonly kitBusy = signal(false);
+  readonly logoUploading = signal(false);
   readonly qrPreview = signal<string | null>(null);
   readonly markerPreview = signal<string | null>(null);
+  readonly labelPreview = signal<string | null>(null);
 
   /** Marker-template editor state (texts + colors bound to the kit box). */
   tpl: ArMarkerTemplate = {};
   tplBorder = '#000000';
   tplBg = '#ffffff';
   tplAccent = '#8b5cf6';
+  tplHeaderBg = '#ffffff';
+  tplHeaderText = '#111111';
 
   form: ArElement | null = null;
   narrationSource: 'namespace' | 'context' = 'namespace';
@@ -559,28 +578,60 @@ export class ArContentManagerComponent implements OnInit {
     else this.error.set('No se pudo resolver el archivo.');
   }
 
+  /** Upload the business logo for the label; stored under the element folder
+   *  (required by the callable's security check). */
+  async onLogoFile(ev: Event): Promise<void> {
+    if (!this.form) return;
+    const input = ev.target as HTMLInputElement;
+    const file = input.files?.[0];
+    input.value = '';
+    if (!file) return;
+    this.logoUploading.set(true);
+    this.error.set('');
+    try {
+      this.tpl.logoPath = await this.svc.uploadMarkerLogo(this.form.id, file);
+    } catch (e: any) {
+      this.error.set(e?.message ?? String(e));
+    } finally {
+      this.logoUploading.set(false);
+    }
+  }
+
   private currentTemplate(): ArMarkerTemplate {
     const t: ArMarkerTemplate = {};
     if ((this.tpl.title ?? '').trim()) t.title = this.tpl.title!.trim();
-    if ((this.tpl.subtitle ?? '').trim()) t.subtitle = this.tpl.subtitle!.trim();
+    if ((this.tpl.description ?? '').trim()) t.description = this.tpl.description!.trim();
     if ((this.tpl.brandText ?? '').trim()) t.brandText = this.tpl.brandText!.trim();
+    if ((this.tpl.cornerText ?? '').trim()) t.cornerText = this.tpl.cornerText!.trim();
+    if ((this.tpl.logoPath ?? '').trim()) t.logoPath = this.tpl.logoPath!.trim();
     if (this.tplBorder) t.borderColor = this.tplBorder;
     if (this.tplBg) t.innerBackground = this.tplBg;
     if (this.tplAccent) t.accentColor = this.tplAccent;
+    if (this.tplHeaderBg) t.headerBackground = this.tplHeaderBg;
+    if (this.tplHeaderText) t.headerTextColor = this.tplHeaderText;
     return t;
   }
 
   private initTemplateEditor(el: ArElement): void {
     const t = el.markerTemplate ?? {};
-    this.tpl = { title: t.title ?? '', subtitle: t.subtitle ?? '', brandText: t.brandText ?? '' };
+    this.tpl = {
+      title: t.title ?? '',
+      description: t.description ?? '',
+      brandText: t.brandText ?? '',
+      cornerText: t.cornerText ?? '',
+      logoPath: t.logoPath ?? '',
+    };
     this.tplBorder = t.borderColor ?? '#000000';
     this.tplBg = t.innerBackground ?? '#ffffff';
     this.tplAccent = t.accentColor ?? '#8b5cf6';
+    this.tplHeaderBg = t.headerBackground ?? '#ffffff';
+    this.tplHeaderText = t.headerTextColor ?? '#111111';
   }
 
   private async loadKitPreviews(el: ArElement): Promise<void> {
     this.qrPreview.set(await this.svc.resolveUrl(el.qrImageUrl));
     this.markerPreview.set(await this.svc.resolveUrl(el.markerImageUrl));
+    this.labelPreview.set(await this.svc.resolveUrl(el.labelImageUrl));
   }
 
   async reassign(): Promise<void> {

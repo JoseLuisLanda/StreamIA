@@ -88,13 +88,21 @@ export interface ArGeoPoint {
  * persisted on the doc so regeneration is stable.
  */
 export interface ArMarkerTemplate {
-  borderColor?: string;      // #rrggbb, default #000000
+  borderColor?: string;      // #rrggbb, default #000000 (tracking frame)
   innerBackground?: string;  // default #ffffff
   accentColor?: string;      // default derived from element id
-  title?: string;            // default element name
-  subtitle?: string;         // default 'Escaneame para ver en RA'
-  brandText?: string;        // default 'AR'
-  patternRatio?: number;     // inner fraction (AR.js patternRatio), default 0.5
+  title?: string;            // label headline (default element name)
+  description?: string;      // short text above the marker box (label)
+  brandText?: string;        // big letter(s) inside the marker art, default 'P'
+  cornerText?: string;       // corner text inside the marker art, default 'AR'
+  /** Storage path of the business logo shown on top of the label. MUST live
+   *  under ar-content/{elementId}/ (enforced server-side). */
+  logoPath?: string;
+  headerBackground?: string; // label header background, default #ffffff
+  headerTextColor?: string;  // title + description color, default #111111
+  /** Inner fraction of the black frame. Default 0.9 (thin frame). The viewer
+   *  configures the SAME value on the arjs scene (ar-scene.service). */
+  patternRatio?: number;
 }
 
 /** Firestore document shape for ar_elements/{id}. */
@@ -120,6 +128,8 @@ export interface ArElement {
    */
   qrImageUrl?: string;
   markerImageUrl?: string;
+  /** Vertical printable label (logo + description + marker). */
+  labelImageUrl?: string;
   markerPdfUrl?: string;
   markerKitGeneratedAt?: number;
   markerTemplate?: ArMarkerTemplate;

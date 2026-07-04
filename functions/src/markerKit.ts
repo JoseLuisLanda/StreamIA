@@ -1,34 +1,28 @@
 /**
  * generateMarkerKit -- SERVER-SIDE marker kit generation (feature /ar-assistant).
  *
- * Client-agnostic callable: ANY frontend (Angular manager, future apps) calls
- * generateMarkerKit({ elementId, baseUrl, template? }) and gets back the
- * Storage paths of four artifacts uploaded to ar-content/{elementId}/marker/:
+ * Client-agnostic callable: ANY frontend calls
+ * generateMarkerKit({ elementId, baseUrl, template? }) and receives Storage
+ * paths of FIVE artifacts uploaded to ar-content/{elementId}/marker/:
  *
  *   qr.png       traditional QR encoding the viewer deep link
- *                ({baseUrl}/ar-assistant?element={id})
- *   marker.png   PRINTABLE custom marker: high-contrast border + inner art
- *                (QR + title + accent marks) -- the "envoltorio". 2048x2048.
- *   marker.patt  ARToolKit pattern file encoding the marker's INNER image
- *                (16x16 cells, 3 channels BGR, 4 rotations) -- what AR.js
- *                tracks. Generated from the same composition, so the printed
- *                marker and the .patt always match.
- *   marker.pdf   Letter-size print sheet: the marker at 10 cm with crop marks
- *                + usage instructions + the deep link.
+ *   marker.png   SQUARE tracking marker: WHITE outer margin (contorno blanco)
+ *                + BLACK frame (recuadro negro, what AR.js locks onto) + inner
+ *                art (color-bar design + QR + brand letters)
+ *   label.png    VERTICAL LABEL (etiqueta, Publicar3D style): business LOGO
+ *                zone on top (template.logoPath), short DESCRIPTION, and the
+ *                square marker at the bottom
+ *   marker.patt  ARToolKit pattern (16x16, BGR, 4 rotations) encoded from the
+ *                SAME inner art, so print and tracking always match
+ *   marker.pdf   letter sheet printing the LABEL at real size with crop marks
+ *                + instructions
  *
- * Pipeline: qrcode (QR buffer) -> SVG template -> sharp (rasterize PNG +
- * 16x16 raw sampling for the .patt) -> pdf-lib (print sheet). No node-canvas.
- *
- * AuthZ: owner (ar_elements/{id}.ownerUid == caller) or admin (claim OR
- * admins/{uid} allowlist) -- mirrors firestore.rules; enforced here because the
- * Admin SDK bypasses rules.
- *
- * Template: defaults <- element.markerTemplate <- request.template (merged and
- * PERSISTED on the doc so regeneration is stable). Colors are validated
- * (#rrggbb) and texts XML-escaped (the SVG is built from user input).
- *
- * REGENERATION OVERWRITES the same paths (decision): previously printed
- * markers stop tracking if the art changes -- the client must warn.
+ * Pipeline: qrcode -> SVG -> sharp -> pdf-lib (no node-canvas). AuthZ: owner or
+ * admin (claim OR admins/{uid}), mirroring the rules. Template persisted on the
+ * doc; colors validated (#rrggbb), texts XML-escaped, and logoPath is FORCED to
+ * live under ar-content/{elementId}/ (no arbitrary bucket reads).
+ * REGENERATION OVERWRITES in place: printed markers stop tracking if the art
+ * changes -- the client confirms first.
  */
 import { onCall, HttpsError } from 'firebase-functions/v2/https';
 import { logger } from 'firebase-functions';
@@ -42,25 +36,38 @@ import { PDFDocument, StandardFonts, rgb } from 'pdf-lib';
 const CALL_OPTS = { region: 'us-central1', cors: true, memory: '512MiB', timeoutSeconds: 120 } as const;
 
 export interface MarkerTemplate {
-  /** Marker border color (high contrast vs environment). Default #000000. */
+  /** Black tracking frame color (keep near-black for detection). */
   borderColor?: string;
-  /** Inner background. Default #ffffff (keeps the QR readable). */
+  /** Inner background (keep light for QR readability). */
   innerBackground?: string;
-  /** Accent color for the distinctiveness marks. Default derived from id. */
+  /** Accent color of the bar design. Default derived from element id. */
   accentColor?: string;
-  /** Title inside the marker. Default: element name. */
+  /** Label headline under the logo (default: element name). */
   title?: string;
-  /** Small line under the QR. Default: 'Escaneame para ver en RA'. */
-  subtitle?: string;
-  /** Brand text at the bottom. Default: 'AR'. */
+  /** Short description printed ABOVE the marker box. */
+  description?: string;
+  /** Brand letters drawn inside the marker art (default 'P'). */
   brandText?: string;
-  /** Inner-image fraction of the marker width (AR.js patternRatio). Default 0.5. */
+  /** Corner text inside the marker art (default 'AR'). */
+  cornerText?: string;
+  /** Storage path of the business logo (MUST be under ar-content/{id}/). */
+  logoPath?: string;
+  /** Label header (logo + title + description zone) background color. */
+  headerBackground?: string;
+  /** Title + description text color over the header background. */
+  headerTextColor?: string;
+  /**
+   * Inner-art fraction of the BLACK frame width (AR.js patternRatio).
+   * Default 0.9 = THIN frame (1/3 of the classic 0.72 thickness): the inner
+   * art EXPANDS OUTWARD; the outer white contour is untouched. The VIEWER
+   * must configure the same patternRatio on the arjs scene (ar-scene.service
+   * reads it from the element's markerTemplate).
+   */
   patternRatio?: number;
 }
 
 interface GenerateReq {
   elementId: string;
-  /** Client origin for the deep link, e.g. https://strimearia.web.app */
   baseUrl: string;
   template?: MarkerTemplate;
 }
@@ -70,12 +77,16 @@ interface GenerateRes {
   deepLink: string;
   qrPath: string;
   markerPath: string;
+  labelPath: string;
   patternPath: string;
   pdfPath: string;
 }
 
-const SIZE = 2048;          // printable marker PNG size
-const PATT_CELLS = 16;      // ARToolKit pattern resolution
+const MARKER_PX = 2048;      // square marker artifact
+const WHITE_MARGIN = 0.06;   // white contour fraction of marker width
+const LABEL_W = 1600;        // vertical label
+const LABEL_H = 2300;
+const PATT_CELLS = 16;
 const HEX = /^#[0-9a-fA-F]{6}$/;
 
 export const generateMarkerKit = onCall<GenerateReq, Promise<GenerateRes>>(
@@ -90,60 +101,67 @@ export const generateMarkerKit = onCall<GenerateReq, Promise<GenerateRes>>(
     const snap = await ref.get();
     if (!snap.exists) throw new HttpsError('not-found', 'El elemento no existe.');
     const el = snap.data() as Record<string, unknown>;
-
     if (el['ownerUid'] !== uid) await assertAdminMirror(req.auth);
 
     const tpl = mergeTemplate(elementId, String(el['name'] ?? ''), el['markerTemplate'] as MarkerTemplate | undefined, req.data?.template);
 
-    // ---- 1. QR (deep link) -------------------------------------------------
+    // ---- 1. QR (deep link) --------------------------------------------------
     const deepLink = `${baseUrl}/ar-assistant?element=${elementId}`;
     const qrPng = await QRCode.toBuffer(deepLink, {
-      width: 1024,
-      margin: 2,
-      errorCorrectionLevel: 'H',
+      width: 1024, margin: 2, errorCorrectionLevel: 'H',
       color: { dark: '#000000', light: '#ffffff' },
     });
 
-    // ---- 2. Marker composition (SVG -> PNG) --------------------------------
+    // ---- 2. Inner art + square marker (white margin + black frame + inner) --
     const innerSvg = buildInnerSvg(tpl, qrPng);
-    const ratio = tpl.patternRatio!;
-    const innerSize = Math.round(SIZE * ratio);
-    const innerPng = await sharp(Buffer.from(innerSvg)).resize(innerSize, innerSize, { fit: 'fill' }).png().toBuffer();
+    const whitePx = Math.round(MARKER_PX * WHITE_MARGIN);
+    const blackPx = MARKER_PX - 2 * whitePx;
+    const innerPx = Math.round(blackPx * tpl.patternRatio!);
+    const innerPng = await sharp(Buffer.from(innerSvg)).resize(innerPx, innerPx, { fit: 'fill' }).png().toBuffer();
 
-    const markerSvg =
-      `<svg xmlns="http://www.w3.org/2000/svg" width="${SIZE}" height="${SIZE}">` +
-      `<rect width="${SIZE}" height="${SIZE}" fill="${tpl.borderColor}"/>` +
+    const markerBaseSvg =
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${MARKER_PX}" height="${MARKER_PX}">` +
+      `<rect width="${MARKER_PX}" height="${MARKER_PX}" fill="#ffffff"/>` +
+      `<rect x="${whitePx}" y="${whitePx}" width="${blackPx}" height="${blackPx}" fill="${tpl.borderColor}"/>` +
       `</svg>`;
-    const markerPng = await sharp(Buffer.from(markerSvg))
-      .composite([{ input: innerPng, left: Math.round((SIZE - innerSize) / 2), top: Math.round((SIZE - innerSize) / 2) }])
+    const innerOffset = Math.round((MARKER_PX - innerPx) / 2);
+    const markerPng = await sharp(Buffer.from(markerBaseSvg))
+      .composite([{ input: innerPng, left: innerOffset, top: innerOffset }])
       .png()
       .toBuffer();
 
-    // ---- 3. .patt from the inner image --------------------------------------
+    // ---- 3. .patt from the inner art ----------------------------------------
     const patt = await encodePatt(innerPng);
 
-    // ---- 4. PDF print sheet --------------------------------------------------
-    const pdfBytes = await buildPdf(markerPng, String(el['name'] ?? elementId), deepLink);
+    // ---- 4. Vertical label (logo + description + marker) --------------------
+    const logoPng = await loadLogo(elementId, tpl.logoPath);
+    const labelPng = await buildLabelPng(tpl, markerPng, logoPng);
 
-    // ---- 5. Upload (overwrite in place) --------------------------------------
+    // ---- 5. PDF print sheet (prints the LABEL) -------------------------------
+    const pdfBytes = await buildPdf(labelPng, tpl.title!, deepLink);
+
+    // ---- 6. Upload (overwrite in place) --------------------------------------
     const base = `ar-content/${elementId}/marker`;
     const paths = {
       qrPath: `${base}/qr.png`,
       markerPath: `${base}/marker.png`,
+      labelPath: `${base}/label.png`,
       patternPath: `${base}/marker.patt`,
       pdfPath: `${base}/marker.pdf`,
     };
     await Promise.all([
       bucket.file(paths.qrPath).save(qrPng, { contentType: 'image/png' }),
       bucket.file(paths.markerPath).save(markerPng, { contentType: 'image/png' }),
+      bucket.file(paths.labelPath).save(labelPng, { contentType: 'image/png' }),
       bucket.file(paths.patternPath).save(Buffer.from(patt, 'ascii'), { contentType: 'text/plain' }),
       bucket.file(paths.pdfPath).save(Buffer.from(pdfBytes), { contentType: 'application/pdf' }),
     ]);
 
-    // ---- 6. Patch the doc -----------------------------------------------------
+    // ---- 7. Patch the doc -----------------------------------------------------
     const patch: Record<string, unknown> = {
       qrImageUrl: paths.qrPath,
       markerImageUrl: paths.markerPath,
+      labelImageUrl: paths.labelPath,
       markerPdfUrl: paths.pdfPath,
       markerTemplate: tpl,
       markerKitGeneratedAt: FieldValue.serverTimestamp(),
@@ -152,7 +170,7 @@ export const generateMarkerKit = onCall<GenerateReq, Promise<GenerateRes>>(
     if (el['markerType'] === 'pattern') patch['patternUrl'] = paths.patternPath;
     await ref.set(patch, { merge: true });
 
-    logger.info('[markerKit] generated', { elementId, by: uid, deepLink });
+    logger.info('[markerKit] generated', { elementId, by: uid, deepLink, logo: !!logoPng });
     return { ok: true, deepLink, ...paths };
   },
 );
@@ -167,7 +185,6 @@ function normalizeBaseUrl(raw: string): string {
   return url;
 }
 
-/** Admin mirror of firestore.rules isAdmin() (claim OR admins/{uid} doc). */
 async function assertAdminMirror(auth: { uid: string; token?: Record<string, unknown> } | undefined): Promise<void> {
   const token = (auth?.token ?? {}) as Record<string, unknown>;
   if (token['role'] === 'admin' || token['admin'] === true) return;
@@ -179,34 +196,58 @@ async function assertAdminMirror(auth: { uid: string; token?: Record<string, unk
 }
 
 function mergeTemplate(id: string, name: string, fromDoc?: MarkerTemplate, fromReq?: MarkerTemplate): Required<MarkerTemplate> {
-  const t: Required<MarkerTemplate> = {
+  const t = {
     borderColor: '#000000',
     innerBackground: '#ffffff',
     accentColor: accentFromId(id),
     title: name || id,
-    subtitle: 'Escaneame para ver en RA',
-    brandText: 'AR',
-    patternRatio: 0.5,
+    description: '',
+    brandText: 'P',
+    cornerText: 'AR',
+    logoPath: '',
+    headerBackground: '#ffffff',
+    headerTextColor: '#111111',
+    patternRatio: 0.9,
     ...(fromDoc ?? {}),
     ...(fromReq ?? {}),
   } as Required<MarkerTemplate>;
   if (!HEX.test(t.borderColor)) t.borderColor = '#000000';
   if (!HEX.test(t.innerBackground)) t.innerBackground = '#ffffff';
   if (!HEX.test(t.accentColor)) t.accentColor = accentFromId(id);
-  t.title = String(t.title).slice(0, 40);
-  t.subtitle = String(t.subtitle).slice(0, 60);
-  t.brandText = String(t.brandText).slice(0, 20);
+  if (!HEX.test(t.headerBackground)) t.headerBackground = '#ffffff';
+  if (!HEX.test(t.headerTextColor)) t.headerTextColor = '#111111';
+  t.title = String(t.title).slice(0, 48);
+  t.description = String(t.description).slice(0, 160);
+  t.brandText = String(t.brandText).slice(0, 3);
+  t.cornerText = String(t.cornerText).slice(0, 4);
+  t.logoPath = String(t.logoPath ?? '');
   const r = Number(t.patternRatio);
-  t.patternRatio = Number.isFinite(r) && r >= 0.3 && r <= 0.9 ? r : 0.5;
+  t.patternRatio = Number.isFinite(r) && r >= 0.5 && r <= 0.95 ? r : 0.9;
   return t;
 }
 
-/** Deterministic vivid accent color from the element id (distinctiveness). */
+/** Load + normalize the business logo. SECURITY: only paths under this
+ *  element's own folder are allowed (no arbitrary bucket reads). */
+async function loadLogo(elementId: string, logoPath?: string): Promise<Buffer | null> {
+  const p = (logoPath ?? '').trim();
+  if (!p) return null;
+  if (!p.startsWith(`ar-content/${elementId}/`)) {
+    throw new HttpsError('invalid-argument', 'logoPath debe estar dentro de ar-content/{elementId}/.');
+  }
+  try {
+    const [buf] = await bucket.file(p).download();
+    // Normalize any input format to PNG, capped to the logo zone.
+    return await sharp(buf).resize(1440, 420, { fit: 'inside', withoutEnlargement: true }).png().toBuffer();
+  } catch (e) {
+    logger.warn('[markerKit] logo unreadable, skipping', { logoPath: p, e: String(e) });
+    return null;
+  }
+}
+
 function accentFromId(id: string): string {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  const hue = h % 360;
-  return hslToHex(hue, 78, 45);
+  return hslToHex(h % 360, 78, 45);
 }
 
 function hslToHex(h: number, s: number, l: number): string {
@@ -225,38 +266,125 @@ function esc(s: string): string {
 }
 
 /**
- * Inner art of the marker (1024 viewBox): background, corner accent marks,
- * title, embedded QR (data URI), subtitle, brand. Text uses generic sans-serif
- * (runtime fonts); layout keeps a white quiet zone around the QR.
+ * Inner art (1024 viewBox), Publicar3D style: white background, Mondrian-like
+ * color bars on the left and edges, brand letter, corner text, and the QR on
+ * the center-right. Deterministic per element (accent color from id).
  */
 function buildInnerSvg(t: Required<MarkerTemplate>, qrPng: Buffer): string {
   const S = 1024;
-  const qrSize = 560;
-  const qrX = (S - qrSize) / 2;
-  const qrY = 190;
+  const qrSize = 590;
+  const qrX = 350;
+  const qrY = 250;
   const qrB64 = qrPng.toString('base64');
   const acc = t.accentColor;
-  const corner = (x: number, y: number, rot: number) =>
-    `<g transform="translate(${x},${y}) rotate(${rot})">` +
-    `<rect x="0" y="0" width="120" height="26" fill="${acc}"/>` +
-    `<rect x="0" y="0" width="26" height="120" fill="${acc}"/></g>`;
+  const RED = '#d92b2b', BLUE = '#1f6fd6', YEL = '#f2b01e';
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${S}" height="${S}" viewBox="0 0 ${S} ${S}">` +
     `<rect width="${S}" height="${S}" fill="${t.innerBackground}"/>` +
-    corner(36, 36, 0) + corner(S - 36, 36, 90) + corner(S - 36, S - 36, 180) + corner(36, S - 36, 270) +
-    `<text x="${S / 2}" y="120" text-anchor="middle" font-family="sans-serif" font-size="64" font-weight="700" fill="#111111">${esc(t.title)}</text>` +
+    // left column bars
+    `<rect x="48" y="60" width="34" height="240" fill="${acc}"/>` +
+    `<rect x="104" y="60" width="34" height="150" fill="${RED}"/>` +
+    `<rect x="160" y="90" width="34" height="210" fill="${BLUE}"/>` +
+    `<rect x="48" y="700" width="34" height="220" fill="${BLUE}"/>` +
+    `<rect x="104" y="760" width="34" height="160" fill="${acc}"/>` +
+    `<rect x="160" y="820" width="60" height="100" fill="${RED}"/>` +
+    // top bars between left column and corner text
+    `<rect x="300" y="60" width="150" height="34" fill="${RED}"/>` +
+    `<rect x="300" y="118" width="90" height="34" fill="${BLUE}"/>` +
+    // right edge bars
+    `<rect x="942" y="220" width="34" height="220" fill="${YEL}"/>` +
+    `<rect x="942" y="640" width="34" height="180" fill="${RED}"/>` +
+    // corner text (AR)
+    `<text x="820" y="150" text-anchor="middle" font-family="sans-serif" font-size="130" font-weight="700" fill="${BLUE}">${esc(t.cornerText)}</text>` +
+    // brand letter (P)
+    `<text x="150" y="620" text-anchor="middle" font-family="sans-serif" font-size="230" font-weight="800" fill="${YEL}">${esc(t.brandText)}</text>` +
+    // QR (own white quiet zone from margin:2)
     `<image x="${qrX}" y="${qrY}" width="${qrSize}" height="${qrSize}" href="data:image/png;base64,${qrB64}"/>` +
-    `<text x="${S / 2}" y="${qrY + qrSize + 70}" text-anchor="middle" font-family="sans-serif" font-size="40" fill="#333333">${esc(t.subtitle)}</text>` +
-    `<text x="${S / 2}" y="${S - 48}" text-anchor="middle" font-family="sans-serif" font-size="48" font-weight="700" fill="${acc}">${esc(t.brandText)}</text>` +
+    // bottom accent line
+    `<rect x="300" y="930" width="420" height="26" fill="${acc}"/>` +
     `</svg>`
   );
 }
 
+/** Wrap plain text into up to maxLines lines of ~maxChars. */
+function wrapText(s: string, maxChars: number, maxLines: number): string[] {
+  const words = s.split(/\s+/).filter(Boolean);
+  const lines: string[] = [];
+  let cur = '';
+  for (const w of words) {
+    if ((cur + ' ' + w).trim().length > maxChars) {
+      lines.push(cur.trim());
+      cur = w;
+      if (lines.length === maxLines) break;
+    } else {
+      cur = (cur + ' ' + w).trim();
+    }
+  }
+  if (lines.length < maxLines && cur) lines.push(cur.trim());
+  return lines.slice(0, maxLines);
+}
+
 /**
- * ARToolKit .patt encoder: the inner image sampled at 16x16, three channels in
- * BGR order, four rotations (0/90/180/270) separated by a blank line. Format
- * compatible with AR.js pattern markers (whitespace-tolerant parser).
+ * VERTICAL LABEL (etiqueta): HEADER rectangle (customizable background) with
+ * the business logo + title + description in the header text color, then the
+ * square marker at the bottom surrounded by a DASHED CUT LINE with a scissors
+ * symbol (recorta aqui).
  */
+async function buildLabelPng(t: Required<MarkerTemplate>, markerPng: Buffer, logoPng: Buffer | null): Promise<Buffer> {
+  const descLines = wrapText(t.description, 44, 3);
+  const logoB64 = logoPng ? logoPng.toString('base64') : '';
+  const haveLogo = !!logoPng;
+
+  // ---- header (customizable background + text colors) ----
+  const HEADER_H = 760;
+  const headerRect = `<rect x="0" y="0" width="${LABEL_W}" height="${HEADER_H}" fill="${t.headerBackground}"/>`;
+  const logoZone = haveLogo
+    ? `<image x="80" y="50" width="1440" height="400" preserveAspectRatio="xMidYMid meet" href="data:image/png;base64,${logoB64}"/>`
+    : '';
+  const titleY = haveLogo ? 550 : 260;
+  const titleSize = haveLogo ? 72 : 110;
+  const titleLine = `<text x="${LABEL_W / 2}" y="${titleY}" text-anchor="middle" font-family="sans-serif" font-size="${titleSize}" font-weight="800" fill="${t.headerTextColor}">${esc(t.title)}</text>`;
+  const descStartY = haveLogo ? 625 : 380;
+  const descSvg = descLines
+    .map((ln, i) => `<text x="${LABEL_W / 2}" y="${descStartY + i * 58}" text-anchor="middle" font-family="sans-serif" font-size="46" fill="${t.headerTextColor}" opacity="0.82">${esc(ln)}</text>`)
+    .join('');
+
+  // ---- marker geometry + dashed cut line with scissors ----
+  const markerSize = 1400;
+  const mkX = Math.round((LABEL_W - markerSize) / 2);
+  const mkY = LABEL_H - markerSize - 60;
+  const cut = 22; // gap between marker and cut line
+  const cx = mkX - cut, cy = mkY - cut, cs = markerSize + 2 * cut;
+  const CUTCOL = '#555555';
+  const dashedRect =
+    `<rect x="${cx}" y="${cy}" width="${cs}" height="${cs}" fill="none" stroke="${CUTCOL}" stroke-width="5" stroke-dasharray="22 16"/>`;
+  // Scissors glyph sitting ON the top dashed edge (white patch interrupts the
+  // dashes so it reads as "cut here").
+  const scX = cx + 90, scY = cy - 34;
+  const scissors =
+    `<g transform="translate(${scX},${scY})">` +
+    `<rect x="-8" y="10" width="86" height="50" fill="#ffffff"/>` +
+    `<g stroke="${CUTCOL}" stroke-width="6" fill="none" stroke-linecap="round">` +
+    `<line x1="18" y1="16" x2="66" y2="52"/>` +
+    `<line x1="18" y1="52" x2="66" y2="16"/>` +
+    `<circle cx="12" cy="12" r="8"/>` +
+    `<circle cx="12" cy="56" r="8"/>` +
+    `</g></g>`;
+
+  const labelSvg =
+    `<svg xmlns="http://www.w3.org/2000/svg" width="${LABEL_W}" height="${LABEL_H}">` +
+    `<rect width="${LABEL_W}" height="${LABEL_H}" fill="#ffffff"/>` +
+    headerRect + logoZone + titleLine + descSvg + dashedRect + scissors +
+    `</svg>`;
+
+  const marker = await sharp(markerPng).resize(markerSize, markerSize).png().toBuffer();
+  return sharp(Buffer.from(labelSvg))
+    .composite([{ input: marker, left: mkX, top: mkY }])
+    .png()
+    .toBuffer();
+}
+
+/** ARToolKit .patt encoder (16x16, BGR, 4 rotations). */
 async function encodePatt(innerPng: Buffer): Promise<string> {
   const blocks: string[] = [];
   for (const angle of [0, 90, 180, 270]) {
@@ -265,9 +393,9 @@ async function encodePatt(innerPng: Buffer): Promise<string> {
       .resize(PATT_CELLS, PATT_CELLS, { fit: 'fill' })
       .removeAlpha()
       .raw()
-      .toBuffer(); // RGB, 16*16*3
+      .toBuffer();
     const lines: string[] = [];
-    for (const ch of [2, 1, 0]) { // B, G, R
+    for (const ch of [2, 1, 0]) {
       for (let y = 0; y < PATT_CELLS; y++) {
         const row: string[] = [];
         for (let x = 0; x < PATT_CELLS; x++) {
@@ -281,45 +409,42 @@ async function encodePatt(innerPng: Buffer): Promise<string> {
   return blocks.join('\n\n') + '\n';
 }
 
-/** Letter print sheet: centered marker at 10 cm, crop marks, instructions. */
-async function buildPdf(markerPng: Buffer, name: string, deepLink: string): Promise<Uint8Array> {
-  const CM = 28.3465; // pt per cm
+/** Letter sheet printing the LABEL (real size ~10x14.4 cm) + crop marks. */
+async function buildPdf(labelPng: Buffer, name: string, deepLink: string): Promise<Uint8Array> {
+  const CM = 28.3465;
   const doc = await PDFDocument.create();
-  const page = doc.addPage([612, 792]); // letter
+  const page = doc.addPage([612, 792]);
   const font = await doc.embedFont(StandardFonts.Helvetica);
   const bold = await doc.embedFont(StandardFonts.HelveticaBold);
-  const img = await doc.embedPng(markerPng);
+  const img = await doc.embedPng(labelPng);
 
-  const size = 10 * CM;
-  const x = (612 - size) / 2;
-  const y = 792 - 120 - size;
+  const w = 10 * CM;
+  const h = w * (LABEL_H / LABEL_W);
+  const x = (612 - w) / 2;
+  const y = 792 - 70 - h;
 
-  page.drawText('Marcador RA: ' + name.slice(0, 48), { x: 54, y: 792 - 64, size: 16, font: bold, color: rgb(0.1, 0.1, 0.1) });
-  page.drawImage(img, { x, y, width: size, height: size });
+  page.drawText('Etiqueta RA: ' + name.slice(0, 48), { x: 54, y: 792 - 46, size: 14, font: bold, color: rgb(0.1, 0.1, 0.1) });
+  page.drawImage(img, { x, y, width: w, height: h });
 
-  // Crop marks (outside each corner).
-  const m = 14, g = 4, w = 0.8;
+  const m = 14, g = 4, lw = 0.8;
   const mark = (cx: number, cy: number, dx: number, dy: number) => {
-    page.drawLine({ start: { x: cx + dx * g, y: cy }, end: { x: cx + dx * (g + m), y: cy }, thickness: w, color: rgb(0, 0, 0) });
-    page.drawLine({ start: { x: cx, y: cy + dy * g }, end: { x: cx, y: cy + dy * (g + m) }, thickness: w, color: rgb(0, 0, 0) });
+    page.drawLine({ start: { x: cx + dx * g, y: cy }, end: { x: cx + dx * (g + m), y: cy }, thickness: lw, color: rgb(0, 0, 0) });
+    page.drawLine({ start: { x: cx, y: cy + dy * g }, end: { x: cx, y: cy + dy * (g + m) }, thickness: lw, color: rgb(0, 0, 0) });
   };
-  mark(x, y + size, -1, 1); mark(x + size, y + size, 1, 1);
-  mark(x, y, -1, -1); mark(x + size, y, 1, -1);
+  mark(x, y + h, -1, 1); mark(x + w, y + h, 1, 1);
+  mark(x, y, -1, -1); mark(x + w, y, 1, -1);
 
   const lines = [
-    'Instrucciones:',
-    '1. Imprime esta hoja al 100% (sin ajustar a pagina) en papel MATE.',
-    '2. Recorta por las guias de las esquinas (el borde oscuro debe quedar completo).',
-    '3. Pega el marcador plano, bien iluminado y sin reflejos.',
-    '4. El visitante escanea el QR, inicia sesion y vuelve a apuntar al marcador.',
-    '',
-    'Enlace del contenido: ' + deepLink,
+    'Instrucciones: imprime al 100% en papel MATE, recorta por las guias,',
+    'pega la etiqueta plana y bien iluminada. El visitante escanea el QR,',
+    'inicia sesion y vuelve a apuntar al marcador cuadrado inferior.',
+    'Enlace: ' + deepLink,
     'Si regeneras el kit, reimprime: el patron anterior deja de reconocerse.',
   ];
-  let ty = y - 44;
+  let ty = y - 30;
   for (const ln of lines) {
-    page.drawText(ln, { x: 54, y: ty, size: 10.5, font, color: rgb(0.15, 0.15, 0.15) });
-    ty -= 16;
+    page.drawText(ln, { x: 54, y: ty, size: 9.5, font, color: rgb(0.15, 0.15, 0.15) });
+    ty -= 14;
   }
   return doc.save();
 }
