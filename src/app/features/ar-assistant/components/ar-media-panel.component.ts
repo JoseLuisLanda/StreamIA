@@ -28,7 +28,7 @@ export interface MediaPanelItem {
       <p class="empty" *ngIf="!items.length">Sin contenido en este punto. Acercate a un ancla o apunta a un marcador.</p>
 
       <div class="items">
-        <button class="item" *ngFor="let it of items" [class.sel]="it.selected" (click)="pick.emit(it.asset.id)">
+        <button class="item" *ngFor="let it of items" [class.sel]="it.selected" (click)="tap(it)">
           <span class="thumb">
             <img *ngIf="it.asset.type === 'image'" [src]="it.url" crossorigin="anonymous" alt="" />
             <video *ngIf="it.asset.type === 'video'" [src]="it.url" crossorigin="anonymous" muted playsinline></video>
@@ -46,7 +46,11 @@ export interface MediaPanelItem {
     </div>
   `,
   styles: [`
-    :host { display: block; position: absolute; left: 0; top: 0; bottom: 0; width: min(34vw, 340px); min-width: 250px; }
+    /* pointer-events AUTO here on purpose: the shell's ".panel > *" rule can
+       NOT reach projected content (Angular emulated encapsulation scopes it to
+       the shell's own template), so without this the whole panel is
+       click-dead (inherits none from .panel). */
+    :host { display: block; position: absolute; left: 0; top: 0; bottom: 0; width: min(34vw, 340px); min-width: 250px; pointer-events: auto; }
     .glass { position: absolute; inset: 10px 8px calc(env(safe-area-inset-bottom) + 70px) 8px;
       background: rgba(10,14,20,.55); backdrop-filter: blur(14px); border: 1px solid rgba(255,255,255,.14);
       border-radius: 16px; padding: 46px 12px 12px; display: flex; flex-direction: column; gap: 10px; color: #e6e8ee;
@@ -74,5 +78,10 @@ export class ArMediaPanelComponent {
 
   typeLabel(t: string): string {
     return t === 'model' ? 'Objeto 3D' : t === 'video' ? 'Video' : 'Imagen';
+  }
+
+  tap(it: MediaPanelItem): void {
+    console.info('[media-panel] tap', it.asset.id, it.asset.type);
+    this.pick.emit(it.asset.id);
   }
 }

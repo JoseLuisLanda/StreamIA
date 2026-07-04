@@ -387,7 +387,10 @@ export class ArContentService {
       ownerUid: el.ownerUid,
       ownerEmail: el.ownerEmail ?? '',
       markerType: el.markerType,
-      patternUrl: el.patternUrl ?? null,
+      // patternUrl is server-managed by generateMarkerKit (or set on manual
+      // .patt upload). NEVER null it from a client save: a stale form must not
+      // clobber a freshly generated kit (merge:true leaves omitted keys alone).
+      ...(el.patternUrl ? { patternUrl: el.patternUrl } : {}),
       nftUrl: el.nftUrl ?? null,
       geo: el.geo ?? null,
       assistantId: el.assistantId ?? '',

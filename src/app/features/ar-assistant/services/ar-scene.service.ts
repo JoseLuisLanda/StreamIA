@@ -57,12 +57,26 @@ export class ArSceneService {
   readonly selectedAsset = signal<Record<string, string>>({});
   readonly error = signal('');
   readonly prefetch = signal<{ done: number; total: number } | null>(null);
+  /** Markers actually mounted in marker mode (0 = nothing to detect). */
+  readonly markerCount = signal(0);
 
   private listeners = new Set<(e: ArSceneEvent) => void>();
   private sceneEl: any = null;
   private hostEl: HTMLElement | null = null;
   private prepared = new Map<string, PreparedElement>();
   private scriptsPromise: Promise<void> | null = null;
+  /** OWNED <video> elements per assetId (playback fully controlled by us --
+   *  a-video alone autoplays audio with no selection awareness). */
+  private videoEls = new Map<string, HTMLVideoElement>();
+  private videoOwner = new Map<string, string>(); // assetId -> elementId
+  private assetsEl: HTMLElement | null = null;
+  /** Pending markerLost grace timers per element (flap suppression). */
+  private lostTimers = new Map<string, any>();
+  /** True while the avatar narration (TTS) is speaking: videos play MUTED and
+   *  recover their audio when the narration ends. */
+  private narrationActive = false;
+  /** True after destroy(): late async AR.js init must not resurrect anything. */
+  private tearingDown = false;
 
   /** Vendored builds (public/vendor/ -> served at /vendor/). See README. */
   private static readonly SCRIPTS = [
@@ -174,18 +188,25 @@ export class ArSceneService {
   async buildScene(host: HTMLElement, mode: ArSceneMode, elements: ArElement[]): Promise<void> {
     await this.loadScripts();
     this.destroyScene();
+    this.tearingDown = false;
     this.hostEl = host;
     this.mode.set(mode);
     this.error.set('');
 
     const scene = document.createElement('a-scene');
+    // Owned media assets (videos) live here; timeout=1 so a slow video never
+    // blocks the scene 'loaded' event.
+    const assetsEl = document.createElement('a-assets');
+    assetsEl.setAttribute('timeout', '1');
+    scene.appendChild(assetsEl);
+    this.assetsEl = assetsEl;
     scene.setAttribute('embedded', '');
     scene.setAttribute('vr-mode-ui', 'enabled: false');
     scene.setAttribute('renderer', 'logarithmicDepthBuffer: true; alpha: true');
-    // patternRatio MUST match the generated markers (thin frame default 0.9;
-    // per-element markerTemplate.patternRatio is authoritative). AR.js takes
-    // ONE ratio per scene, so the first pattern element's value wins.
-    const ratio = elements.find((e) => e.markerTemplate?.patternRatio)?.markerTemplate?.patternRatio ?? 0.9;
+    // patternRatio MUST match the generated markers (default 0.8; per-element
+    // markerTemplate.patternRatio is authoritative). AR.js takes ONE ratio per
+    // scene, so the first pattern element's value wins.
+    const ratio = elements.find((e) => e.markerTemplate?.patternRatio)?.markerTemplate?.patternRatio ?? 0.8;
     scene.setAttribute(
       'arjs',
       mode === 'marker'
@@ -194,7 +215,12 @@ export class ArSceneService {
     );
 
     if (mode === 'marker') {
-      for (const el of elements) this.appendMarkerElement(scene, el);
+      let mounted = 0;
+      for (const el of elements) {
+        if (this.appendMarkerElement(scene, el)) mounted++;
+      }
+      this.markerCount.set(mounted);
+      console.info(`[ar-scene] marker scene: ${mounted} marker(s), patternRatio=${ratio}`);
       const cam = document.createElement('a-entity');
       cam.setAttribute('camera', '');
       cam.setAttribute('cursor', 'rayOrigin: mouse');
@@ -235,6 +261,7 @@ export class ArSceneService {
    * we retry for a few seconds.
    */
   private adoptArVideo(attempt = 0): void {
+    if (this.tearingDown) return;
     const host = this.hostEl;
     if (!host) return;
     const video = document.getElementById('arjs-video') as HTMLVideoElement | null;
@@ -244,51 +271,68 @@ export class ArSceneService {
     }
     if (video.parentElement !== host) host.insertBefore(video, host.firstChild);
     this.styleArVideo(video);
-    // AR.js re-styles the video (own margins/size) on every window resize --
-    // re-apply our fullscreen-cover style right after it does.
-    if (!this.videoFixHandler) {
-      this.videoFixHandler = () => {
-        const v = document.getElementById('arjs-video') as HTMLVideoElement | null;
-        if (v) setTimeout(() => this.styleArVideo(v), 120);
-      };
-      window.addEventListener('resize', this.videoFixHandler);
-      window.addEventListener('orientationchange', this.videoFixHandler);
-    }
+    // CRITICAL: do NOT override the video's size/margins/object-fit. AR.js
+    // sizes the camera video AND the 3D canvas as a MATCHED PAIR (cover via
+    // computed size + negative margins); forcing our own cover on the video
+    // alone desynchronizes them and the whole 3D projection renders
+    // horizontally STRETCHED. We only fix stacking here and ask AR.js to
+    // recompute for the current viewport.
+    window.dispatchEvent(new Event('resize'));
     console.info('[ar-scene] arjs-video adopted into the scene host');
   }
 
   private styleArVideo(video: HTMLVideoElement): void {
     video.style.position = 'absolute';
-    video.style.inset = '0';
-    video.style.width = '100%';
-    video.style.height = '100%';
-    video.style.objectFit = 'cover';
     video.style.zIndex = '0';
-    video.style.marginLeft = '0';
-    video.style.marginTop = '0';
     video.setAttribute('playsinline', '');
   }
 
-  private videoFixHandler: (() => void) | null = null;
-
-  /** Marker-mode element: <a-marker type=pattern url=...> + its (hidden) assets. */
-  private appendMarkerElement(scene: HTMLElement, el: ArElement): void {
+  /** Marker-mode element: <a-marker type=pattern url=...> + its (hidden)
+   *  assets. Returns false when the .patt could not be resolved (caller
+   *  surfaces the problem instead of searching forever in silence). */
+  private appendMarkerElement(scene: HTMLElement, el: ArElement): boolean {
     const prep = this.prepared.get(el.id);
     if (!prep?.patternUrlResolved) {
-      console.warn('[ar-scene] element without resolved .patt skipped:', el.id);
-      return;
+      console.warn('[ar-scene] element without resolved .patt skipped:', el.id, el.patternUrl);
+      return false;
     }
+    // Diagnostic: verify the .patt is fetchable + looks like a pattern file.
+    void fetch(prep.patternUrlResolved).then(async (r) => {
+      const head = (await r.text()).slice(0, 60).replace(/\n/g, ' ');
+      console.info(`[ar-scene] .patt ${el.id}: HTTP ${r.status}, head="${head}..."`);
+    }).catch((e) => console.error('[ar-scene] .patt fetch FAILED', el.id, e));
+
     const marker = document.createElement('a-marker');
     marker.setAttribute('type', 'pattern');
     marker.setAttribute('url', prep.patternUrlResolved);
     marker.setAttribute('emitevents', 'true');
+    // Tracking FLAP suppression: raw found/lost fires every frame hiccup
+    // (thin border + camera noise), which would pause videos and flip the UI
+    // constantly. A markerLost only takes effect if the marker is NOT re-found
+    // within LOST_GRACE_MS; a re-found inside the grace window is swallowed.
+    const LOST_GRACE_MS = 800;
     marker.addEventListener('markerFound', () => {
+      const pending = this.lostTimers.get(el.id);
+      if (pending) {
+        clearTimeout(pending);
+        this.lostTimers.delete(el.id);
+        return; // flap: we never announced the loss, so nothing to re-announce
+      }
+      console.info('[ar-scene] markerFound', el.id);
       this.activeElementId.set(el.id);
+      this.syncVideoPlayback(el.id);
       this.emit({ type: 'markerFound', elementId: el.id });
     });
     marker.addEventListener('markerLost', () => {
-      if (this.activeElementId() === el.id) this.activeElementId.set(null);
-      this.emit({ type: 'markerLost', elementId: el.id });
+      if (this.lostTimers.has(el.id)) return;
+      const t = setTimeout(() => {
+        this.lostTimers.delete(el.id);
+        console.info('[ar-scene] markerLost (stable)', el.id);
+        if (this.activeElementId() === el.id) this.activeElementId.set(null);
+        this.syncVideoPlayback(el.id);
+        this.emit({ type: 'markerLost', elementId: el.id });
+      }, LOST_GRACE_MS);
+      this.lostTimers.set(el.id, t);
     });
 
     const selected = this.selectedAsset()[el.id] ?? prep.assets[0]?.asset.id;
@@ -299,6 +343,7 @@ export class ArSceneService {
     }
     if (selected) this.selectedAsset.update((m) => ({ ...m, [el.id]: selected }));
     scene.appendChild(marker);
+    return true;
   }
 
   /** GPS-mode element: each asset floats at the element's coordinates. */
@@ -313,6 +358,7 @@ export class ArSceneService {
       ent.setAttribute('look-at', '[gps-camera]');
       scene.appendChild(ent);
     }
+    this.syncVideoPlayback(el.id);
   }
 
   /** One asset -> A-Frame entity (model/video/image) with animation config. */
@@ -328,25 +374,57 @@ export class ArSceneService {
         ent.setAttribute('animation-mixer', `clip: ${clip}; loop: repeat`);
       }
     } else if (a.type === 'video') {
+      // OWNED video element (in <a-assets>): starts PAUSED + MUTED. Playback
+      // is driven by selection + tracking via syncVideoPlayback(), so a
+      // non-selected video never leaks audio.
+      const vid = document.createElement('video');
+      vid.id = 'arvid_' + a.id;
+      vid.src = pa.url;
+      vid.crossOrigin = 'anonymous';
+      vid.loop = true;
+      vid.muted = true;
+      vid.preload = 'auto';
+      vid.setAttribute('playsinline', '');
+      vid.setAttribute('webkit-playsinline', '');
+      this.assetsEl?.appendChild(vid);
+      this.videoEls.set(a.id, vid);
+      this.videoOwner.set(a.id, el.id);
       ent = document.createElement('a-video');
-      ent.setAttribute('src', pa.url);
-      ent.setAttribute('crossorigin', 'anonymous');
-      ent.setAttribute('autoplay', 'true');
-      ent.setAttribute('loop', 'true');
+      ent.setAttribute('src', '#arvid_' + a.id);
       ent.setAttribute('width', '1.6');
       ent.setAttribute('height', '0.9');
+      // Real aspect ratio once metadata arrives (fixed 16:9 stretches others).
+      const ventRef = ent;
+      vid.addEventListener('loadedmetadata', () => {
+        this.applyPlaneAspect(ventRef, vid.videoWidth, vid.videoHeight, 1.6, a.id);
+      }, { once: true });
+      if (vid.readyState >= 1) this.applyPlaneAspect(ventRef, vid.videoWidth, vid.videoHeight, 1.6, a.id);
     } else {
       ent = document.createElement('a-image');
       ent.setAttribute('src', pa.url);
       ent.setAttribute('crossorigin', 'anonymous');
-      ent.setAttribute('width', '1');
-      ent.setAttribute('height', '1');
+      ent.setAttribute('width', '1.2');
+      ent.setAttribute('height', '1.2');
+      // Real aspect ratio via an off-DOM probe (same URL -> browser cache).
+      const ientRef = ent;
+      const probe = new Image();
+      probe.crossOrigin = 'anonymous';
+      probe.onload = () => this.applyPlaneAspect(ientRef, probe.naturalWidth, probe.naturalHeight, 1.2, a.id);
+      probe.onerror = () => console.warn('[ar-scene] aspect probe failed for image', a.id);
+      probe.src = pa.url;
     }
     const s = typeof a.scale === 'number' && a.scale > 0 ? a.scale : 1;
     ent.setAttribute('scale', `${s} ${s} ${s}`);
     const p = a.position ?? { x: 0, y: 0, z: 0 };
     ent.setAttribute('position', `${p.x} ${p.y} ${p.z}`);
-    if (a.type === 'model') ent.setAttribute('rotation', '-90 0 0'); // AR.js marker plane convention
+    // Marker-space convention: -90 on X lays content flush with the printed
+    // marker; the extra 180 about the plane normal makes it read upright on a
+    // vertically pasted label. NOTE for future debugging: earlier flip
+    // confusion came from comparing builds on DIFFERENT deploys (localhost vs
+    // prod) and from first-generation rotationally-ambiguous patterns. Test
+    // orientation changes on ONE build, with a kit that has the contrast
+    // block printed.
+    ent.setAttribute('rotation', a.type === 'model' ? '90 180 0' : '-90 0 180');
 
     ent.classList.add('ar-asset');
     this.wireTap(ent, el.id, a.id);
@@ -373,30 +451,89 @@ export class ArSceneService {
     return outer;
   }
 
+  /**
+   * Size a plane entity to the media's REAL aspect ratio, capping the LONGEST
+   * side at maxSide (so portrait videos don't tower over the marker). Applied
+   * both as primitive attributes AND as an explicit geometry component --
+   * the latter always updates the mesh at runtime.
+   */
+  private applyPlaneAspect(node: HTMLElement, natW: number, natH: number, maxSide: number, assetId: string): void {
+    if (!natW || !natH) return;
+    const r = natW / natH;
+    const w = r >= 1 ? maxSide : maxSide * r;
+    const h = r >= 1 ? maxSide / r : maxSide;
+    node.setAttribute('width', w.toFixed(3));
+    node.setAttribute('height', h.toFixed(3));
+    node.setAttribute('geometry', `primitive: plane; width: ${w.toFixed(3)}; height: ${h.toFixed(3)}`);
+    console.info(`[ar-scene] aspect ${assetId}: ${natW}x${natH} -> plane ${w.toFixed(2)} x ${h.toFixed(2)}`);
+  }
+
   private wireTap(ent: HTMLElement, elementId: string, assetId: string): void {
     ent.addEventListener('click', () => this.emit({ type: 'assetTap', elementId, assetId }));
   }
 
+  /** Narration (TTS) started/ended -> re-apply the video audio policy. */
+  setNarrationActive(on: boolean): void {
+    if (this.narrationActive === on) return;
+    this.narrationActive = on;
+    for (const elementId of new Set(this.videoOwner.values())) {
+      this.syncVideoPlayback(elementId);
+    }
+  }
+
   /** Marker mode: project ONE asset of the element (media-panel selector). */
   showAsset(elementId: string, assetId: string): void {
+    console.info('[ar-scene] showAsset', elementId, '->', assetId);
     this.selectedAsset.update((m) => ({ ...m, [elementId]: assetId }));
-    if (!this.sceneEl) return;
-    this.sceneEl
-      .querySelectorAll(`[data-element-id="${elementId}"]`)
-      .forEach((node: any) => {
-        node.setAttribute('visible', node.dataset['assetId'] === assetId ? 'true' : 'false');
-      });
+    if (this.sceneEl) {
+      this.sceneEl
+        .querySelectorAll(`[data-element-id="${elementId}"]`)
+        .forEach((node: any) => {
+          node.setAttribute('visible', node.dataset['assetId'] === assetId ? 'true' : 'false');
+        });
+    }
+    this.syncVideoPlayback(elementId);
+  }
+
+  /**
+   * Video playback policy: a video plays (with sound; muted fallback if the
+   * browser blocks it) ONLY while it is the SELECTED asset of a TRACKED
+   * element (marker in sight) or of a gps element. Everything else pauses.
+   */
+  private syncVideoPlayback(elementId: string): void {
+    const selected = this.selectedAsset()[elementId];
+    const tracking = this.mode() === 'gps' || this.activeElementId() === elementId;
+    for (const [assetId, owner] of this.videoOwner) {
+      if (owner !== elementId) continue;
+      const vid = this.videoEls.get(assetId);
+      if (!vid) continue;
+      if (this.mode() === 'gps') {
+        // GPS mode shows every asset at its anchor: videos loop MUTED
+        // (ambient); sound belongs to explicit interactions (FASE 4).
+        vid.muted = true;
+        vid.play().catch(() => {});
+        continue;
+      }
+      if (tracking && selected === assetId) {
+        // AUDIO POLICY: while the avatar narrates, the video runs MUTED and
+        // recovers sound when the narration ends (setNarrationActive). An
+        // explicit user selection stops the narration first (page side).
+        vid.muted = this.narrationActive;
+        vid.play().catch(() => {
+          vid.muted = true; // autoplay-with-sound blocked -> at least show it
+          vid.play().catch(() => {});
+        });
+      } else {
+        vid.pause();
+        vid.muted = true;
+      }
+    }
   }
 
   // ------------------------------------------------------------------ cleanup
 
   /** Remove the scene and stop the webcam AR.js opened. */
   destroyScene(): void {
-    if (this.videoFixHandler) {
-      window.removeEventListener('resize', this.videoFixHandler);
-      window.removeEventListener('orientationchange', this.videoFixHandler);
-      this.videoFixHandler = null;
-    }
     if (this.sceneEl) {
       try {
         const video: HTMLVideoElement | null = document.querySelector('#arjs-video');
@@ -407,6 +544,14 @@ export class ArSceneService {
       try { this.sceneEl.parentNode?.removeChild(this.sceneEl); } catch { /* detached */ }
       this.sceneEl = null;
     }
+    for (const t of this.lostTimers.values()) clearTimeout(t);
+    this.lostTimers.clear();
+    for (const vid of this.videoEls.values()) {
+      try { vid.pause(); vid.removeAttribute('src'); vid.load(); } catch { /* released */ }
+    }
+    this.videoEls.clear();
+    this.videoOwner.clear();
+    this.assetsEl = null;
     this.hostEl = null;
     this.sceneReady.set(false);
     this.activeElementId.set(null);
@@ -414,9 +559,29 @@ export class ArSceneService {
 
   /** Full teardown on route exit (prepared cache kept per session). */
   destroy(): void {
+    this.tearingDown = true;
     this.destroyScene();
     this.listeners.clear();
     this.mode.set(null);
     this.prefetch.set(null);
+    // CAMERA WATCHDOG: if the route is left while AR.js is still initializing
+    // (e.g. browser BACK during load), AR.js opens the webcam AFTER this
+    // teardown and the stream leaks -- the camera stays busy and the next
+    // visit fails with "Timeout starting video source". Sweep for a few
+    // seconds and kill any late-created #arjs-video.
+    let tries = 0;
+    const sweep = () => {
+      if (!this.tearingDown) return; // a new scene took over
+      const v = document.getElementById('arjs-video') as HTMLVideoElement | null;
+      if (v) {
+        try {
+          (v.srcObject as MediaStream | null)?.getTracks().forEach((t) => t.stop());
+          v.remove();
+          console.info('[ar-scene] watchdog: late camera stream stopped');
+        } catch { /* best effort */ }
+      }
+      if (++tries < 16) setTimeout(sweep, 500);
+    };
+    sweep();
   }
 }

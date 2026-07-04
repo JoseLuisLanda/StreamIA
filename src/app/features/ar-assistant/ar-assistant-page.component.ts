@@ -1,4 +1,4 @@
-import { Component, OnDestroy, OnInit, computed, inject, signal } from '@angular/core';
+import { Component, OnDestroy, OnInit, computed, effect, inject, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
 import { ArSceneService, ArSceneMode } from './services/ar-scene.service';
@@ -64,6 +64,7 @@ import { AssistantConfig } from '../../lib/rag/rag.models';
           <svg viewBox="0 0 24 24" width="34" height="34" fill="none" stroke="currentColor" stroke-width="1.4"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><path d="M14 14h3v3h-3z M20 14v0 M14 20h0 M20 20v0"/></svg>
           <b>Contenido listo</b>
           <p>Apunta la camara a la imagen del marcador para ver "{{ element()?.name }}".</p>
+          <p class="tip" *ngIf="slowTip()">Tips: acerca la camara (el marcador debe ocupar buena parte de la pantalla), evita reflejos y sombras, y manten el impreso plano. Si regeneraste el kit, usa el impreso NUEVO.</p>
         </div>
       </div>
 
@@ -119,6 +120,7 @@ import { AssistantConfig } from '../../lib/rag/rag.models';
       border-radius: 16px; padding: 16px 20px; max-width: 320px; color: #e6e8ee; }
     .pointcard b { font-size: 15px; }
     .pointcard p { font-size: 12.5px; color: #b8bfcc; line-height: 1.5; }
+    .pointcard .tip { color: #f0c674; }
     .pointcard svg { color: #8b5cf6; }
   `],
 })
@@ -139,6 +141,8 @@ export class ArAssistantPageComponent implements OnInit, OnDestroy {
   readonly avatarUrl = signal('');
   readonly subtitle = signal('');
   readonly chips = signal<string[]>([]);
+  /** Shown when the marker has not been detected after a while. */
+  readonly slowTip = signal(false);
 
   /** Element whose media the left panel shows: marker deep link > tracked > map focus. */
   readonly focusedElementId = signal<string | null>(null);
@@ -146,6 +150,15 @@ export class ArAssistantPageComponent implements OnInit, OnDestroy {
   private offScene: (() => void) | null = null;
   private wakeLock: any = null;
   private narratedOnce = new Set<string>();
+
+  constructor() {
+    // AUDIO POLICY bridge: while the avatar narrates, videos run muted (they
+    // recover sound when the narration ends). See ArSceneService.
+    effect(() => {
+      const s = this.tts.state();
+      this.scene.setNarrationActive(s === 'speaking' || s === 'synthesizing');
+    });
+  }
 
   readonly stateLabel = computed(() =>
     this.scene.activeElementId() ? 'Contenido detectado' : (this.phase() === 'point' ? 'Buscando marcador' : 'Explorando'),
@@ -216,9 +229,16 @@ export class ArAssistantPageComponent implements OnInit, OnDestroy {
 
     const host = document.getElementById('ar-scene-host')!;
     await this.scene.buildScene(host, 'marker' as ArSceneMode, [el]);
+    if (this.scene.markerCount() === 0) {
+      throw new Error('El marcador (.patt) de este elemento no se pudo cargar. Regenera el kit en el gestor de contenido.');
+    }
     // Also surface published GPS elements on the map panel for context.
     this.gpsElements.set((await this.content.listPublished()).filter((e) => e.markerType === 'gps' && !!e.geo));
     this.phase.set('point');
+    // Slow-detection tip after 15s without a markerFound.
+    setTimeout(() => {
+      if (this.phase() === 'point') this.slowTip.set(true);
+    }, 15000);
   }
 
   private async initGpsMode(assistantParam: string | null): Promise<void> {
@@ -273,31 +293,53 @@ export class ArAssistantPageComponent implements OnInit, OnDestroy {
 
   onPickAsset(assetId: string): void {
     const id = this.currentFocus();
-    if (id) this.scene.showAsset(id, assetId);
+    if (!id) return;
+    // USER ACTION WINS: explicitly selecting a video silences the narrator
+    // so the two audios never overlap.
+    const picked = this.scene.preparedFor(id).find((pa) => pa.asset.id === assetId);
+    if (picked?.asset.type === 'video') this.tts.stop();
+    this.scene.showAsset(id, assetId);
   }
 
   onMapFocus(elementId: string): void {
     this.focusedElementId.set(elementId);
   }
 
-  /** Explicit getUserMedia probe: surfaces the permission prompt + readable
-   *  errors (denied / no HTTPS / no camera) before AR.js takes over. */
+  /**
+   * getUserMedia probe: surfaces the permission prompt + readable errors
+   * BEFORE AR.js takes over. TOLERANT by design:
+   *  - tries facingMode environment (ideal) first, then plain video:true --
+   *    on desktops a hard environment request can select a wedged VIRTUAL
+   *    camera (OBS etc.) and die with "Timeout starting video source";
+   *  - only DENIED / NO CAMERA are fatal. Start timeouts just warn and let
+   *    AR.js attempt its own open (its default constraints worked before).
+   */
   private async preflightCamera(): Promise<void> {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error('Este navegador no soporta camara (se requiere HTTPS o localhost).');
     }
-    try {
-      const stream = await navigator.mediaDevices.getUserMedia({
-        video: { facingMode: 'environment' },
-        audio: false,
-      });
-      stream.getTracks().forEach((t) => t.stop());
-    } catch (e: any) {
-      const name = e?.name ?? '';
-      if (name === 'NotAllowedError') throw new Error('Permiso de camara denegado. Habilitalo para este sitio y recarga.');
-      if (name === 'NotFoundError') throw new Error('No se encontro una camara en este dispositivo.');
-      throw new Error('No se pudo acceder a la camara: ' + (e?.message ?? name));
+    const attempts: MediaStreamConstraints[] = [
+      { video: { facingMode: { ideal: 'environment' } }, audio: false },
+      { video: true, audio: false },
+    ];
+    let lastErr: any = null;
+    for (const constraints of attempts) {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        stream.getTracks().forEach((t) => t.stop());
+        return;
+      } catch (e: any) {
+        lastErr = e;
+        if (e?.name === 'NotAllowedError') {
+          throw new Error('Permiso de camara denegado. Habilitalo para este sitio y recarga.');
+        }
+      }
     }
+    if (lastErr?.name === 'NotFoundError') {
+      throw new Error('No se encontro una camara en este dispositivo.');
+    }
+    // AbortError / start timeout / virtual-camera weirdness: not fatal.
+    console.warn('[ar-assistant] preflight de camara fallo; AR.js intentara abrirla igualmente. Si la imagen no aparece: cierra otras apps/pestanas que usen la camara.', lastErr);
   }
 
   private async requestWakeLock(): Promise<void> {

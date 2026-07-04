@@ -163,11 +163,16 @@ export const generateMarkerKit = onCall<GenerateReq, Promise<GenerateRes>>(
       markerImageUrl: paths.markerPath,
       labelImageUrl: paths.labelPath,
       markerPdfUrl: paths.pdfPath,
+      // patternUrl is set for EVERY element type: the QR deep-link flow opens
+      // the viewer in MARKER mode regardless of the element's own anchor
+      // (a GPS element can still be experienced through its printed label).
+      // Harmless for gps mode (ignored there); publishBlockers only demands
+      // it for markerType 'pattern'.
+      patternUrl: paths.patternPath,
       markerTemplate: tpl,
       markerKitGeneratedAt: FieldValue.serverTimestamp(),
       updatedAt: FieldValue.serverTimestamp(),
     };
-    if (el['markerType'] === 'pattern') patch['patternUrl'] = paths.patternPath;
     await ref.set(patch, { merge: true });
 
     logger.info('[markerKit] generated', { elementId, by: uid, deepLink, logo: !!logoPng });
@@ -222,10 +227,14 @@ function mergeTemplate(id: string, name: string, fromDoc?: MarkerTemplate, fromR
   t.cornerText = String(t.cornerText).slice(0, 4);
   t.logoPath = String(t.logoPath ?? '');
   // patternRatio: the DOC value is IGNORED on purpose (old docs persisted the
-  // legacy thick-frame 0.72 and would override the new thin-frame default
-  // forever). Only an explicit REQUEST value wins; otherwise 0.9.
+  // legacy thick-frame 0.72 and would override the new default forever). Only
+  // an explicit REQUEST value wins; otherwise 0.8.
+  // WHY 0.8 (not 0.9): ARToolKit finds the marker by its dark frame; below
+  // ~10% border per side (ratio > ~0.8-0.85) detection becomes unreliable at
+  // normal print sizes/distances. 0.8 keeps the frame visually thin while
+  // still detectable; raise per-request at your own risk.
   const rReq = Number(fromReq?.patternRatio);
-  t.patternRatio = Number.isFinite(rReq) && rReq >= 0.5 && rReq <= 0.95 ? rReq : 0.9;
+  t.patternRatio = Number.isFinite(rReq) && rReq >= 0.5 && rReq <= 0.9 ? rReq : 0.8;
   return t;
 }
 
@@ -284,13 +293,16 @@ function buildInnerSvg(t: Required<MarkerTemplate>, qrPng: Buffer): string {
   return (
     `<svg xmlns="http://www.w3.org/2000/svg" width="${S}" height="${S}" viewBox="0 0 ${S} ${S}">` +
     `<rect width="${S}" height="${S}" fill="${t.innerBackground}"/>` +
+    // solid dark corner block: keeps the 16x16 downsampled pattern signature
+    // HIGH-CONTRAST and asymmetric (QR alone blurs to flat gray at 16x16,
+    // which weakens ARToolKit template matching)
+    `<rect x="40" y="700" width="230" height="230" fill="#111111"/>` +
+    `<rect x="70" y="730" width="80" height="80" fill="${t.innerBackground}"/>` +
     // left column bars
     `<rect x="48" y="60" width="34" height="240" fill="${acc}"/>` +
     `<rect x="104" y="60" width="34" height="150" fill="${RED}"/>` +
     `<rect x="160" y="90" width="34" height="210" fill="${BLUE}"/>` +
-    `<rect x="48" y="700" width="34" height="220" fill="${BLUE}"/>` +
-    `<rect x="104" y="760" width="34" height="160" fill="${acc}"/>` +
-    `<rect x="160" y="820" width="60" height="100" fill="${RED}"/>` +
+    `<rect x="300" y="860" width="120" height="60" fill="${RED}"/>` +
     // top bars between left column and corner text
     `<rect x="300" y="60" width="150" height="34" fill="${RED}"/>` +
     `<rect x="300" y="118" width="90" height="34" fill="${BLUE}"/>` +

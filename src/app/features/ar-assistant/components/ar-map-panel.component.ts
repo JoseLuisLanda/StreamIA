@@ -36,7 +36,9 @@ import { ArElement } from '../../../lib/ar/ar.models';
     </div>
   `,
   styles: [`
-    :host { display: block; position: absolute; right: 0; top: 0; bottom: 0; width: min(34vw, 360px); min-width: 250px; }
+    /* pointer-events AUTO: the shell's ".panel > *" rule cannot style projected
+       content (view encapsulation) -- see ar-media-panel note. */
+    :host { display: block; position: absolute; right: 0; top: 0; bottom: 0; width: min(34vw, 360px); min-width: 250px; pointer-events: auto; }
     .glass { position: absolute; inset: 10px 8px calc(env(safe-area-inset-bottom) + 70px) 8px;
       background: rgba(10,14,20,.45); backdrop-filter: blur(10px); border: 1px solid rgba(255,255,255,.14);
       border-radius: 16px; padding: 46px 8px 8px; display: flex; flex-direction: column; }
