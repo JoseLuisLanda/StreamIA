@@ -82,6 +82,21 @@ export interface ArGeoPoint {
   lng: number;
 }
 
+/**
+ * Customizable art template of the printed marker ("envoltorio"). Merged
+ * server-side (generateMarkerKit callable): defaults <- doc <- request, then
+ * persisted on the doc so regeneration is stable.
+ */
+export interface ArMarkerTemplate {
+  borderColor?: string;      // #rrggbb, default #000000
+  innerBackground?: string;  // default #ffffff
+  accentColor?: string;      // default derived from element id
+  title?: string;            // default element name
+  subtitle?: string;         // default 'Escaneame para ver en RA'
+  brandText?: string;        // default 'AR'
+  patternRatio?: number;     // inner fraction (AR.js patternRatio), default 0.5
+}
+
 /** Firestore document shape for ar_elements/{id}. */
 export interface ArElement {
   id: string;
@@ -94,8 +109,20 @@ export interface ArElement {
   /** Display-only owner email (may go stale; never used for authorization). */
   ownerEmail?: string;
   markerType: ArMarkerType;
-  /** Storage path of the .patt file (markerType 'pattern'). */
+  /** Storage path of the .patt file (markerType 'pattern'). Set automatically
+   *  by the generateMarkerKit callable (or manually for advanced use). */
   patternUrl?: string;
+  /**
+   * Marker kit artifacts -- SERVER-OWNED fields written by the
+   * generateMarkerKit callable (Storage paths under ar-content/{id}/marker/).
+   * Optional: absent until the kit is generated; no schema migration needed.
+   * The client save() never writes them (see ArContentService.toRecord).
+   */
+  qrImageUrl?: string;
+  markerImageUrl?: string;
+  markerPdfUrl?: string;
+  markerKitGeneratedAt?: number;
+  markerTemplate?: ArMarkerTemplate;
   /** NFT descriptor base URL/path (markerType 'nft'). */
   nftUrl?: string;
   /** Anchor coordinates (markerType 'gps'). */
@@ -188,7 +215,7 @@ export function publishBlockers(el: ArElement): string[] {
   const hasCtx = !!(el.narrationContext || '').trim();
   if (!hasNs && !hasCtx) errs.push('Define un namespace RAG o un contexto de narracion');
   if (hasNs && hasCtx) errs.push('Namespace RAG y contexto de narracion son excluyentes');
-  if (el.markerType === 'pattern' && !el.patternUrl) errs.push('Sube el archivo .patt del marcador');
+  if (el.markerType === 'pattern' && !el.patternUrl) errs.push('Genera el kit de marcador (o sube un .patt manualmente)');
   if (el.markerType === 'nft' && !(el.nftUrl || '').trim()) errs.push('Indica la URL/base del descriptor NFT');
   if (el.markerType === 'gps') {
     const g = el.geo;

@@ -11,7 +11,8 @@ import { AuthService } from '../../services/auth.service';
     <div class="login-page">
       <div class="login-card">
         <h1>Iniciar sesión</h1>
-        <p>Accede con correo o Google para usar Live y guardar avatares.</p>
+        <p *ngIf="!arPending()">Accede con correo o Google para usar Live y guardar avatares.</p>
+        <p *ngIf="arPending()" class="ar-note">Hay contenido de Realidad Aumentada esperandote. Inicia sesion para verlo.</p>
 
         <form (ngSubmit)="submitEmailAuth()" class="login-form">
           <input
@@ -51,6 +52,7 @@ import { AuthService } from '../../services/auth.service';
     </div>
   `,
   styles: [`
+    .ar-note { color: #b6e84a; }
     .login-page {
       width: 100vw;
       height: 100vh;
@@ -149,10 +151,15 @@ export class LoginComponent implements OnInit {
   isRegisterMode = signal(false);
   isLoading = signal(false);
   errorMessage = signal('');
+  /** True when the guarded redirect target is the AR viewer (QR deep link):
+   *  explains WHY login is asked before showing the content. */
+  arPending = signal(false);
 
   ngOnInit() {
     const mode = this.route.snapshot.queryParamMap.get('mode');
     this.isRegisterMode.set(mode === 'register');
+    const redirect = this.route.snapshot.queryParamMap.get('redirect') || '';
+    this.arPending.set(redirect.includes('/ar-assistant'));
   }
 
   async submitEmailAuth() {

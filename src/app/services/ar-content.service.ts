@@ -11,7 +11,13 @@ import {
   where,
 } from 'firebase/firestore';
 import { deleteObject, getDownloadURL, listAll, ref, uploadBytesResumable } from 'firebase/storage';
-import { getFirebaseAuth, getFirebaseFirestoreClient, getFirebaseStorageClient } from './firebase-client';
+import { httpsCallable } from 'firebase/functions';
+import {
+  getFirebaseAuth,
+  getFirebaseFirestoreClient,
+  getFirebaseFunctionsClient,
+  getFirebaseStorageClient,
+} from './firebase-client';
 import { ImageOptimizationService } from './image-optimization.service';
 import {
   AR_CONTENT_STORAGE_ROOT,
@@ -21,6 +27,7 @@ import {
   ArAsset,
   ArAssetType,
   ArElement,
+  ArMarkerTemplate,
   migrateArElementData,
   validateAssetMime,
   validateAssetSize,
@@ -97,6 +104,19 @@ export class ArContentService {
     return snap.exists() ? this.mapDoc(id, snap.data()) : null;
   }
 
+  /** PUBLISHED elements only -- the AR viewer's query (enabled == true is the
+   *  branch the security rules allow for any signed-in user). */
+  async listPublished(): Promise<ArElement[]> {
+    this.error.set('');
+    try {
+      const snap = await getDocs(query(this.col(), where('enabled', '==', true)));
+      return this.sortByUpdated(snap.docs.map((d) => this.mapDoc(d.id, d.data())));
+    } catch (e: any) {
+      this.error.set(e?.message ?? String(e));
+      return [];
+    }
+  }
+
   // ------------------------------------------------------------- draft + save
 
   /**
@@ -136,6 +156,24 @@ export class ArContentService {
       { ...this.toRecord(el), updatedAt: serverTimestamp() },
       { merge: true },
     );
+  }
+
+  /**
+   * Generate the marker kit SERVER-SIDE (client-agnostic callable): QR +
+   * printable custom marker + .patt + PDF, stored under
+   * ar-content/{id}/marker/ with the doc patched (patternUrl etc.).
+   * baseUrl defaults to this client's origin -- other frontends pass theirs.
+   * WARNING: regeneration overwrites in place; previously PRINTED markers stop
+   * tracking if the art changes (the UI must confirm).
+   */
+  async generateMarkerKit(
+    elementId: string,
+    template?: ArMarkerTemplate,
+    baseUrl: string = location.origin,
+  ): Promise<{ deepLink: string; qrPath: string; markerPath: string; patternPath: string; pdfPath: string }> {
+    const call = httpsCallable(getFirebaseFunctionsClient(), 'generateMarkerKit');
+    const res = await call({ elementId, baseUrl, template: template ?? null });
+    return res.data as any;
   }
 
   /** Admin-only: reassign ownership. Rules reject this for non-admins. */
@@ -370,6 +408,12 @@ export class ArContentService {
       assistantId: data.assistantId ?? '',
       ragNamespace: data.ragNamespace || undefined,
       narrationContext: data.narrationContext || undefined,
+      // Server-owned marker-kit fields (written by generateMarkerKit).
+      qrImageUrl: data.qrImageUrl || undefined,
+      markerImageUrl: data.markerImageUrl || undefined,
+      markerPdfUrl: data.markerPdfUrl || undefined,
+      markerKitGeneratedAt: this.toMs(data.markerKitGeneratedAt),
+      markerTemplate: data.markerTemplate || undefined,
       assets: Array.isArray(data.assets)
         ? data.assets.map((a: any) => ({
             id: a.id ?? '',

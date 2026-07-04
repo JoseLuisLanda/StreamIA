@@ -7,7 +7,7 @@ import { AssistantConfigService } from '../../services/assistant-config.service'
 import { RagAdminService } from '../../services/rag-admin.service';
 import { AdminService } from '../../services/admin.service';
 import { AuthService } from '../../services/auth.service';
-import { ArElement, ArGeoPoint, ArMarkerType, publishBlockers } from '../../lib/ar/ar.models';
+import { ArElement, ArGeoPoint, ArMarkerTemplate, ArMarkerType, publishBlockers } from '../../lib/ar/ar.models';
 import { AssistantConfig } from '../../lib/rag/rag.models';
 import { RagNamespace } from '../../lib/rag/rag-admin.models';
 import { ArLocationPickerComponent } from './components/location-picker.component';
@@ -185,6 +185,39 @@ import { ArAssetEditorComponent } from './components/asset-editor.component';
               </div>
               <p class="hint">Los assets se guardan al subirlos; el resto de campos, al presionar Guardar.</p>
 
+              <div class="box">
+                <div class="bhead">Kit de marcador (QR + marcador imprimible + .patt + PDF)</div>
+                <p class="hint">Deep link: {{ deepLink() }}</p>
+
+                <label class="fld"><span>Titulo en el marcador</span>
+                  <input type="text" [(ngModel)]="tpl.title" [placeholder]="form!.name || 'Nombre del elemento'" /></label>
+                <label class="fld"><span>Subtitulo</span>
+                  <input type="text" [(ngModel)]="tpl.subtitle" placeholder="Escaneame para ver en RA" /></label>
+                <label class="fld"><span>Texto de marca</span>
+                  <input type="text" [(ngModel)]="tpl.brandText" placeholder="AR" /></label>
+                <div class="colorrow">
+                  <label class="fld"><span>Borde</span><input type="color" [(ngModel)]="tplBorder" /></label>
+                  <label class="fld"><span>Fondo</span><input type="color" [(ngModel)]="tplBg" /></label>
+                  <label class="fld"><span>Acento</span><input type="color" [(ngModel)]="tplAccent" /></label>
+                </div>
+
+                <button class="btn primary sm" (click)="generateKit()" [disabled]="kitBusy()">
+                  {{ kitBusy() ? 'Generando en servidor...' : (form!.markerKitGeneratedAt ? 'REGENERAR kit' : 'Generar kit') }}
+                </button>
+                <p class="hint" *ngIf="form!.markerKitGeneratedAt">Generado: {{ form!.markerKitGeneratedAt | date:'short' }}. Regenerar cambia el patron: los marcadores YA IMPRESOS dejaran de reconocerse.</p>
+
+                <div class="kitprev" *ngIf="qrPreview() || markerPreview()">
+                  <figure *ngIf="qrPreview()"><img [src]="qrPreview()!" alt="QR" /><figcaption>QR</figcaption></figure>
+                  <figure *ngIf="markerPreview()"><img [src]="markerPreview()!" alt="Marcador" /><figcaption>Marcador</figcaption></figure>
+                </div>
+                <div class="actions" *ngIf="form!.markerKitGeneratedAt">
+                  <button class="btn ghost sm" (click)="openArtifact(form!.markerImageUrl)">PNG</button>
+                  <button class="btn ghost sm" (click)="openArtifact(form!.markerPdfUrl)">PDF con guias</button>
+                  <button class="btn ghost sm" (click)="openArtifact(form!.qrImageUrl)">QR</button>
+                  <button class="btn ghost sm" (click)="openArtifact(form!.patternUrl)">.patt</button>
+                </div>
+              </div>
+
               <div class="box" *ngIf="isAdmin()">
                 <div class="bhead">Propietario (admin)</div>
                 <p class="hint">Actual: {{ form!.ownerEmail || form!.ownerUid }}</p>
@@ -242,6 +275,12 @@ import { ArAssetEditorComponent } from './components/asset-editor.component';
     .bhead { font-size: 11px; letter-spacing: 1px; text-transform: uppercase; color: #8b93a3; font-weight: 700; }
     .radio { display: flex; align-items: center; gap: 7px; font-size: 12.5px; color: #cbd0da; cursor: pointer; }
     .patrow { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
+    .colorrow { display: flex; gap: 10px; }
+    .colorrow input[type=color] { width: 52px; height: 34px; padding: 2px; border-radius: 8px; background: rgba(255,255,255,.05); border: 1px solid rgba(255,255,255,.12); cursor: pointer; }
+    .kitprev { display: flex; gap: 12px; }
+    .kitprev figure { margin: 0; display: flex; flex-direction: column; align-items: center; gap: 4px; }
+    .kitprev img { width: 96px; height: 96px; object-fit: contain; background: #fff; border-radius: 10px; border: 1px solid rgba(255,255,255,.15); }
+    .kitprev figcaption { font-size: 10.5px; color: #8b93a3; }
     .hint { font-size: 11px; color: #6b7384; line-height: 1.45; margin: 2px 0; overflow-wrap: anywhere; }
     .err { color: #ff9c9c; font-size: 12.5px; margin: 2px 0; }
     .blockers { border: 1px solid rgba(179,57,57,.4); border-radius: 10px; padding: 8px 10px; }
@@ -274,6 +313,15 @@ export class ArContentManagerComponent implements OnInit {
 
   readonly patUploading = signal(false);
   readonly patProgress = signal<ArUploadProgress | null>(null);
+  readonly kitBusy = signal(false);
+  readonly qrPreview = signal<string | null>(null);
+  readonly markerPreview = signal<string | null>(null);
+
+  /** Marker-template editor state (texts + colors bound to the kit box). */
+  tpl: ArMarkerTemplate = {};
+  tplBorder = '#000000';
+  tplBg = '#ffffff';
+  tplAccent = '#8b5cf6';
 
   form: ArElement | null = null;
   narrationSource: 'namespace' | 'context' = 'namespace';
@@ -363,6 +411,9 @@ export class ArContentManagerComponent implements OnInit {
       this.narrationSource = 'namespace';
       this.reassignUid = '';
       this.reassignEmail = '';
+      this.initTemplateEditor(this.form);
+      this.qrPreview.set(null);
+      this.markerPreview.set(null);
       this.view.set('edit');
     } catch (e: any) {
       this.error.set(e?.message ?? String(e));
@@ -377,6 +428,10 @@ export class ArContentManagerComponent implements OnInit {
     this.narrationSource = el.narrationContext && !el.ragNamespace ? 'context' : 'namespace';
     this.reassignUid = '';
     this.reassignEmail = '';
+    this.initTemplateEditor(el);
+    this.qrPreview.set(null);
+    this.markerPreview.set(null);
+    void this.loadKitPreviews(el);
     this.error.set('');
     this.view.set('edit');
   }
@@ -458,6 +513,74 @@ export class ArContentManagerComponent implements OnInit {
     this.error.set('');
     this.view.set('list');
     await this.reload();
+  }
+
+  /** Viewer deep link for the current element (QR flow, FASE 1). */
+  deepLink(): string {
+    return this.form ? `${location.origin}/ar-assistant?element=${this.form.id}` : '';
+  }
+
+  /**
+   * Generate the marker kit via the SERVER callable (client-agnostic). On
+   * regeneration, confirm: printed markers stop tracking when the art changes.
+   * Afterwards the element is re-read (patternUrl + kit fields are set
+   * server-side) so a later Save cannot clobber them with stale values.
+   */
+  async generateKit(): Promise<void> {
+    if (!this.form) return;
+    if (this.form.markerKitGeneratedAt &&
+        !confirm('Regenerar el kit cambia el patron: los marcadores ya impresos dejaran de reconocerse. Continuar?')) {
+      return;
+    }
+    this.kitBusy.set(true);
+    this.error.set('');
+    try {
+      // Persist pending edits first so the server composes with fresh data.
+      await this.svc.save(this.applyNarrationXor({ ...this.form }));
+      await this.svc.generateMarkerKit(this.form.id, this.currentTemplate());
+      const fresh = await this.svc.getElement(this.form.id);
+      if (fresh) {
+        this.form = { ...fresh, assets: fresh.assets.map((a) => ({ ...a })), geo: fresh.geo ? { ...fresh.geo } : undefined };
+        this.initTemplateEditor(fresh);
+        await this.loadKitPreviews(fresh);
+      }
+      this.freshDraft = false;
+    } catch (e: any) {
+      this.error.set(e?.message ?? String(e));
+    } finally {
+      this.kitBusy.set(false);
+    }
+  }
+
+  /** Open a kit artifact (resolved download URL) in a new tab. */
+  async openArtifact(path?: string): Promise<void> {
+    const url = await this.svc.resolveUrl(path);
+    if (url) window.open(url, '_blank');
+    else this.error.set('No se pudo resolver el archivo.');
+  }
+
+  private currentTemplate(): ArMarkerTemplate {
+    const t: ArMarkerTemplate = {};
+    if ((this.tpl.title ?? '').trim()) t.title = this.tpl.title!.trim();
+    if ((this.tpl.subtitle ?? '').trim()) t.subtitle = this.tpl.subtitle!.trim();
+    if ((this.tpl.brandText ?? '').trim()) t.brandText = this.tpl.brandText!.trim();
+    if (this.tplBorder) t.borderColor = this.tplBorder;
+    if (this.tplBg) t.innerBackground = this.tplBg;
+    if (this.tplAccent) t.accentColor = this.tplAccent;
+    return t;
+  }
+
+  private initTemplateEditor(el: ArElement): void {
+    const t = el.markerTemplate ?? {};
+    this.tpl = { title: t.title ?? '', subtitle: t.subtitle ?? '', brandText: t.brandText ?? '' };
+    this.tplBorder = t.borderColor ?? '#000000';
+    this.tplBg = t.innerBackground ?? '#ffffff';
+    this.tplAccent = t.accentColor ?? '#8b5cf6';
+  }
+
+  private async loadKitPreviews(el: ArElement): Promise<void> {
+    this.qrPreview.set(await this.svc.resolveUrl(el.qrImageUrl));
+    this.markerPreview.set(await this.svc.resolveUrl(el.markerImageUrl));
   }
 
   async reassign(): Promise<void> {

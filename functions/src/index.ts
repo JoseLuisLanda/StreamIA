@@ -32,3 +32,4 @@ export { listNamespaces, createNamespace, deleteNamespace } from './ragNamespace
 export { getPricing, updatePricingRate, projectAssistantCost } from './costing';
 export { migrateDeepseekAliases } from './migrateDeepseek';
 export { allocateQuota, getQuota, resetQuotaPeriod } from './quotaAdmin';
+export { generateMarkerKit } from './markerKit';

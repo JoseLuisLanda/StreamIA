@@ -16,24 +16,35 @@ export const routes: Routes = [
         loadComponent: () => import('./pages/assistants/assistants.component').then(m => m.AssistantsComponent)
     },
     { path: 'home', component: HomeComponent },
-    { path: 'login', component: LoginComponent },
+    { path: 'login', component: LoginComponent, data: { nav: 'hidden' } },
     {
         path: 'profile',
         canActivate: [authGuard],
         loadComponent: () => import('./pages/profile/profile.component').then(m => m.ProfileComponent)
     },
-    { path: 'live', component: LiveComponent, canActivate: [authGuard] },
-    { path: 'ar', component: ArPageComponent, canActivate: [authGuard] },
-    { path: 'ar-viewer', component: ArViewer, canActivate: [authGuard] },
-    { path: 'ar-face-tracking', component: ArFaceTrackingComponent, canActivate: [authGuard] },
+    // Immersive routes: nav 'overlay' = floating menu button, no top bar.
+    { path: 'live', component: LiveComponent, canActivate: [authGuard], data: { nav: 'overlay' } },
+    { path: 'ar', component: ArPageComponent, canActivate: [authGuard], data: { nav: 'overlay' } },
+    { path: 'ar-viewer', component: ArViewer, canActivate: [authGuard], data: { nav: 'overlay' } },
+    { path: 'ar-face-tracking', component: ArFaceTrackingComponent, canActivate: [authGuard], data: { nav: 'overlay' } },
     {
         path: 'text-avatar',
         canActivate: [authGuard],
+        data: { nav: 'overlay' },
         loadComponent: () => import('./pages/text-avatar/text-avatar.component').then(m => m.TextAvatarComponent)
     },
     {
         path: 'gesture-studio',
         loadComponent: () => import('./pages/gesture-studio/gesture-studio.component').then(m => m.GestureStudioComponent)
+    },
+    {
+        // AR viewer (feature /ar-assistant, FASE 1). Deep links:
+        //   ?element={id} = QR/marker flow; ?assistant={id} = assistant override.
+        // authGuard preserves the FULL url (query included) through /login.
+        path: 'ar-assistant',
+        canActivate: [authGuard],
+        data: { nav: 'overlay' },
+        loadComponent: () => import('./features/ar-assistant/ar-assistant-page.component').then(m => m.ArAssistantPageComponent)
     },
     {
         // AR content manager (feature /ar-assistant, FASE 0). authGuard ONLY:
