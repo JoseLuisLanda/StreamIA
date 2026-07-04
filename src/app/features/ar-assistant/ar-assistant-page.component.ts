@@ -2,7 +2,6 @@ import { Component, OnDestroy, OnInit, computed, effect, inject, signal } from '
 import { CommonModule } from '@angular/common';
 import { ActivatedRoute, Router } from '@angular/router';
 import { ArSceneService, ArSceneMode } from './services/ar-scene.service';
-import { ArPanelShellComponent } from './components/ar-panel-shell.component';
 import { ArMediaPanelComponent, MediaPanelItem } from './components/ar-media-panel.component';
 import { ArAvatarPanelComponent } from './components/ar-avatar-panel.component';
 import { ArMapPanelComponent } from './components/ar-map-panel.component';
@@ -34,7 +33,7 @@ import { AssistantConfig } from '../../lib/rag/rag.models';
 @Component({
   selector: 'app-ar-assistant-page',
   standalone: true,
-  imports: [CommonModule, ArPanelShellComponent, ArMediaPanelComponent, ArAvatarPanelComponent, ArMapPanelComponent],
+  imports: [CommonModule, ArMediaPanelComponent, ArAvatarPanelComponent, ArMapPanelComponent],
   template: `
     <div class="stage">
       <!-- Layer 1: AR scene (camera background) -->
@@ -73,22 +72,24 @@ import { AssistantConfig } from '../../lib/rag/rag.models';
         <button class="btn" (click)="exit()">Volver</button>
       </div>
 
-      <!-- Layer 3: panel carousel (media | avatar | map) -->
-      <app-ar-panel-shell *ngIf="phase() === 'live' || phase() === 'point'">
-        <app-ar-media-panel panel-media
+      <!-- Layer 3: overlays (mockup layout v2 -- simultaneous, no carousel):
+           media chips strip on TOP, avatar bar centered at the bottom,
+           mini-map at the right that expands into a popup. -->
+      <ng-container *ngIf="phase() === 'live' || phase() === 'point'">
+        <app-ar-media-panel
           [title]="activeElementName()"
           [items]="mediaItems()"
           (pick)="onPickAsset($event)"></app-ar-media-panel>
 
-        <app-ar-avatar-panel panel-avatar
+        <app-ar-avatar-panel
           [avatarUrl]="avatarUrl()"
           [subtitle]="subtitle()"
           [chips]="chips()"></app-ar-avatar-panel>
 
-        <app-ar-map-panel panel-map
+        <app-ar-map-panel
           [elements]="gpsElements()"
           (elementFocus)="onMapFocus($event)"></app-ar-map-panel>
-      </app-ar-panel-shell>
+      </ng-container>
     </div>
   `,
   styles: [`
@@ -108,7 +109,9 @@ import { AssistantConfig } from '../../lib/rag/rag.models';
     .chip.state.on { border-color: rgba(110,231,183,.6); color: #6ee7b7; }
     .phase { position: absolute; inset: 0; z-index: 50; display: flex; flex-direction: column; align-items: center;
       justify-content: center; gap: 12px; color: #e6e8ee; background: rgba(0,0,0,.55); text-align: center; padding: 24px; }
-    .phase.soft { background: transparent; pointer-events: none; justify-content: flex-start; padding-top: 90px; z-index: 35; }
+    /* soft phase (pointcard): vertically CENTERED so it never overlaps the
+       top media strip nor the bottom avatar bar. */
+    .phase.soft { background: transparent; pointer-events: none; justify-content: center; z-index: 35; }
     .phase p { margin: 0; font-size: 14px; }
     .mini { font-size: 12px; color: #9aa; }
     .err { color: #ff9c9c; max-width: 420px; line-height: 1.5; }

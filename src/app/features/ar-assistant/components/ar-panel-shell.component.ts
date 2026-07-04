@@ -2,6 +2,11 @@ import { Component, computed, signal } from '@angular/core';
 import { CommonModule } from '@angular/common';
 
 /**
+ * UNUSED (layout v2): the viewer moved to the mockup layout (media chips on
+ * top + centered avatar bar + mini-map popup, all simultaneous) and no longer
+ * imports this carousel. Kept only because the sandbox cannot delete files --
+ * safe to remove.
+ *
  * 3-panel carousel over the AR camera (FASE 1 UX spec):
  *   media (left) <- avatar (center, DEFAULT) -> map (right)
  *
