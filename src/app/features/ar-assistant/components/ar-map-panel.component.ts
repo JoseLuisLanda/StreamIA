@@ -13,8 +13,10 @@ import {
   signal,
 } from '@angular/core';
 import { CommonModule } from '@angular/common';
+import { effect } from '@angular/core';
 import { GoogleMapsLoaderService } from '../../../services/google-maps-loader.service';
-import { ArElement } from '../../../lib/ar/ar.models';
+import { ProximityService } from '../../../services/proximity.service';
+import { ArElement, ArGeoPoint } from '../../../lib/ar/ar.models';
 
 /**
  * MINI-MAP (mockup layout v2): small rounded thumbnail anchored at the RIGHT
@@ -71,14 +73,24 @@ export class ArMapPanelComponent implements AfterViewInit, OnChanges, OnDestroy 
 
   @ViewChild('mapHost') mapHost!: ElementRef<HTMLDivElement>;
   readonly loader = inject(GoogleMapsLoaderService);
+  private prox = inject(ProximityService);
   readonly expanded = signal(false);
 
   private map: any = null;
   private userMarker: any = null;
   private pins: any[] = [];
-  private watchId = -1;
   private destroyed = false;
   private lastCenter: { lat: number; lng: number } | null = null;
+
+  constructor() {
+    // SHARED geolocation (proximity.service): the map no longer runs its own
+    // watchPosition (single-watch project rule).
+    this.prox.start();
+    effect(() => {
+      const p = this.prox.userPos();
+      if (p && this.map) this.updateUserMarker(p);
+    });
+  }
 
   async ngAfterViewInit(): Promise<void> {
     try {
@@ -97,7 +109,8 @@ export class ArMapPanelComponent implements AfterViewInit, OnChanges, OnDestroy 
     if (this.loader.mapId) opts.mapId = this.loader.mapId;
     this.map = new g.Map(this.mapHost.nativeElement, opts);
     this.renderPins();
-    this.watchUser();
+    const p = this.prox.userPos();
+    if (p) this.updateUserMarker(p);
   }
 
   ngOnChanges(ch: SimpleChanges): void {
@@ -106,7 +119,7 @@ export class ArMapPanelComponent implements AfterViewInit, OnChanges, OnDestroy 
 
   ngOnDestroy(): void {
     this.destroyed = true;
-    if (this.watchId >= 0) navigator.geolocation?.clearWatch(this.watchId);
+    this.prox.stop();
     this.pins = [];
     this.map = null;
   }
@@ -141,36 +154,28 @@ export class ArMapPanelComponent implements AfterViewInit, OnChanges, OnDestroy 
     }
   }
 
-  /** Own lightweight geolocation watch (FASE 3 swaps in ProximityService). */
-  private watchUser(): void {
-    if (!navigator.geolocation) return;
+  /** Draw/refresh the user dot from the SHARED proximity fix. */
+  private updateUserMarker(p: ArGeoPoint): void {
     const g = this.loader.maps;
-    this.watchId = navigator.geolocation.watchPosition(
-      (pos) => {
-        if (!this.map) return;
-        const p = { lat: pos.coords.latitude, lng: pos.coords.longitude };
-        this.lastCenter = p;
-        if (!this.userMarker) {
-          const dot = document.createElement('div');
-          dot.style.cssText =
-            'width:14px;height:14px;border-radius:50%;background:#4285f4;border:2px solid #fff;box-shadow:0 0 8px rgba(66,133,244,.9)';
-          if (this.loader.mapId && g.marker?.AdvancedMarkerElement) {
-            this.userMarker = new g.marker.AdvancedMarkerElement({ map: this.map, position: p, content: dot });
-          } else {
-            this.userMarker = new g.Marker({
-              map: this.map, position: p,
-              icon: { path: g.SymbolPath.CIRCLE, scale: 7, fillColor: '#4285f4', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2 },
-            });
-          }
-          this.map.setCenter(p);
-        } else if (this.userMarker.setPosition) {
-          this.userMarker.setPosition(p);
-        } else {
-          this.userMarker.position = p;
-        }
-      },
-      () => { /* denied/unavailable -> map still useful with pins */ },
-      { enableHighAccuracy: true, maximumAge: 5000 },
-    );
+    if (!g || !this.map) return;
+    this.lastCenter = p;
+    if (!this.userMarker) {
+      const dot = document.createElement('div');
+      dot.style.cssText =
+        'width:14px;height:14px;border-radius:50%;background:#4285f4;border:2px solid #fff;box-shadow:0 0 8px rgba(66,133,244,.9)';
+      if (this.loader.mapId && g.marker?.AdvancedMarkerElement) {
+        this.userMarker = new g.marker.AdvancedMarkerElement({ map: this.map, position: p, content: dot });
+      } else {
+        this.userMarker = new g.Marker({
+          map: this.map, position: p,
+          icon: { path: g.SymbolPath.CIRCLE, scale: 7, fillColor: '#4285f4', fillOpacity: 1, strokeColor: '#fff', strokeWeight: 2 },
+        });
+      }
+      this.map.setCenter(p);
+    } else if (this.userMarker.setPosition) {
+      this.userMarker.setPosition(p);
+    } else {
+      this.userMarker.position = p;
+    }
   }
 }

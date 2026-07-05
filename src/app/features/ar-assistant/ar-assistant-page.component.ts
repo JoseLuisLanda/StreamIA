@@ -8,7 +8,9 @@ import { ArMapPanelComponent } from './components/ar-map-panel.component';
 import { ArContentService } from '../../services/ar-content.service';
 import { AssistantConfigService } from '../../services/assistant-config.service';
 import { AvatarService } from '../../services/avatar.service';
+import { ProximityService } from '../../services/proximity.service';
 import { TtsLipsyncService, TtsLang } from '../../services/tts-lipsync.service';
+import { environment } from '../../../environments/environment';
 import { ArElement } from '../../lib/ar/ar.models';
 import { AssistantConfig } from '../../lib/rag/rag.models';
 
@@ -89,6 +91,18 @@ import { AssistantConfig } from '../../lib/rag/rag.models';
         <app-ar-map-panel
           [elements]="gpsElements()"
           (elementFocus)="onMapFocus($event)"></app-ar-map-panel>
+
+        <!-- Camera-locked PREVIEW controls -->
+        <div class="previewbar" *ngIf="scene.previewElementId()">
+          <span class="pvname">Vista previa: {{ activeElementName() }}</span>
+          <button class="pvclose" (click)="exitPreview()" title="Salir de vista previa">
+            <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12 M18 6L6 18"/></svg>
+            Salir
+          </button>
+        </div>
+
+        <!-- Transient toast (distance gate etc.) -->
+        <div class="toast" *ngIf="toast()">{{ toast() }}</div>
       </ng-container>
     </div>
   `,
@@ -125,6 +139,15 @@ import { AssistantConfig } from '../../lib/rag/rag.models';
     .pointcard p { font-size: 12.5px; color: #b8bfcc; line-height: 1.5; }
     .pointcard .tip { color: #f0c674; }
     .pointcard svg { color: #8b5cf6; }
+    .previewbar { position: absolute; top: calc(env(safe-area-inset-top) + 62px); left: 50%; transform: translateX(-50%);
+      z-index: 45; display: flex; align-items: center; gap: 12px; padding: 8px 10px 8px 16px; border-radius: 999px;
+      background: rgba(139,92,246,.28); backdrop-filter: blur(12px); border: 1px solid rgba(139,92,246,.6); color: #fff; }
+    .pvname { font-size: 12.5px; font-weight: 600; max-width: 46vw; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .pvclose { display: flex; align-items: center; gap: 6px; padding: 7px 14px; border-radius: 999px; cursor: pointer;
+      background: rgba(10,14,20,.55); border: 1px solid rgba(255,255,255,.3); color: #fff; font-size: 12.5px; }
+    .toast { position: absolute; bottom: calc(env(safe-area-inset-bottom) + 170px); left: 50%; transform: translateX(-50%);
+      z-index: 60; max-width: 84vw; padding: 10px 18px; border-radius: 12px; text-align: center;
+      background: rgba(10,14,20,.85); border: 1px solid rgba(240,198,116,.5); color: #f0c674; font-size: 13px; }
   `],
 })
 export class ArAssistantPageComponent implements OnInit, OnDestroy {
@@ -132,9 +155,11 @@ export class ArAssistantPageComponent implements OnInit, OnDestroy {
   private content = inject(ArContentService);
   private assistants = inject(AssistantConfigService);
   private avatars = inject(AvatarService);
+  readonly proximity = inject(ProximityService);
   private tts = inject(TtsLipsyncService);
   private route = inject(ActivatedRoute);
   private router = inject(Router);
+  private readonly threshold = (environment as any).proximityThresholdMeters ?? 30;
 
   readonly phase = signal<'loading' | 'downloading' | 'point' | 'live' | 'error'>('loading');
   readonly error = signal('');
@@ -146,6 +171,9 @@ export class ArAssistantPageComponent implements OnInit, OnDestroy {
   readonly chips = signal<string[]>([]);
   /** Shown when the marker has not been detected after a while. */
   readonly slowTip = signal(false);
+  /** Transient bottom toast (beacon distance gate, etc.). */
+  readonly toast = signal('');
+  private toastTimer: any = null;
 
   /** Element whose media the left panel shows: marker deep link > tracked > map focus. */
   readonly focusedElementId = signal<string | null>(null);
@@ -183,7 +211,11 @@ export class ArAssistantPageComponent implements OnInit, OnDestroy {
   });
 
   private currentFocus(): string | null {
-    return this.scene.activeElementId() ?? this.focusedElementId() ?? this.element()?.id ?? null;
+    return this.scene.previewElementId()
+      ?? this.scene.activeElementId()
+      ?? this.focusedElementId()
+      ?? this.element()?.id
+      ?? null;
   }
 
   async ngOnInit(): Promise<void> {
@@ -191,6 +223,7 @@ export class ArAssistantPageComponent implements OnInit, OnDestroy {
     const elementId = qp.get('element');
     const assistantParam = qp.get('assistant');
     void this.requestWakeLock();
+    this.proximity.start(); // shared watch (beacon gate + mini-map user dot)
 
     try {
       // Camera PREFLIGHT: trigger the permission prompt explicitly and fail
@@ -217,8 +250,38 @@ export class ArAssistantPageComponent implements OnInit, OnDestroy {
         if (this.scene.mode() === 'marker') this.phase.set('point');
       } else if (ev.type === 'assetTap') {
         this.focusedElementId.set(ev.elementId);
+      } else if (ev.type === 'beaconTap') {
+        this.onBeaconTap(ev.elementId);
       }
     });
+  }
+
+  /** Beacon tap: distance-gated entry into the camera-locked preview. */
+  private onBeaconTap(elementId: string): void {
+    const el = this.gpsElements().find((e) => e.id === elementId);
+    if (!el?.geo) return;
+    const d = this.proximity.distanceTo(el.geo);
+    if (d == null) {
+      this.showToast('Esperando tu ubicacion GPS...');
+      return;
+    }
+    if (d > this.threshold) {
+      this.showToast(`Acercate para ver "${el.name}": estas a ${Math.round(d)} m (limite ${this.threshold} m)`);
+      return;
+    }
+    this.scene.openPreview(elementId);
+    this.focusedElementId.set(elementId);
+    this.smokeNarrate(elementId);
+  }
+
+  exitPreview(): void {
+    this.scene.closePreview();
+  }
+
+  private showToast(msg: string): void {
+    this.toast.set(msg);
+    if (this.toastTimer) clearTimeout(this.toastTimer);
+    this.toastTimer = setTimeout(() => this.toast.set(''), 3500);
   }
 
   private async initMarkerMode(elementId: string, assistantParam: string | null): Promise<void> {
@@ -357,6 +420,8 @@ export class ArAssistantPageComponent implements OnInit, OnDestroy {
 
   ngOnDestroy(): void {
     this.offScene?.();
+    this.proximity.stop();
+    if (this.toastTimer) clearTimeout(this.toastTimer);
     this.tts.stop();
     this.scene.destroy();
     try { this.wakeLock?.release?.(); } catch { /* released */ }

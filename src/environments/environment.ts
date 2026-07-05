@@ -46,5 +46,9 @@ export const environment = {
   googleMapsApiKey: 'AIzaSyCuiVBBR4Mbpf667IdzXR5QqcUq5p0bOH4',
   /** Map ID (dark style) required by AdvancedMarkerElement. Empty = classic
    *  Marker fallback in the location picker. */
-  googleMapsMapId: '2434a899ce8a8790684f7b33 ',
+  googleMapsMapId: '2434a899ce8a8790684f7b33',
+
+  /** GPS mode: max distance (m) at which tapping a beacon opens the content
+   *  preview (FASE 3 reuses it for pin highlighting / announceNearby). */
+  proximityThresholdMeters: 30,
 };

@@ -18,8 +18,10 @@ import { TtsLipsyncService } from '../../../services/tts-lipsync.service';
   imports: [CommonModule, AvatarTtsComponent],
   template: `
     <div class="bottombar">
+      <!-- compact=false = MAIN framing: head + chest close-up (mockup);
+           compact=true would pull back to half body. -->
       <div class="fig" [class.talking]="speaking()">
-        <app-avatar-tts [avatarUrl]="avatarUrl" [compact]="true"></app-avatar-tts>
+        <app-avatar-tts [avatarUrl]="avatarUrl" [compact]="false"></app-avatar-tts>
       </div>
       <div class="bubble" *ngIf="subtitle">
         <p class="sub">

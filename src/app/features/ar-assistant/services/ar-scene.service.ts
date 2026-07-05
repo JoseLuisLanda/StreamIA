@@ -28,7 +28,7 @@ import { ArAsset, ArElement } from '../../../lib/ar/ar.models';
 export type ArSceneMode = 'gps' | 'marker';
 
 export interface ArSceneEvent {
-  type: 'markerFound' | 'markerLost' | 'assetTap';
+  type: 'markerFound' | 'markerLost' | 'assetTap' | 'beaconTap';
   elementId: string;
   assetId?: string;
 }
@@ -59,6 +59,9 @@ export class ArSceneService {
   readonly prefetch = signal<{ done: number; total: number } | null>(null);
   /** Markers actually mounted in marker mode (0 = nothing to detect). */
   readonly markerCount = signal(0);
+  /** GPS mode: element currently open in the camera-locked PREVIEW. */
+  readonly previewElementId = signal<string | null>(null);
+  private previewRig: HTMLElement | null = null;
 
   private listeners = new Set<(e: ArSceneEvent) => void>();
   private sceneEl: any = null;
@@ -346,19 +349,72 @@ export class ArSceneService {
     return true;
   }
 
-  /** GPS-mode element: each asset floats at the element's coordinates. */
+  /**
+   * GPS-mode element: ONE large BEACON at the anchor (never the real content
+   * -- multiple elements/assets would overlap and drift). The content shows
+   * only in the camera-locked PREVIEW after a close-range beacon tap.
+   */
   private appendGpsElement(scene: HTMLElement, el: ArElement): void {
-    const prep = this.prepared.get(el.id);
-    if (!el.geo || !prep) return;
-    const place = `latitude: ${el.geo.lat}; longitude: ${el.geo.lng};`;
-    for (const pa of prep.assets) {
-      const ent = this.buildAssetEntity(el, pa);
-      ent.setAttribute('gps-entity-place', place);
-      // Floating scale boost so distant content is visible while approaching.
-      ent.setAttribute('look-at', '[gps-camera]');
-      scene.appendChild(ent);
-    }
-    this.syncVideoPlayback(el.id);
+    if (!el.geo) return;
+    const beacon = this.buildBeacon(el);
+    beacon.setAttribute('gps-entity-place', `latitude: ${el.geo.lat}; longitude: ${el.geo.lng};`);
+    scene.appendChild(beacon);
+  }
+
+  /** Procedural beacon: big accent-colored gem (spin + bob) over a ground
+   *  ring, with the element name floating above. No external GLB needed. */
+  private buildBeacon(el: ArElement): HTMLElement {
+    const color = el.markerTemplate?.accentColor ?? ArSceneService.accentFor(el.id);
+    const root = document.createElement('a-entity');
+    root.dataset['beaconId'] = el.id;
+
+    const gem = document.createElement('a-octahedron');
+    gem.setAttribute('radius', '0.6');
+    gem.setAttribute('material', `color: ${color}; metalness: 0.3; roughness: 0.35; emissive: ${color}; emissiveIntensity: 0.35`);
+    gem.setAttribute('position', '0 1.6 0');
+    gem.setAttribute('animation__spin', 'property: rotation; to: 0 360 0; loop: true; dur: 6000; easing: linear');
+    gem.setAttribute('animation__bob', 'property: position; from: 0 1.4 0; to: 0 1.9 0; dir: alternate; loop: true; dur: 1800; easing: easeInOutSine');
+    gem.classList.add('ar-asset');
+
+    const ring = document.createElement('a-ring');
+    ring.setAttribute('radius-inner', '0.5');
+    ring.setAttribute('radius-outer', '0.78');
+    ring.setAttribute('rotation', '-90 0 0');
+    ring.setAttribute('position', '0 0.05 0');
+    ring.setAttribute('material', `color: ${color}; opacity: 0.65; transparent: true; side: double`);
+    ring.classList.add('ar-asset');
+
+    const label = document.createElement('a-text');
+    label.setAttribute('value', el.name || '');
+    label.setAttribute('align', 'center');
+    label.setAttribute('position', '0 2.7 0');
+    label.setAttribute('width', '7');
+    label.setAttribute('color', '#ffffff');
+    label.setAttribute('side', 'double');
+
+    const tap = () => this.emit({ type: 'beaconTap', elementId: el.id });
+    gem.addEventListener('click', tap);
+    ring.addEventListener('click', tap);
+
+    root.appendChild(gem);
+    root.appendChild(ring);
+    root.appendChild(label);
+    return root;
+  }
+
+  /** Same deterministic accent the marker kit derives from the element id. */
+  private static accentFor(id: string): string {
+    let h = 0;
+    for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
+    const hue = h % 360;
+    const sn = 0.78, ln = 0.45;
+    const a = sn * Math.min(ln, 1 - ln);
+    const f = (n: number) => {
+      const k = (n + hue / 30) % 12;
+      const c = ln - a * Math.max(-1, Math.min(k - 3, Math.min(9 - k, 1)));
+      return Math.round(255 * c).toString(16).padStart(2, '0');
+    };
+    return `#${f(0)}${f(8)}${f(4)}`;
   }
 
   /** One asset -> A-Frame entity (model/video/image) with animation config. */
@@ -374,21 +430,7 @@ export class ArSceneService {
         ent.setAttribute('animation-mixer', `clip: ${clip}; loop: repeat`);
       }
     } else if (a.type === 'video') {
-      // OWNED video element (in <a-assets>): starts PAUSED + MUTED. Playback
-      // is driven by selection + tracking via syncVideoPlayback(), so a
-      // non-selected video never leaks audio.
-      const vid = document.createElement('video');
-      vid.id = 'arvid_' + a.id;
-      vid.src = pa.url;
-      vid.crossOrigin = 'anonymous';
-      vid.loop = true;
-      vid.muted = true;
-      vid.preload = 'auto';
-      vid.setAttribute('playsinline', '');
-      vid.setAttribute('webkit-playsinline', '');
-      this.assetsEl?.appendChild(vid);
-      this.videoEls.set(a.id, vid);
-      this.videoOwner.set(a.id, el.id);
+      const vid = this.ensureVideoEl(el.id, a.id, pa.url);
       ent = document.createElement('a-video');
       ent.setAttribute('src', '#arvid_' + a.id);
       ent.setAttribute('width', '1.6');
@@ -472,6 +514,112 @@ export class ArSceneService {
     ent.addEventListener('click', () => this.emit({ type: 'assetTap', elementId, assetId }));
   }
 
+  /** OWNED <video> element (in <a-assets>): starts PAUSED + MUTED; playback is
+   *  driven exclusively by syncVideoPlayback. Reused across marker entities
+   *  and preview rigs (one media element per asset). */
+  private ensureVideoEl(elementId: string, assetId: string, url: string): HTMLVideoElement {
+    let vid = this.videoEls.get(assetId);
+    if (vid) return vid;
+    vid = document.createElement('video');
+    vid.id = 'arvid_' + assetId;
+    vid.src = url;
+    vid.crossOrigin = 'anonymous';
+    vid.loop = true;
+    vid.muted = true;
+    vid.preload = 'auto';
+    vid.setAttribute('playsinline', '');
+    vid.setAttribute('webkit-playsinline', '');
+    this.assetsEl?.appendChild(vid);
+    this.videoEls.set(assetId, vid);
+    this.videoOwner.set(assetId, elementId);
+    return vid;
+  }
+
+  // ------------------------------------------------------------- preview mode
+
+  /**
+   * CAMERA-LOCKED PREVIEW (gps mode): mount the element's assets on a rig
+   * ~0.7 m in front of the camera. The rig is a child of the camera entity, so
+   * it stays in front of the user regardless of phone movement or GPS drift,
+   * until closePreview(). One asset visible at a time (media chips switch).
+   */
+  openPreview(elementId: string, assetId?: string): void {
+    if (!this.sceneEl) return;
+    this.closePreview();
+    const prep = this.prepared.get(elementId);
+    if (!prep?.assets.length) return;
+    const cam = this.sceneEl.querySelector('[gps-camera], [camera]');
+    if (!cam) return;
+
+    const rig = document.createElement('a-entity');
+    rig.setAttribute('position', '0 0 -0.7');
+    const selected = assetId ?? this.selectedAsset()[elementId] ?? prep.assets[0].asset.id;
+    for (const pa of prep.assets) {
+      const ent = this.buildPreviewEntity(elementId, pa);
+      ent.setAttribute('visible', pa.asset.id === selected ? 'true' : 'false');
+      rig.appendChild(ent);
+    }
+    cam.appendChild(rig);
+    this.previewRig = rig;
+    this.previewElementId.set(elementId);
+    this.selectedAsset.update((m) => ({ ...m, [elementId]: selected }));
+    this.syncVideoPlayback(elementId);
+    console.info('[ar-scene] preview open', elementId, 'asset', selected);
+  }
+
+  closePreview(): void {
+    if (this.previewRig) {
+      try { this.previewRig.parentNode?.removeChild(this.previewRig); } catch { /* detached */ }
+      this.previewRig = null;
+    }
+    const id = this.previewElementId();
+    this.previewElementId.set(null);
+    if (id) this.syncVideoPlayback(id);
+  }
+
+  /** Camera-space entity for the preview rig (faces the user; no marker
+   *  rotations). Models get a slow showcase turntable. */
+  private buildPreviewEntity(elementId: string, pa: PreparedAsset): HTMLElement {
+    const a = pa.asset;
+    let ent: HTMLElement;
+    if (a.type === 'model') {
+      ent = document.createElement('a-entity');
+      ent.setAttribute('gltf-model', `url(${pa.url})`);
+      const anim = a.animation;
+      if (anim?.autoplay !== false) {
+        ent.setAttribute('animation-mixer', `clip: ${(anim?.clip || '*').trim() || '*'}; loop: repeat`);
+      }
+      ent.setAttribute('scale', '0.25 0.25 0.25');
+      ent.setAttribute('position', '0 -0.22 0');
+      ent.setAttribute('animation__turn', 'property: rotation; to: 0 360 0; loop: true; dur: 9000; easing: linear');
+    } else if (a.type === 'video') {
+      const vid = this.ensureVideoEl(elementId, a.id, pa.url);
+      ent = document.createElement('a-video');
+      ent.setAttribute('src', '#arvid_' + a.id);
+      ent.setAttribute('width', '0.5');
+      ent.setAttribute('height', '0.28');
+      const ref = ent;
+      vid.addEventListener('loadedmetadata', () => {
+        this.applyPlaneAspect(ref, vid.videoWidth, vid.videoHeight, 0.5, a.id);
+      }, { once: true });
+      if (vid.readyState >= 1) this.applyPlaneAspect(ref, vid.videoWidth, vid.videoHeight, 0.5, a.id);
+    } else {
+      ent = document.createElement('a-image');
+      ent.setAttribute('src', pa.url);
+      ent.setAttribute('crossorigin', 'anonymous');
+      ent.setAttribute('width', '0.45');
+      ent.setAttribute('height', '0.45');
+      const ref = ent;
+      const probe = new Image();
+      probe.crossOrigin = 'anonymous';
+      probe.onload = () => this.applyPlaneAspect(ref, probe.naturalWidth, probe.naturalHeight, 0.45, a.id);
+      probe.src = pa.url;
+    }
+    ent.dataset['elementId'] = elementId;
+    ent.dataset['assetId'] = a.id;
+    return ent;
+  }
+
   /** Narration (TTS) started/ended -> re-apply the video audio policy. */
   setNarrationActive(on: boolean): void {
     if (this.narrationActive === on) return;
@@ -502,18 +650,14 @@ export class ArSceneService {
    */
   private syncVideoPlayback(elementId: string): void {
     const selected = this.selectedAsset()[elementId];
-    const tracking = this.mode() === 'gps' || this.activeElementId() === elementId;
+    // Engagement: marker mode = marker in sight; gps mode = preview open.
+    const tracking = this.mode() === 'gps'
+      ? this.previewElementId() === elementId
+      : this.activeElementId() === elementId;
     for (const [assetId, owner] of this.videoOwner) {
       if (owner !== elementId) continue;
       const vid = this.videoEls.get(assetId);
       if (!vid) continue;
-      if (this.mode() === 'gps') {
-        // GPS mode shows every asset at its anchor: videos loop MUTED
-        // (ambient); sound belongs to explicit interactions (FASE 4).
-        vid.muted = true;
-        vid.play().catch(() => {});
-        continue;
-      }
       if (tracking && selected === assetId) {
         // AUDIO POLICY: while the avatar narrates, the video runs MUTED and
         // recovers sound when the narration ends (setNarrationActive). An
@@ -534,6 +678,7 @@ export class ArSceneService {
 
   /** Remove the scene and stop the webcam AR.js opened. */
   destroyScene(): void {
+    this.closePreview();
     if (this.sceneEl) {
       try {
         const video: HTMLVideoElement | null = document.querySelector('#arjs-video');
